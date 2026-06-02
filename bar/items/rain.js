@@ -54,7 +54,7 @@ export default {
   side: "left",
   order: 45,
   interval: 0,
-  defaultEnabled: false,
+  defaultEnabled: true,
   setup(refresh) {
     poll(refresh);
     pollHandle = setInterval(() => poll(refresh), POLL_INTERVAL_S * 1000);

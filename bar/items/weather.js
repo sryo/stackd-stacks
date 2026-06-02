@@ -16,7 +16,7 @@ export default {
   side: "left",
   order: 40,
   interval: 600,
-  defaultEnabled: false,
+  defaultEnabled: true,
   update(refresh) { fetchOnce(refresh); return cached; },
   onClick: "open -a Weather"
 };

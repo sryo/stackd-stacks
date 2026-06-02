@@ -136,12 +136,9 @@ export function start() {
     const next = Object.create(null);
     for (const w of list) next[w.id] = w;
     state.windowsById = next;
-    // Prune the unaddressable/minimized sets of IDs that are gone — keeps
-    // the sets from growing unbounded across long sessions and lets a
-    // re-created window (same app, new CGWindowID) get a fresh tile slot.
-    for (const id of state.unaddressableIds) {
-      if (!next[id]) state.unaddressableIds.delete(id);
-    }
+    // Prune minimizedIds of IDs that are gone — keeps the set from growing
+    // unbounded and lets a re-created window (same app, new CGWindowID)
+    // get a fresh tile slot.
     for (const id of state.minimizedIds) {
       if (!next[id]) state.minimizedIds.delete(id);
     }
@@ -154,10 +151,6 @@ export function start() {
   // detach + reattach the overlay and shove the same id back onto focusHistory.
   sd.windows.focusedChanged.subscribe((w) => {
     if (!w || !w.id) return;
-    // If the newly-focused window had been written off as unaddressable
-    // (Spotify after un-hide, etc.), give it another shot. Focus implies
-    // the user just interacted with it, so the AX tree should now see it.
-    if (state.unaddressableIds.has(+w.id)) state.unaddressableIds.delete(+w.id);
     // Update focusHistory.
     const id = w.id;
     const i = state.focusHistory.indexOf(id);

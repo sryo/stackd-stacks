@@ -25,13 +25,6 @@ export const state = {
   // out of the eligible set and the tile would re-flow to fill its slot,
   // then re-flow back when the occlusion lifted.
   minimizedIds:       new Set(),
-  // Windows present in CGWindowList but unaddressable through AX
-  // (elementFor returns nil — happens with hidden apps, dock-collapsed
-  // Spotify, and Activity Monitor's auxiliary windows). They occupy a
-  // tile slot in the layout pass but never receive the setFrame call,
-  // leaving visible gaps. Populated by the post-setFrame readback in
-  // tiler.js when frame(id) comes back null; cleared on remove.
-  unaddressableIds:   new Set(),
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.
@@ -137,9 +130,6 @@ export function updateWindowOrder() {
       // briefly above, which would drop the visible window from the tile
       // rotation. Explicit bang-driven state survives the flicker.
       if (state.minimizedIds && state.minimizedIds.has(+w.id)) continue;
-      // Drop windows we proved unaddressable via AX in a prior tile pass —
-      // see state.unaddressableIds doc comment.
-      if (state.unaddressableIds && state.unaddressableIds.has(+w.id)) continue;
       const wd = displayForWindow(w);
       if (!wd || wd.displayID !== d.displayID) continue;
       const wspaces = state.windowSpacesCache[w.id] || [];

@@ -57,16 +57,36 @@ async function tileWindowsInternal() {
     }
     const ordered = state.windowOrderBySpace[space] || [];
 
+    // Per-pass eligibility — port of hs.window.visibleWindows() (window.lua:131
+    // and isVisible() at window.lua:255: `not parentApp:isHidden() and not
+    // self:isMinimized()`). Lua re-queries AX state every pass; mirror that.
+    //
+    // The prior cached approach (commit f3c9ca5 unaddressableIds + bang-driven
+    // minimizedIds) had two failure modes:
+    //   1. unaddressableIds was a never-expired denylist — a transient AX miss
+    //      (Spotify dock-collapsed, app slow under load, 100ms AX timeout)
+    //      permanently flagged the window
+    //   2. minimizedIds depended on sd.window.minimized BANGS — but windows
+    //      already minimized at daemon start emit no bang (the synth poll only
+    //      fires on transitions), so they stayed in the tile rotation
+    //
+    // Two AX calls per candidate (frame + isMinimized) is the cost of fresh
+    // truth and matches lua's per-pass model.
     const screenWindows = [];
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w) continue;
-      // Verify still on this display.
       const f = w.frame;
       if (!f) continue;
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const df = d.frame;
       if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) continue;
+      const [live, minimized] = await Promise.all([
+        sd.windows.frame(id).catch(() => null),
+        sd.windows.isMinimized(id).catch(() => false)
+      ]);
+      if (!live) continue;
+      if (minimized) continue;
       screenWindows.push(id);
       state.windowLastScreen[id] = d.displayID;
     }
@@ -102,29 +122,6 @@ async function tileWindowsInternal() {
       // which works reliably across macOS versions.
       for (const t of targets) {
         await sd.windows.setFrame(t.winId, t.frame);
-      }
-      // Detect targets whose AX element doesn't exist — those windows are
-      // in CGWindowList but their owning app's AX tree doesn't expose them
-      // (hidden apps, dock-collapsed Spotify, Activity Monitor menubar
-      // sliver, etc.). setFrame already silently no-op'd on them. Mark
-      // them unaddressable so the next layout pass skips them, then
-      // re-tile to fill the gap they were holding.
-      const newlyUnaddressable = [];
-      try {
-        for (const t of targets) {
-          const lf = await sd.windows.frame(t.winId).catch(() => null);
-          if (!lf) newlyUnaddressable.push(t.winId);
-        }
-      } catch (_) { /* probe-only; tile already applied */ }
-      if (newlyUnaddressable.length) {
-        for (const id of newlyUnaddressable) state.unaddressableIds.add(+id);
-        log(`unaddressable+=${JSON.stringify(newlyUnaddressable)} (re-tile)`);
-        // Re-run the inner pass — the outer wrapper guards re-entrancy
-        // via tilingCount + the snapshot/fullscreen flags. We bypass
-        // the public tileWindows() here so we don't cancel animations
-        // or reset the cooldown timer mid-flight.
-        await tileWindowsInternal();
-        return;
       }
     }
   }

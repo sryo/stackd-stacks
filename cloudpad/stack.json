@@ -15,5 +15,6 @@
   ],
   "hotkeys": [
     { "key": "ctrl+cmd+c", "callback": "copyUrl" }
-  ]
+  ],
+  "handles": ["bar.requestRegister", "cloudpad.copyUrl"]
 }

@@ -16,6 +16,21 @@ const items = ITEMS.slice().sort((a, b) => {
   return a.id.localeCompare(b.id);
 });
 
+// External-stack registrations live in a separate map keyed by id so a
+// re-register from the same plugin replaces (no duplicates). They merge
+// with the static items at relayout time. See bar.register bang handler
+// at the bottom of this file.
+const externalItems = new Map();
+
+function allItems() {
+  const merged = items.concat([...externalItems.values()]);
+  return merged.sort((a, b) => {
+    const oa = a.order ?? 100, ob = b.order ?? 100;
+    if (oa !== ob) return oa - ob;
+    return a.id.localeCompare(b.id);
+  });
+}
+
 function isEnabled(item) {
   const o = state.enabledOverride[item.id];
   if (o !== undefined) return !!o;
@@ -56,7 +71,9 @@ function applyGeometry() {
   $bar.classList.toggle("no-notch", !detectNotched());
 }
 
-function findItem(id) { return items.find((i) => i.id === id); }
+function findItem(id) {
+  return items.find((i) => i.id === id) || externalItems.get(id);
+}
 
 function relayout() {
   for (const z of Object.values(zones)) z.replaceChildren();
@@ -66,7 +83,7 @@ function relayout() {
   // toward the edge they're anchored to, so we render them in reverse order
   // (highest priority outermost) to match Rebar's geometry.
   const buckets = { left: [], "center-left": [], "center-right": [], right: [] };
-  for (const item of items) {
+  for (const item of allItems()) {
     if (!isEnabled(item) || !isVisibleInMode(item, state.mode)) continue;
     if (labelFor(item) === "") continue;
     let side = item.side || "right";
@@ -92,7 +109,7 @@ function relayout() {
 
   // fullscreen-minimal mode hides the bar entirely unless an item opted in
   // with hideInFullscreen=false. The mouse-peek path adds .fs-peek to override.
-  const anyContent = items.some((it) =>
+  const anyContent = allItems().some((it) =>
     isEnabled(it) && isVisibleInMode(it, state.mode) && labelFor(it) !== ""
   );
   $bar.classList.toggle("fs-minimal",
@@ -242,6 +259,60 @@ window.onHotkey_toggleSystemMenubar = async () => {
   }
 };
 
+// ----- plugin registration -----------------------------------------------------
+//
+// Any stack can plug an item into the bar by firing the bar.register bang:
+//
+//   sd.bang('bar.register', {
+//     id:        'cloudpad-url',      // unique key (re-fire to update)
+//     side:      'right',             // left | center-left | center-right | right
+//     order:     50,                  // lower = closer to the screen edge
+//     value:     'https://...',       // initial text
+//     icon:      '☁',                 // optional prefix (matches static items)
+//     bold:      false,               // optional
+//     onClickBang: 'cloudpad.copy'    // bang to fire on click (optional)
+//   });
+//
+// To update the value without re-registering:
+//   sd.bang('bar.update', { id: 'cloudpad-url', value: 'new text' });
+//
+// On bar boot, we fire bar.requestRegister so late-loading plugin stacks
+// re-fire their register call. This makes initial-state convergence
+// order-independent (bar may load before or after the plugins).
+
+window.onBang_bar_register = (detail) => {
+  console.log("[bar] register fired", JSON.stringify(detail));
+  if (!detail || !detail.id) return;
+  const itemSpec = {
+    id:        String(detail.id),
+    side:      detail.side || "right",
+    order:     typeof detail.order === "number" ? detail.order : 100,
+    icon:      detail.icon || "",
+    bold:      !!detail.bold,
+    defaultEnabled: detail.defaultEnabled !== false,
+    onClick:   detail.onClickBang
+      ? () => sd.bang(detail.onClickBang, { id: detail.id })
+      : undefined,
+  };
+  externalItems.set(itemSpec.id, itemSpec);
+  if (detail.value != null) state.values[itemSpec.id] = String(detail.value);
+  relayout();
+};
+
+window.onBang_bar_unregister = (detail) => {
+  if (!detail || !detail.id) return;
+  externalItems.delete(String(detail.id));
+  delete state.values[String(detail.id)];
+  relayout();
+};
+
+window.onBang_bar_update = (detail) => {
+  if (!detail || !detail.id) return;
+  const it = externalItems.get(String(detail.id));
+  if (!it) return; // ignore updates for unregistered items
+  setValue(it, detail.value);
+};
+
 // ----- boot --------------------------------------------------------------------
 
 (async function init() {
@@ -257,4 +328,10 @@ window.onHotkey_toggleSystemMenubar = async () => {
   trackPeek();
 
   relayout();
+
+  // Tell plugin stacks to re-register their items. They may have fired
+  // bar.register before this bar instance booted (load order isn't
+  // guaranteed); this re-collect closes that race. Plugins that listen
+  // to this bang re-emit their bar.register payload.
+  sd.bang('bar.requestRegister', {});
 })();

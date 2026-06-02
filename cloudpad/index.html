@@ -243,7 +243,31 @@
     if (!host) host = "localhost";
     currentUrl = "http://" + host + ":" + PORT + "/";
     urlEl.textContent = currentUrl;
+    publishToBar();
   }
+
+  // Bar plugin — surface the LAN URL in the topbar. Re-fires on bar boot
+  // (bar.requestRegister handler) so order-of-load doesn't matter. Clicking
+  // the bar item copies the URL via the same path as ctrl+cmd+c.
+  function publishToBar() {
+    console.log("[cloudpad] publishToBar called, currentUrl=", currentUrl);
+    if (!currentUrl) return;
+    sd.bang('bar.register', {
+      id:    'cloudpad-url',
+      side:  'right',
+      order: 30,
+      icon:  '☁',
+      value: currentUrl.replace(/^https?:\/\//, ''),  // host:port — no scheme noise
+      onClickBang: 'cloudpad.copyUrl'
+    });
+  }
+  // When the bar (re)boots after us, re-register so it picks us up.
+  // Bridge lowercases bang names: 'bar.requestRegister' → bar_requestregister.
+  window.onBang_bar_requestregister = () => publishToBar();
+  // Click on the bar item routes here. 'cloudpad.copyUrl' → cloudpad_copyurl.
+  window.onBang_cloudpad_copyurl = () => {
+    if (window.onHotkey_copyUrl) window.onHotkey_copyUrl();
+  };
 
   if (!srv) {
     urlEl.textContent = "serve failed (port " + PORT + " in use?)";

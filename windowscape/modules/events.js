@@ -249,12 +249,18 @@ export function start() {
     // overwrites lastMovedId → debounce runs against the WRONG id →
     // user's resize/reorder is silently dropped.
     //
-    // Source of truth = the set the last tile pass actually placed.
-    // If we've never tiled this id on any display, the bang isn't ours.
+    // Accept the bang if either: (a) we've actually tiled this id on some
+    // display (post-first-pass), OR (b) it's a window we WOULD tile —
+    // isAppIncluded + has a frame + lives on a known display. The second
+    // path covers the boot race: after a hot-reload, lastTiledByDisplay
+    // is empty until the first tile pass finishes; a user drag in that
+    // window would otherwise get DRAG-SKIP'd and lost.
+    const w = state.windowsById[+detail.id];
     const wasTiled = Object.values(state.lastTiledByDisplay || {})
       .some(arr => Array.isArray(arr) && arr.includes(+detail.id));
-    if (!wasTiled) {
-      log(`DRAG-SKIP non-tiled id=${detail.id} (${state.windowsById[detail.id]?.app?.slice(0,12)})`);
+    const eligible = w && w.frame && isAppIncluded(w) && displayForWindow(w);
+    if (!wasTiled && !eligible) {
+      log(`DRAG-SKIP non-tiled id=${detail.id} (${w?.app?.slice(0,12)}) lastTiled=${JSON.stringify(state.lastTiledByDisplay)}`);
       return;
     }
     const app = state.windowsById[detail.id]?.app?.slice(0, 12);

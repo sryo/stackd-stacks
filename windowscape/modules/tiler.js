@@ -103,6 +103,29 @@ async function tileWindowsInternal() {
       for (const t of targets) {
         await sd.windows.setFrame(t.winId, t.frame);
       }
+      // Detect targets whose AX element doesn't exist — those windows are
+      // in CGWindowList but their owning app's AX tree doesn't expose them
+      // (hidden apps, dock-collapsed Spotify, Activity Monitor menubar
+      // sliver, etc.). setFrame already silently no-op'd on them. Mark
+      // them unaddressable so the next layout pass skips them, then
+      // re-tile to fill the gap they were holding.
+      const newlyUnaddressable = [];
+      try {
+        for (const t of targets) {
+          const lf = await sd.windows.frame(t.winId).catch(() => null);
+          if (!lf) newlyUnaddressable.push(t.winId);
+        }
+      } catch (_) { /* probe-only; tile already applied */ }
+      if (newlyUnaddressable.length) {
+        for (const id of newlyUnaddressable) state.unaddressableIds.add(+id);
+        log(`unaddressable+=${JSON.stringify(newlyUnaddressable)} (re-tile)`);
+        // Re-run the inner pass — the outer wrapper guards re-entrancy
+        // via tilingCount + the snapshot/fullscreen flags. We bypass
+        // the public tileWindows() here so we don't cancel animations
+        // or reset the cooldown timer mid-flight.
+        await tileWindowsInternal();
+        return;
+      }
     }
   }
 }

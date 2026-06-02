@@ -4,14 +4,13 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, saveList, updateWindowOrder, log } from "./core.js";
+import { state, saveList, updateWindowOrder, isAppIncluded, log } from "./core.js";
 import {
   grow, shrink, cycleWidth, resetAllWeights, forceRetile,
   moveWindowInOrder, focusAdjacentWindow, moveWindowToAdjacentScreen,
   minimizeFocused
 } from "./operations.js";
 import { tileWindows } from "./tiler.js";
-import { drawOutlineForFocused } from "./outline.js";
 import { toggleSimulatedFullscreen } from "./fullscreen.js";
 import {
   clearAll as snapshotsClearAll,
@@ -36,7 +35,15 @@ async function toggleFocusedWindowInList() {
   await saveList();
   updateWindowOrder();
   await tileWindows();
-  drawOutlineForFocused();
+  // Toggling exclusion flips the inclusion verdict for the focused window;
+  // push the new verdict so overlay-border re-skins immediately. Use
+  // isAppIncluded against the freshly-mutated state.listedApps rather than
+  // inverting the local `listed` variable — the inverse depends on
+  // cfg.exclusionMode and isAppIncluded already encapsulates that.
+  sd.bang('overlay-border.inclusion', {
+    winId: f.id,
+    included: isAppIncluded(state.windowsById[f.id] || f)
+  });
 }
 
 // Simulated fullscreen — expands the focused window to its display's

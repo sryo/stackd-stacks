@@ -8,8 +8,16 @@ import {
   state, log, updateWindowOrder, isAppIncluded, displayForWindow
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
-import { drawOutlineForFocused, hideOutline } from "./outline.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
+
+// Push an inclusion verdict to the overlay-border stack so it can paint the
+// focused window's border in the included vs excluded palette. The bang is
+// user-defined (bare name, no `sd.` prefix); overlay-border caches per-id so
+// re-focus is free.
+function emitInclusionBang(w) {
+  if (!w || !w.id) return;
+  sd.bang('overlay-border.inclusion', { winId: w.id, included: isAppIncluded(w) });
+}
 
 // Spatial drop-position calculator — port of operations.lua calculateDropPosition.
 // Returns the 0-based insertion index for a window dropped at `dropFrame`
@@ -106,7 +114,10 @@ async function handleWindowEvent() {
   log(`event: +${newIds.length} -${removedIds.length}`);
   updateWindowOrder();
   await tileWindows();
-  drawOutlineForFocused();
+  // Refresh the focused window's inclusion verdict — overlay-border owns
+  // the border render now, we just push the policy.
+  const fid = sd.windows.focused.peek()?.id;
+  if (fid != null) emitInclusionBang(state.windowsById[fid]);
 }
 
 export function start() {
@@ -124,7 +135,7 @@ export function start() {
   // don't want — every title-only flicker (Slack, Code, Chrome tabs) would
   // detach + reattach the overlay and shove the same id back onto focusHistory.
   sd.windows.focusedChanged.subscribe((w) => {
-    if (!w || !w.id) { hideOutline(); return; }
+    if (!w || !w.id) return;
     // Update focusHistory.
     const id = w.id;
     const i = state.focusHistory.indexOf(id);
@@ -133,7 +144,10 @@ export function start() {
     if (state.focusHistory.length > state.focusHistoryMax) {
       state.focusHistory.length = state.focusHistoryMax;
     }
-    drawOutlineForFocused();
+    // Push inclusion verdict so overlay-border can paint the right palette.
+    // The overlay attach itself is driven by overlay-border's own
+    // focusedChanged subscription.
+    emitInclusionBang(state.windowsById[id] || w);
   });
 
   sd.spaces.all.subscribe((info) => {

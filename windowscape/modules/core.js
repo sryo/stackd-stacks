@@ -19,7 +19,20 @@ export const state = {
   spacesByDisplay:    {},      // sd.spaces.all snapshot
   windowSpacesCache:  Object.create(null), // winId -> [spaceId,...]
   tilingCount:        0,
-  onLayoutChange:     null
+  onLayoutChange:     null,
+  // Simulated-fullscreen state — see modules/fullscreen.js.
+  // active flips true while one window owns its display's full visibleFrame
+  // and the other windows on the same display are parked off-screen. The
+  // tiler reads .active to bail out (touching frames would un-fullscreen).
+  fullscreenState: {
+    active:        false,
+    windowId:      null,             // id of the fullscreened window
+    displayID:     null,             // display the fullscreen is anchored to
+    savedFrames:   Object.create(null), // winId -> pre-enter frame snapshot
+    savedOrder:    null,             // [winId, ...] for the affected space
+    savedWeights:  null,             // { winId: weight } snapshot
+    spaceId:       null              // space the fullscreen owns
+  }
 };
 
 export function log(msg) {

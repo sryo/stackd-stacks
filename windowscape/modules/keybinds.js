@@ -12,6 +12,7 @@ import {
 } from "./operations.js";
 import { tileWindows } from "./tiler.js";
 import { drawOutlineForFocused } from "./outline.js";
+import { toggleSimulatedFullscreen } from "./fullscreen.js";
 
 async function toggleFocusedWindowInList() {
   const f = sd.windows.focused.peek();
@@ -33,21 +34,10 @@ async function toggleFocusedWindowInList() {
   drawOutlineForFocused();
 }
 
-// Simulated fullscreen — uses AX kAXFullScreen via sd.windows.fullscreen.
-// (Custom hide-others fullscreen from the Lua is stubbed: we just toggle
-// the real fullscreen attribute. FIXME: port simulated fullscreen overlays.)
-let lastFullscreenId = null;
-async function toggleFullscreen() {
-  const f = sd.windows.focused.peek();
-  if (!f || !f.id) return;
-  if (lastFullscreenId === f.id) {
-    await sd.windows.fullscreen(f.id, false);
-    lastFullscreenId = null;
-  } else {
-    await sd.windows.fullscreen(f.id, true);
-    lastFullscreenId = f.id;
-  }
-}
+// Simulated fullscreen — expands the focused window to its display's
+// visibleFrame and parks the other tiles off-screen. Distinct from native
+// kAXFullScreen (which moves the window to its own Space). The implementation
+// lives in modules/fullscreen.js and is toggled by the same hotkey.
 
 function toggleDebug() {
   cfg.debugLogging = !cfg.debugLogging;
@@ -65,7 +55,7 @@ export function bind() {
   window.onHotkey_grow             = grow;
   window.onHotkey_shrink           = shrink;
   window.onHotkey_cycleWidth       = cycleWidth;
-  window.onHotkey_toggleFullscreen = toggleFullscreen;
+  window.onHotkey_toggleFullscreen = toggleSimulatedFullscreen;
   window.onHotkey_forceRetile      = forceRetile;
   window.onHotkey_toggleDebug      = toggleDebug;
   window.onHotkey_focusNext        = () => focusAdjacentWindow("forward");

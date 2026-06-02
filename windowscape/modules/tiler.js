@@ -101,7 +101,16 @@ async function tileWindowsInternal() {
 
 let tilingTimer = null;
 export async function tileWindows() {
-  // Snapshot/fullscreen guards stubbed out (those subsystems are deferred).
+  // Simulated-fullscreen guard — port of tiler.lua's check against
+  // fullscreen.isFullscreenActive. Touching frames while one window owns
+  // its display's full visibleFrame would shove the others back into view
+  // and shrink the fullscreened one. The fullscreen module owns the frame
+  // for this window until exit; tiler stays out.
+  if (state.fullscreenState && state.fullscreenState.active) {
+    log("skip tiling — simulated fullscreen active");
+    return;
+  }
+  // Snapshot guard stubbed out (subsystem deferred).
   // Match lua tiler.lua line 133: cancel any in-flight animations before
   // kicking off a new tile pass so two rapid retiles don't fight each other.
   cancelAllAnimations();

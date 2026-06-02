@@ -9,6 +9,7 @@ import {
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
 import { drawOutlineForFocused, hideOutline } from "./outline.js";
+import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 
 // Spatial drop-position calculator — port of operations.lua calculateDropPosition.
 // Returns the 0-based insertion index for a window dropped at `dropFrame`
@@ -156,7 +157,12 @@ export function start() {
 
   // Lifecycle bangs — invalidate space cache for destroyed windows.
   window.onBang_sd_window_destroyed = (detail) => {
-    if (detail && detail.id) delete state.windowSpacesCache[detail.id];
+    if (detail && detail.id) {
+      delete state.windowSpacesCache[detail.id];
+      // If the destroyed window was the simulated-fullscreen target, exit
+      // so the parked peers come back into view. No-op otherwise.
+      fullscreenOnDestroyed(detail.id);
+    }
     pruneStaleWeights();
   };
   window.onBang_sd_window_created = (detail) => {

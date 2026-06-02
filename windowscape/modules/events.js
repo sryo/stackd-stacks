@@ -240,6 +240,23 @@ export function start() {
   let dragSafetyTimer = null;
   const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
+    // Filter to windows windowscape actually tiles. The synth poll fires
+    // moved/resized bangs for every CGWindowList entry — including AppKit
+    // service windows like CursorUIViewService autocomplete renderers,
+    // tiny popup floats, etc. — that we never tile. Letting those bangs
+    // through sets dragInFlight (blocking real tiles), and worse: if a
+    // service-window bang fires AFTER the user's real drag bang, it
+    // overwrites lastMovedId → debounce runs against the WRONG id →
+    // user's resize/reorder is silently dropped.
+    //
+    // Source of truth = the set the last tile pass actually placed.
+    // If we've never tiled this id on any display, the bang isn't ours.
+    const wasTiled = Object.values(state.lastTiledByDisplay || {})
+      .some(arr => Array.isArray(arr) && arr.includes(+detail.id));
+    if (!wasTiled) {
+      log(`DRAG-SKIP non-tiled id=${detail.id} (${state.windowsById[detail.id]?.app?.slice(0,12)})`);
+      return;
+    }
     const app = state.windowsById[detail.id]?.app?.slice(0, 12);
     const tgt = state.lastTileTarget && state.lastTileTarget[+detail.id];
     if (tgt && tgt.frame && tgt.ts != null && detail.frame) {

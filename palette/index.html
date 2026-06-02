@@ -638,7 +638,11 @@
       items: [],
       focused: 0,
       selectedItem: null,
-      history: []
+      history: [],
+      // App that owned focus at the moment open() ran. Used by the
+      // frontmost-change watcher below to detect "user switched away" and
+      // auto-dismiss — the equivalent of init.lua's click-outside dismissTap.
+      openOwnerApp: null
     };
 
     // ────────────────────────────── render ───────────────────────────────────
@@ -723,6 +727,7 @@
     function render() {
       renderCrumbs();
       $results.innerHTML = "";
+      let focusedRow = null;
       state.items.slice(0, 9).forEach((item, i) => {
         const row = document.createElement("div");
         row.className = "row" + (i === state.focused ? " selected" : "");
@@ -740,7 +745,13 @@
         row.append(num, ic, name, sub, accessory);
         row.addEventListener("click", () => { state.focused = i; activateFocused(); });
         $results.append(row);
+        if (i === state.focused) focusedRow = row;
       });
+      // Mirrors clampScroll() in init.lua — keep the highlighted row inside the
+      // visible viewport so ↑/↓ never strands the selection off-screen when the
+      // results list overflows. `nearest` avoids the jarring center-on-every-keystroke
+      // that `smooth`/`center` would cause.
+      if (focusedRow) focusedRow.scrollIntoView({ block: "nearest" });
       renderFooter();
     }
 
@@ -856,6 +867,16 @@
       const raw = menuItems.concat(apps).concat(installed);
       state.open = true; state.stage = "noun"; state.query = ""; state.raw = raw;
       state.focused = 0; state.history = []; state.selectedItem = null;
+      // Snapshot the owner app BEFORE invoke so the frontmost watcher knows
+      // which app "owns" this palette session. Anything else becoming frontmost
+      // is a switch-away → dismiss. Fall back to a fresh peek() in case the
+      // priorFront subscriber hasn't fired yet (palette opened on launch).
+      let owner = (priorFront && priorFront.name) || null;
+      if (!owner) {
+        const peeked = sd.app.frontmost.peek();
+        if (peeked && peeked.name && peeked.name !== SELF) owner = peeked.name;
+      }
+      state.openOwnerApp = owner;
       $q.value = "";
       await refresh();
       await sd.window.invoke();
@@ -949,6 +970,30 @@
 
     // ───────────────────────────── lifecycle ──────────────────────────────────
     window.onHotkey_open = () => open();
+
+    // Close on focus-loss — equivalent to init.lua's dismissTap closing the
+    // palette when a click lands outside its frame. Stacks have no global
+    // mouse eventtap, so we approximate via the frontmost-app channel: while
+    // the palette is open, any frontmost change to an app other than the one
+    // that owned focus at open-time (and other than stackd itself) means the
+    // user Cmd+Tabbed, clicked another app's window, or otherwise switched
+    // away. The openOwnerApp filter is what prevents an open-time race —
+    // the channel callback is invoked once on subscribe with the *current*
+    // frontmost (sd's signal does fn(value) immediately), and that initial
+    // fire happens before open() ever runs, so state.open is false and we
+    // no-op. Subsequent same-app fires during the palette session
+    // (e.g. AX activated re-notifications) are ignored because a.name still
+    // matches openOwnerApp.
+    sd.app.frontmost.subscribe((a) => {
+      if (!a || !a.name) return;
+      if (a.name === SELF) return;
+      if (!state.open) return;
+      // No baseline owner recorded → don't guess; skip rather than risk
+      // dismissing during the palette's own bring-up.
+      if (!state.openOwnerApp) return;
+      if (a.name === state.openOwnerApp) return;
+      dismiss();
+    });
 
     (async () => {
       await recents.init();

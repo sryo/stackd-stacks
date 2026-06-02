@@ -167,7 +167,11 @@ function tooltipText(corner) {
 function placeTip(corner, x, y) {
   const d = displayForPoint(x, y);
   if (!d) return;
-  const f = d.frame;
+  // Use visibleFrame, not frame — matches HS FrameMaster.lua which calls
+  // hs.screen:frame() (which in HS-land already excludes the menu bar and
+  // dock). Using the full d.frame puts top tooltips at y=0 (behind the
+  // system menu bar), so they're either invisible or clipped.
+  const f = d.visibleFrame || d.frame;
   tip.dataset.corner = corner;
   tip.style.removeProperty("left");
   tip.style.removeProperty("right");

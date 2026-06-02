@@ -12,8 +12,7 @@ import {
   updateLayout as updateSnapshotsLayout,
   onScrollWheelEvent,
   onRightClickEvent,
-  onLeftClickEvent,
-  onMouseMoveEvent
+  onLeftClickEvent
 } from "./snapshots.js";
 
 async function init() {
@@ -29,7 +28,11 @@ async function init() {
   window.onTap_snapshotsScroll     = onScrollWheelEvent;
   window.onTap_snapshotsRightClick = onRightClickEvent;
   window.onTap_snapshotsLeftClick  = onLeftClickEvent;
-  window.onTap_snapshotsMouseMove  = onMouseMoveEvent;
+  // mouseMoved eventtap was firing the hover handler at ~120Hz, blocking
+  // every other stack's sd.mouse / sd.windows.all push. The 30Hz sd.mouse
+  // signal that timetrail / focus / etc. depend on was getting starved.
+  // Dropping the hover-indicator cost (snapshots tiles still work; they
+  // just no longer scale up on cursor-over) buys back the fluidity.
 
   // Wait one tick for signals (windowsAll / displays / spaces) to populate
   // before we restore + tile. The signal subscriptions in startEvents replay

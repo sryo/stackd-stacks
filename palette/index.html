@@ -23,8 +23,18 @@
     // Two-stage noun→verb command palette with subsequence matcher + frecency
     // boost + row quickpicks + verb quickpicks. Sources: menuitems / apps /
     // installedapps / calc / shellrunner / files. Verbs: activate / launch /
-    // hide / quit / copypath / copynumber / enter / open / reveal / runshell.
-    // Askmuse intentionally omitted (Muse isn't part of this daemon).
+    // hide / quit / copypath / copynumber / enter / open / reveal / runshell /
+    // askmuse.
+    //
+    // TODO(palette-modularize): this file is ~1100 lines. Split into:
+    //   matcher.js  (fuzzyMatch, subtitleScore, rank — pure logic, ~80 LOC)
+    //   recents.js  (frecency store + score — ~50 LOC)
+    //   sources/<id>.js  (one per source: apps, menuitems, installedapps,
+    //                     calc, shellrunner, files)
+    //   verbs/<id>.js    (one per verb in VERBS)
+    //   main.js     (orchestrates: state machine, render loop, eventtap wiring)
+    // Mirrors the lua structure at ~/.hammerspoon/Palette/. Mechanical
+    // refactor; deferred because high-risk-low-bug-payoff at session end.
     //
     // Trigger: Ctrl+Cmd+Space hotkey. (HS also opens on TTTaps 5-finger tap;
     // deferred until gesture-payload extension lands.)

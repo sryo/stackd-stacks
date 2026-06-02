@@ -226,21 +226,42 @@ export function start() {
     debouncedHandleWindowEvent();
   };
 
-  // Spatial reorder on window-moved — port-of events.lua handleWindowMoved
-  // line 521+. Without this, dragging a window leftmost doesn't promote it
-  // to order[1] and the next retile snaps it back to its old slot.
+  // Spatial reorder on window-moved — port of events.lua handleWindowMoved.
+  // The daemon fires sd.window.moved for origin changes AND sd.window.resized
+  // for size changes as SEPARATE bangs (Windows.swift:1199+). A pure
+  // right/bottom-edge resize changes size only → only `resized` fires; a
+  // top/left-edge resize changes both. Hammerspoon's window_filter coalesces
+  // these into one `windowMoved`; we have to subscribe to both and dedupe.
+  //
   // Debounced 300ms (matches lua's pendingReposition timer) so the final
-  // event after the drag-drop is what reorders, not every intra-drag tick.
+  // event after a drag-drop wins, not every intra-drag tick.
   let moveDebounceTimer = null;
   let lastMovedId = null;
-  window.onBang_sd_window_moved = (detail) => {
+  const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
+    // Hydrate state.windowsById with the live frame from the bang. The
+    // sd.windows.all channel is throttled (fires on focus/title change only),
+    // so by the time the debounce resolves, state.windowsById[id].frame is
+    // pre-drag — applyResizeIfNeeded's actualSize/actualPos math then compares
+    // pre-drag geometry against expected and returns "no change" → no weight
+    // transfer. Lua reads win:frame() live every pass; we splice the live
+    // frame in here so the rest of the code path stays unchanged.
+    if (detail.frame && state.windowsById[detail.id]) {
+      state.windowsById[detail.id].frame = detail.frame;
+    }
     lastMovedId = detail.id;
     if (moveDebounceTimer) clearTimeout(moveDebounceTimer);
     moveDebounceTimer = setTimeout(async () => {
       moveDebounceTimer = null;
       const movedId = lastMovedId;
       lastMovedId = null;
+      // Belt-and-suspenders live read — the synth poll can lose intermediate
+      // frames if the user drags faster than 4Hz; query AX one more time so
+      // the final values are guaranteed-fresh (mirrors lua's win:frame()).
+      const live = await sd.windows.frame(movedId).catch(() => null);
+      if (live && state.windowsById[movedId]) {
+        state.windowsById[movedId].frame = live;
+      }
       // Lua handleWindowMoved checks size FIRST (lines 456-516): if the
       // drag was a resize (a tile-edge drag), redistribute weight between
       // the window and its adjacent tile and bail before reorder. Only
@@ -250,6 +271,8 @@ export function start() {
       reorderOnDrop(movedId);
     }, 300);
   };
+  window.onBang_sd_window_moved = handleDragEnd;
+  window.onBang_sd_window_resized = handleDragEnd;
 }
 
 // Port of events.lua handleWindowMoved lines 456-516. Detect the case

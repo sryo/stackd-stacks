@@ -181,6 +181,20 @@
       await attachForWin(win.id);
     });
   })();
+
+  // Belt-and-suspenders against orphan panels on hot-reload. Bridge.swift's
+  // scope.drain runs OverlayHandle.detach() async on main, which usually
+  // beats the next stack-load's first attach — but in practice we've seen
+  // multiple stale panels accumulate across many file-watcher reloads.
+  // Firing detach synchronously on pagehide (WKWebView tear-down event)
+  // makes the cleanup happen BEFORE the new WKWebView's first attach.
+  window.addEventListener("pagehide", () => {
+    if (current) {
+      try { current.detach(); } catch (_) {}
+      current = null;
+      currentWid = null;
+    }
+  });
 </script>
 </body>
 </html>

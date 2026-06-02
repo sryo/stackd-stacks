@@ -132,7 +132,13 @@ export async function tileWindows() {
   try {
     await tileWindowsInternal();
   } catch (e) {
-    console.warn("[WindowScape] tile error:", e);
+    const detail = JSON.stringify({
+      message: e?.message,
+      name: e?.name,
+      str: String(e),
+      stack: (e?.stack || "").split("\n").slice(0, 5).join(" | ")
+    });
+    console.warn("[WindowScape] tile error:", detail);
   }
   // Hold tilingCount past the animation duration so the events module's
   // tilingCount > 0 guard suppresses re-entrant tile triggered by the

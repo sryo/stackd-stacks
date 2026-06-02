@@ -25,13 +25,13 @@ export const state = {
   // out of the eligible set and the tile would re-flow to fill its slot,
   // then re-flow back when the occlusion lifted.
   minimizedIds:       new Set(),
-  // { [winId]: {x,y,w,h} } — the frame the tiler last asked setFrame for.
-  // The drag-event handlers in events.js compare detail.frame to this and
-  // bail when they match (tiler echo: the TahoeSynthPoll fires .moved/
-  // .resized ~250ms after CG sees the change — well past tileWindows()'s
-  // 150ms cooldown — so without suppression every tile pass turns into an
-  // infinite retile loop). Frame-match is more precise than a time window:
-  // a user drag changes the frame, so it's never confused with an echo.
+  // { [winId]: { frame: {x,y,w,h}, ts: ms } } — the frame the tiler last
+  // asked setFrame for plus the wall time of the call. Drag handlers
+  // suppress a bang as an echo only when BOTH: (a) within 600ms of the
+  // setFrame, AND (b) frame matches within 5px. Pure time-window suppression
+  // swallows legitimate user drags right after a tile; pure frame-match
+  // (with a tolerance wide enough for app rounding) swallows small drags
+  // whose new frame happens to land near the tile target.
   lastTileTarget:     Object.create(null),
   // { [displayID]: [winId, ...] } — the exact set of window IDs the tiler
   // included in its most recent layout pass for each display. The drag
@@ -41,6 +41,12 @@ export const state = {
   // and totalWeight diverges → false "user resized!" detections that
   // transfer weight to windows the user didn't touch.
   lastTiledByDisplay: Object.create(null),
+  // True while the user is mid-drag — set by handleDragEnd on the first
+  // non-echo bang, cleared after the debounce resolves or after a safety
+  // timeout (~1.5s of no further bangs). tileWindows() bails when set so
+  // focusedChanged / windowsAll / spaces.all subscriptions don't yank the
+  // window out from under the cursor mid-drag.
+  dragInFlight:       false,
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.

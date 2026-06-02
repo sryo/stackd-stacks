@@ -125,12 +125,12 @@ async function tileWindowsInternal() {
       // but POSITION silently drops, leaving tiles half-positioned.
       // The non-batched setFrame in Windows.swift uses AX for both,
       // which works reliably across macOS versions.
+      const now = Date.now();
       for (const t of targets) {
-        // Remember the frame we just asked for so events.js's drag-handler
-        // can identify tiler-echo bangs by exact frame match (vs the brittle
-        // 700ms timer it used before, which suppressed legitimate user drags
-        // that happened right after a focus-change retile).
-        state.lastTileTarget[+t.winId] = { ...t.frame };
+        // Remember the frame + wall time so events.js's drag-handler can
+        // identify tiler-echo bangs via both checks (recent setFrame +
+        // matching frame). See state.lastTileTarget doc comment.
+        state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
         await sd.windows.setFrame(t.winId, t.frame);
       }
     }
@@ -139,6 +139,16 @@ async function tileWindowsInternal() {
 
 let tilingTimer = null;
 export async function tileWindows() {
+  // Drag-in-flight guard — port of the lua's "if win:isDragging" check.
+  // events.js sets state.dragInFlight while a drag is active so unrelated
+  // triggers (focusedChanged, sd.windows.all push, sd.spaces.all push)
+  // don't yank the dragged window out from under the cursor. The drag's
+  // own debounced handler will tile once at drop time; that's the only
+  // tile pass we want during the drag.
+  if (state.dragInFlight) {
+    log("skip tiling — drag in flight");
+    return;
+  }
   // Simulated-fullscreen guard — port of tiler.lua's check against
   // fullscreen.isFullscreenActive. Touching frames while one window owns
   // its display's full visibleFrame would shove the others back into view

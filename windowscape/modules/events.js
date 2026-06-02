@@ -237,23 +237,39 @@ export function start() {
   // event after a drag-drop wins, not every intra-drag tick.
   let moveDebounceTimer = null;
   let lastMovedId = null;
+  let dragSafetyTimer = null;
   const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
     const app = state.windowsById[detail.id]?.app?.slice(0, 12);
     const tgt = state.lastTileTarget && state.lastTileTarget[+detail.id];
-    if (tgt && detail.frame) {
+    if (tgt && tgt.frame && tgt.ts != null && detail.frame) {
       const f = detail.frame;
-      // 20px tolerance covers Terminal-style column rounding (~11px per col),
-      // Finder list-view row rounding, Xcode min-height clamping, and Activity
-      // Monitor's hard ~740px min-width. A user drag changes the frame by far
-      // more than 20px (drags are gestures, not pixel pokes).
-      if (Math.abs(f.x - tgt.x) <= 20 && Math.abs(f.y - tgt.y) <= 20 &&
-          Math.abs(f.w - tgt.w) <= 20 && Math.abs(f.h - tgt.h) <= 20) {
-        log(`DRAG-IGNORED echo id=${detail.id} (${app}) f=${JSON.stringify(detail.frame)} tgt=${JSON.stringify(tgt)}`);
+      const ageMs = Date.now() - tgt.ts;
+      // Echo only if BOTH within 600ms of the setFrame AND frame matches
+      // closely (5px tolerance covers Terminal column rounding without
+      // swallowing legitimate small user drags). Past 600ms the bang
+      // can't be an echo — even worst-case CGS-poll latency is ~300ms.
+      if (ageMs <= 600 &&
+          Math.abs(f.x - tgt.frame.x) <= 5 && Math.abs(f.y - tgt.frame.y) <= 5 &&
+          Math.abs(f.w - tgt.frame.w) <= 5 && Math.abs(f.h - tgt.frame.h) <= 5) {
+        log(`DRAG-IGNORED echo id=${detail.id} (${app}) age=${ageMs}ms f=${JSON.stringify(f)} tgt=${JSON.stringify(tgt.frame)}`);
         return;
       }
     }
     log(`DRAG-ACCEPTED id=${detail.id} (${app}) f=${JSON.stringify(detail.frame)} tgt=${JSON.stringify(tgt || null)}`);
+
+    // Mark drag in flight so unrelated triggers (focusedChanged push,
+    // sd.windows.all push, sd.spaces.all push) don't run tileWindows()
+    // mid-drag and yank the window out from under the cursor. Cleared
+    // after the debounce resolves or by the safety timeout below.
+    state.dragInFlight = true;
+    if (dragSafetyTimer) clearTimeout(dragSafetyTimer);
+    dragSafetyTimer = setTimeout(() => {
+      // Belt: if the debounce never fires (e.g. handler crashed), drop
+      // the gate after 1.5s of silence so tile passes can resume.
+      state.dragInFlight = false;
+      dragSafetyTimer = null;
+    }, 1500);
 
     // Hydrate state.windowsById with the live frame from the bang. The
     // sd.windows.all channel is throttled (fires on focus/title change only),
@@ -282,6 +298,11 @@ export function start() {
       // drag was a resize (a tile-edge drag), redistribute weight between
       // the window and its adjacent tile and bail before reorder. Only
       // pure moves fall through to spatial reorder.
+      // Drop the drag gate BEFORE applyResizeIfNeeded/reorderOnDrop so
+      // their tileWindows() call can actually run (those are the legitimate
+      // post-drop retile). Safety timer is no longer needed.
+      state.dragInFlight = false;
+      if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
       const resized = await applyResizeIfNeeded(movedId);
       log(`DRAG-DEBOUNCED id=${movedId} resize=${resized}`);
       if (resized) return;

@@ -174,13 +174,129 @@ export function start() {
     if (!detail || !detail.id) return;
     lastMovedId = detail.id;
     if (moveDebounceTimer) clearTimeout(moveDebounceTimer);
-    moveDebounceTimer = setTimeout(() => {
+    moveDebounceTimer = setTimeout(async () => {
       moveDebounceTimer = null;
       const movedId = lastMovedId;
       lastMovedId = null;
+      // Lua handleWindowMoved checks size FIRST (lines 456-516): if the
+      // drag was a resize (a tile-edge drag), redistribute weight between
+      // the window and its adjacent tile and bail before reorder. Only
+      // pure moves fall through to spatial reorder.
+      const resized = await applyResizeIfNeeded(movedId);
+      if (resized) return;
       reorderOnDrop(movedId);
     }, 300);
   };
+}
+
+// Port of events.lua handleWindowMoved lines 456-516. Detect the case
+// where a tile-edge drag changed a window's size: compare the actual
+// dimension on the screen's primary axis to the expected dimension from
+// its weight share. If the size diverges by > 20px we treat it as a
+// resize; pick the adjacent tile that gave up the space (left/up neighbor
+// if the window's edge moved, right/down neighbor otherwise), then split
+// the combined weight between the two so the next tile preserves the
+// user's new size ratio.
+async function applyResizeIfNeeded(movedId) {
+  const moved = state.windowsById[movedId];
+  if (!moved || !moved.frame) return false;
+  if (!isAppIncluded(moved)) return false;
+  const d = displayForWindow(moved);
+  if (!d) return false;
+  const space = state.spacesByDisplay[d.uuid]?.active;
+  if (space == null) return false;
+  const order = state.windowOrderBySpace[space] || [];
+
+  // Non-collapsed peers on the same display+space, in current spatial
+  // order. Excluding the moved window's collapsed check pattern matches
+  // the lua's getScreenWindows(..., includeCollapsed=false).
+  const screenWindows = [];
+  for (const id of order) {
+    const w = state.windowsById[id];
+    if (!w || !w.frame) continue;
+    if (w.frame.h <= cfg.collapsedWindowHeight) continue;
+    const wd = displayForWindow(w);
+    if (!wd || wd.displayID !== d.displayID) continue;
+    screenWindows.push(w);
+  }
+  if (screenWindows.length < 2) return false;
+
+  const winIndex = screenWindows.findIndex(w => w.id === movedId);
+  if (winIndex < 0) return false;
+
+  // tileWeighted dispatches by display orientation. Match it: horizontal
+  // displays distribute width, vertical distribute height. Collapsed-row
+  // height is subtracted from availableSpace on vertical displays only
+  // (matches tiler.lua's mainH calculation).
+  const horizontal = d.frame.w > d.frame.h;
+  const screenFrame = { ...d.visibleFrame };
+
+  let totalWeight = 0;
+  for (const w of screenWindows) {
+    totalWeight += (state.windowWeights[w.id] ?? 1.0);
+  }
+  if (totalWeight <= 0) return false;
+
+  const totalGaps = Math.max(screenWindows.length - 1, 0) * cfg.tileGap;
+  let collapsedAreaSize = 0;
+  if (!horizontal) {
+    let numCollapsed = 0;
+    for (const id of order) {
+      const w = state.windowsById[id];
+      if (!w || !w.frame) continue;
+      if (w.frame.h > cfg.collapsedWindowHeight) continue;
+      const wd = displayForWindow(w);
+      if (!wd || wd.displayID !== d.displayID) continue;
+      numCollapsed++;
+    }
+    if (numCollapsed > 0) {
+      collapsedAreaSize = (cfg.collapsedWindowHeight + cfg.tileGap) * numCollapsed - cfg.tileGap;
+    }
+  }
+  const availableSpace = horizontal
+    ? screenFrame.w - totalGaps
+    : screenFrame.h - totalGaps - collapsedAreaSize;
+  if (availableSpace <= 0) return false;
+
+  const myWeight = state.windowWeights[movedId] ?? 1.0;
+  const expectedSize = availableSpace * myWeight / totalWeight;
+  const actualSize = horizontal ? moved.frame.w : moved.frame.h;
+  if (Math.abs(actualSize - expectedSize) <= 20) return false;
+
+  // Position-vs-expected-position: did the window's leading edge move?
+  // If yes, the LEFT/UP neighbor gave up space. If no, the RIGHT/DOWN
+  // neighbor did.
+  let expectedPos = horizontal ? screenFrame.x : screenFrame.y;
+  for (let i = 0; i < winIndex; i++) {
+    const w = screenWindows[i];
+    const wWeight = state.windowWeights[w.id] ?? 1.0;
+    const wSize = Math.floor(availableSpace * wWeight / totalWeight);
+    expectedPos += wSize + cfg.tileGap;
+  }
+  const actualPos = horizontal ? moved.frame.x : moved.frame.y;
+  const positionMoved = Math.abs(actualPos - expectedPos) > 10;
+
+  let adjacent = null;
+  if (positionMoved) {
+    if (winIndex > 0) adjacent = screenWindows[winIndex - 1];
+  } else {
+    if (winIndex < screenWindows.length - 1) adjacent = screenWindows[winIndex + 1];
+  }
+  if (!adjacent) return false;
+
+  const adjWeight = state.windowWeights[adjacent.id] ?? 1.0;
+  const combined = myWeight + adjWeight;
+  // Clamp to [0.2, combined-0.2] so neither side can collapse the other
+  // to nothing in a single resize (the lua uses the same floor).
+  let newWeight = (actualSize / availableSpace) * totalWeight;
+  newWeight = Math.max(0.2, Math.min(newWeight, combined - 0.2));
+  const adjNewWeight = Math.max(0.2, combined - newWeight);
+
+  state.windowWeights[movedId]    = newWeight;
+  state.windowWeights[adjacent.id] = adjNewWeight;
+  if (state.onLayoutChange) state.onLayoutChange();
+  await tileWindows();
+  return true;
 }
 
 async function reorderOnDrop(movedId) {

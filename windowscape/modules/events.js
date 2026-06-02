@@ -143,11 +143,14 @@ export function start() {
     const next = Object.create(null);
     for (const w of list) next[w.id] = w;
     state.windowsById = next;
-    // Prune minimizedIds of IDs that are gone — keeps the set from growing
-    // unbounded and lets a re-created window (same app, new CGWindowID)
-    // get a fresh tile slot.
+    // Prune minimizedIds + fixedSizeIds of IDs that are gone — keeps the
+    // sets bounded and lets a re-created window (same app, new CGWindowID)
+    // get a fresh tile slot AND a fresh fixed-size verdict.
     for (const id of state.minimizedIds) {
       if (!next[id]) state.minimizedIds.delete(id);
+    }
+    for (const id of state.fixedSizeIds) {
+      if (!next[id]) state.fixedSizeIds.delete(id);
     }
   });
 
@@ -356,6 +359,13 @@ async function applyResizeIfNeeded(movedId) {
   const moved = state.windowsById[movedId];
   if (!moved || !moved.frame) return false;
   if (!isAppIncluded(moved)) return false;
+  // Skip fixed-size apps (Calculator, System Settings, etc.). The tiler
+  // marks them in state.fixedSizeIds when their post-setFrame frame
+  // refuses the requested resize. Without this, every tile pass would
+  // see "actual ≠ target" and steal weight from a neighbor → cascading
+  // layout corruption (`weights flipped from [1,1,1] to [0.2,1.8,1]`
+  // observed in a prior reproduction).
+  if (state.fixedSizeIds && state.fixedSizeIds.has(+movedId)) return false;
   const d = displayForWindow(moved);
   if (!d) return false;
   const space = state.spacesByDisplay[d.uuid]?.active;

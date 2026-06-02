@@ -41,6 +41,13 @@ export const state = {
   // and totalWeight diverges → false "user resized!" detections that
   // transfer weight to windows the user didn't touch.
   lastTiledByDisplay: Object.create(null),
+  // CGWindowIDs that refused the tiler's setFrame size change (Calculator,
+  // System Settings, certain panel-style apps). Detected post-setFrame
+  // when live frame's size differs from the request by >50px. We still
+  // honor their position but treat them as non-resizable so the drag-
+  // handler doesn't misread the size mismatch as a user drag and rebalance
+  // weights against them. Cleared when the window disappears.
+  fixedSizeIds:       new Set(),
   // True while the user is mid-drag — set by handleDragEnd on the first
   // non-echo bang, cleared after the debounce resolves or after a safety
   // timeout (~1.5s of no further bangs). tileWindows() bails when set so

@@ -27,9 +27,13 @@
 
   // --- config (persisted via sd.settings) ---------------------------------
   const DEFAULTS = {
-    thickness:     2,
-    colorIncluded: "#7c8cff",
-    colorExcluded: "rgba(230,153,26,0.8)"  // windowscape's outlineColorPinned
+    // Match the legacy windowscape/outline.lua palette (rgba 0.1/0.3/0.9
+    // and 0.9/0.6/0.1 at alpha 0.8, thickness 8) so the visual matches
+    // what the previous implementation looked like before this stack
+    // owned the border.
+    thickness:     8,
+    colorIncluded: "rgba(26,77,230,0.8)",
+    colorExcluded: "rgba(230,153,26,0.8)"
   };
   let cfg = { ...DEFAULTS };
   async function loadConfig() {
@@ -46,7 +50,8 @@
   // --- state --------------------------------------------------------------
   let current = null;          // overlay handle ({ id, detach() }) or null
   let currentWid = null;       // CGWindowID the overlay is attached to
-  let attachInFlight = false;  // dedupe rapid focus changes
+  let attachInFlight = false;  // serialize attach calls
+  let pendingWid = null;       // latest winId requested while an attach was in flight
   // Inclusion verdicts pushed in by other stacks (windowscape etc.). Missing
   // entries default to `true` so an unknown window paints the included color.
   const inclusionByWinId = new Map();
@@ -89,7 +94,11 @@
   }
 
   async function attachForWin(winId) {
-    if (attachInFlight) return;
+    // If another attach is already running, queue the latest request and
+    // bail. The in-flight call's finally block will re-enter to pick up
+    // the queued id — that way rapid focus changes don't leave the overlay
+    // stranded on the first window of a burst.
+    if (attachInFlight) { pendingWid = winId; return; }
     if (!winId || typeof winId !== "number") { await hideOverlay(); return; }
 
     const color = colorForWin(winId);
@@ -129,6 +138,17 @@
       }
     } finally {
       attachInFlight = false;
+      // Drain any focus change that arrived while we were busy. Use the
+      // LATEST one, not a queue — a 100ms cmd-tab burst should resolve to
+      // the final window, not replay every intermediate.
+      if (pendingWid != null && pendingWid !== currentWid) {
+        const next = pendingWid;
+        pendingWid = null;
+        // microtask, not await — avoid stack growth on long focus runs
+        Promise.resolve().then(() => attachForWin(next));
+      } else {
+        pendingWid = null;
+      }
     }
   }
 

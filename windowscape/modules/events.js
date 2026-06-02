@@ -229,12 +229,18 @@ export function start() {
   window.onBang_sd_window_minimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.add(+detail.id);
-    debouncedHandleWindowEvent();
+    // Skip handleWindowEvent — it bails when newIds/removedIds are empty
+    // (a minimize doesn't add/remove from windowsById, it just flips an
+    // eligibility flag). Tile directly so the freed slot collapses and
+    // remaining tiles absorb the space.
+    updateWindowOrder();
+    tileWindows();
   };
   window.onBang_sd_window_deminimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.delete(+detail.id);
-    debouncedHandleWindowEvent();
+    updateWindowOrder();
+    tileWindows();
   };
 
   // Spatial reorder on window-moved — port of events.lua handleWindowMoved.

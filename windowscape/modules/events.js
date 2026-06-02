@@ -205,6 +205,20 @@ export function start() {
   window.onBang_sd_window_created = (detail) => {
     debouncedHandleWindowEvent();
   };
+  // Explicit minimize tracking — drives the tile-eligibility filter in
+  // core.updateWindowOrder (state.minimizedIds). Using these bangs
+  // instead of CGWindowIsOnscreen because that flag flickers false when
+  // the window is momentarily occluded.
+  window.onBang_sd_window_minimized = (detail) => {
+    if (!detail || detail.id == null) return;
+    state.minimizedIds.add(+detail.id);
+    debouncedHandleWindowEvent();
+  };
+  window.onBang_sd_window_deminimized = (detail) => {
+    if (!detail || detail.id == null) return;
+    state.minimizedIds.delete(+detail.id);
+    debouncedHandleWindowEvent();
+  };
 
   // Spatial reorder on window-moved — port-of events.lua handleWindowMoved
   // line 521+. Without this, dragging a window leftmost doesn't promote it

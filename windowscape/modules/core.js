@@ -18,6 +18,13 @@ export const state = {
   displays:           [],      // sd.display.all snapshot
   spacesByDisplay:    {},      // sd.spaces.all snapshot
   windowSpacesCache:  Object.create(null), // winId -> [spaceId,...]
+  // Explicit minimize tracking. Populated by the sd.window.minimized bang
+  // (events.js), cleared by sd.window.deminimized. Relying on
+  // CGWindowIsOnscreen for the same signal flickered: a focused window
+  // briefly occluded by a notification / tooltip / popover would drop
+  // out of the eligible set and the tile would re-flow to fill its slot,
+  // then re-flow back when the occlusion lifted.
+  minimizedIds:       new Set(),
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.
@@ -116,14 +123,13 @@ export function updateWindowOrder() {
       const w = state.windowsById[id];
       if (!w) continue;
       if (!isAppIncluded(w)) continue;
-      // Filter hidden / minimized / off-screen windows. CGWindowIsOnscreen
-      // false === "not currently drawn on any display" — minimized, cmd+H
-      // hidden, and other-space windows all share this signal. Without
-      // this, hidden windows took tile slots and the visible windows ended
-      // up at 1/N width with phantom gaps where the hidden ones lived
-      // (e.g. user has 3 visible terminals + 1 hidden, layout split into
-      // 4 columns, hidden one's column showed the desktop behind).
-      if (w.onscreen === false) continue;
+      // Drop minimized windows. We track minimize state explicitly via the
+      // sd.window.minimized / deminimized bangs (see events.js) rather than
+      // CGWindowIsOnscreen — that flag flickers false when a window is
+      // momentarily occluded by a tooltip / notification / another window
+      // briefly above, which would drop the visible window from the tile
+      // rotation. Explicit bang-driven state survives the flicker.
+      if (state.minimizedIds && state.minimizedIds.has(+w.id)) continue;
       const wd = displayForWindow(w);
       if (!wd || wd.displayID !== d.displayID) continue;
       const wspaces = state.windowSpacesCache[w.id] || [];

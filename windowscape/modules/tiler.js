@@ -93,13 +93,16 @@ async function tileWindowsInternal() {
         animatedSetFrame(t.winId, cur, t.frame);
       }
     } else {
-      // Original snap path — one SLSTransaction commits every origin
-      // move on the same compositor flip.
-      await sd.windows.batch(async () => {
-        for (const t of targets) {
-          await sd.windows.setFrame(t.winId, t.frame);
-        }
-      });
+      // Direct AX setFrame, no SLSTransaction batch. The batch path
+      // routes window-position writes through SLSTransactionSetWindowPosition
+      // / SLSTransactionCommit, which is broken on macOS Tahoe (26+):
+      // window SIZE lands correctly (AX, synchronous inside the batch)
+      // but POSITION silently drops, leaving tiles half-positioned.
+      // The non-batched setFrame in Windows.swift uses AX for both,
+      // which works reliably across macOS versions.
+      for (const t of targets) {
+        await sd.windows.setFrame(t.winId, t.frame);
+      }
     }
   }
 }

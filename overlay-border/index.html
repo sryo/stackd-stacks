@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script type="module">
+  // Draws a 2px accent border around whichever window is focused. Re-attaches
+  // every time sd.windows.focused changes; the previous overlay is detached
+  // before the next attach so we always own at most one overlay panel.
+  //
+  // Rendering is plain WebKit — the overlay's WebView hosts a <div> with
+  // position: absolute; inset: 1px; border: …; border-radius: …. The daemon
+  // pins the overlay's NSPanel to the target window's frame each vsync, so
+  // the border just inherits the panel's size — no per-frame draw callback,
+  // no JS round-trip.
+  import { sd } from "sd://runtime/api.js";
+
+  let current = null;
+  let currentWid = null;
+
+  sd.windows.focused.subscribe(async (win) => {
+    if (!win || typeof win.id !== "number") {
+      if (current) {
+        await current.detach();
+        current = null;
+        currentWid = null;
+      }
+      return;
+    }
+    if (currentWid === win.id) return;
+    if (current) await current.detach();
+    currentWid = win.id;
+    // Per-window corner radius: daemon returns raw AX hints; stack picks the
+    // mapping the same way WindowScape's outline.lua does on Tahoe.
+    const hints = (await sd.windows.cornerHints?.(win.id)) ?? {};
+    const radius =
+      hints.subrole === "AXSystemDialog" || hints.role === "AXScrollArea" ? 0 :
+      hints.toolbarPresent ? 26 : 16;
+    current = await sd.overlay.attach(win.id, {
+      css: `
+        html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+        .border { position: absolute; inset: 1px; border: 2px solid #7c8cff;
+                  border-radius: ${radius}px; pointer-events: none; }
+      `,
+      html: `<div class="border"></div>`
+    });
+  });
+</script>
+</body>
+</html>

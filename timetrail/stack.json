@@ -1,0 +1,12 @@
+{
+  "id": "timetrail",
+  "name": "TimeTrail",
+  "region": "fullscreen",
+  "size": { "h": 0 },
+  "clickThrough": true,
+  "permissions": ["mouse", "battery"],
+  "eventtap": [
+    { "event": "keyDown",          "callback": "hide" },
+    { "event": "leftMouseDragged", "callback": "hide" }
+  ]
+}

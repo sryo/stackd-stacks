@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body>
+<div id="hud">
+  <svg viewBox="0 0 80 80" aria-hidden="true">
+    <circle id="ring-bg" cx="40" cy="40" r="40"/>
+    <path id="ring-fill" d=""/>
+    <circle id="ring-inner" cx="40" cy="40" r="20"/>
+    <text id="symbol" x="40" y="40"></text>
+  </svg>
+</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const CFG = {
+    edgeWidth:    0.002,
+    edgePadding:  0.08,
+    hudDuration:  1000,
+    edges: { left: "brightness", right: "volume" }
+  };
+
+  const actions = {
+    volume: {
+      symbol: "♪",
+      apply(level) { return sd.audio.setVolume(level); }
+    },
+    brightness: {
+      symbol: "☀",
+      apply(level) {
+        const displays = sd.display.all.peek() || [];
+        const internal = displays.find(d => d.builtin) || displays[0];
+        if (!internal) return null;
+        return sd.display.setBrightness(internal.displayID, level);
+      }
+    }
+  };
+
+  const body      = document.body;
+  const ringFill  = document.getElementById("ring-fill");
+  const symbolEl  = document.getElementById("symbol");
+
+  let hideTimer = null;
+
+  function arcPath(angleDeg) {
+    if (angleDeg <= 0) return "";
+    const cx = 40, cy = 40, r = 33;
+    const a = Math.min(360, angleDeg);
+    if (a >= 360) {
+      return `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`;
+    }
+    const rad = (a - 90) * Math.PI / 180;
+    const x = cx + r * Math.cos(rad);
+    const y = cy + r * Math.sin(rad);
+    const largeArc = a > 180 ? 1 : 0;
+    return `M ${cx} ${cy} L ${cx} ${cy - r} A ${r} ${r} 0 ${largeArc} 1 ${x} ${y} Z`;
+  }
+
+  function showHud(symbol, percent) {
+    ringFill.setAttribute("d", arcPath((percent / 100) * 360));
+    symbolEl.textContent = symbol;
+    body.classList.add("active");
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => body.classList.remove("active"), CFG.hudDuration);
+  }
+
+  function getEdge(x, y) {
+    const w = CFG.edgeWidth;
+    if (x <= w)     return "left";
+    if (x >= 1 - w) return "right";
+    if (y <= w)     return "bottom";
+    if (y >= 1 - w) return "top";
+    return null;
+  }
+
+  function isTouching(state) {
+    return state !== "ended" && state !== "cancelled" && state !== "lifted";
+  }
+
+  const validTouches = new Map();
+
+  sd.touchdevice.subscribe((snap) => {
+    if (!snap) return;
+    const touches = snap.touches || [];
+    const currentIds = new Set();
+
+    for (const t of touches) {
+      const id = t.identifier;
+      currentIds.add(id);
+      if (!isTouching(t.state)) continue;
+
+      const x = t.x, y = t.y;
+      const edge = getEdge(x, y);
+
+      if (!validTouches.has(id)) {
+        validTouches.set(id, edge || false);
+      }
+      const activeEdge = validTouches.get(id);
+      if (!activeEdge) continue;
+
+      const actionName = CFG.edges[activeEdge];
+      const action = actionName && actions[actionName];
+      if (!action) continue;
+
+      const pad = CFG.edgePadding;
+      const pos = (activeEdge === "left" || activeEdge === "right") ? y : x;
+      const percent = Math.max(0, Math.min(100, (pos - pad) / (1 - 2 * pad) * 100));
+      action.apply(percent / 100);
+      showHud(action.symbol, percent);
+      break;
+    }
+
+    for (const id of validTouches.keys()) {
+      if (!currentIds.has(id)) validTouches.delete(id);
+    }
+  });
+</script>
+</body>
+</html>

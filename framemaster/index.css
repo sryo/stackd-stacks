@@ -1,0 +1,34 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  font: 14px -apple-system, system-ui, sans-serif;
+  color: #fff;
+  user-select: none;
+}
+
+.tip {
+  position: absolute;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 4px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 -1px 2px rgba(0, 0, 0, 1);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 125ms ease-out;
+  z-index: 9999;
+}
+
+.tip.show {
+  opacity: 1;
+}

@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div id="hour" class="hour">00</div>
+  <script type="module">
+    // TimeTrail — accurate port of TimeTrail.lua (sryo).
+    // Shows the current hour orbiting the cursor at radius 30, like a clock
+    // hand pointed at the current minute. Red when battery ≤ 30% & not
+    // charging. Fades out 2s after the cursor stops. Hidden on keyDown
+    // or while dragging.
+    import { sd } from "sd://runtime/api.js";
+
+    const IS_24H            = true;
+    const FONT_SIZE         = 16;
+    const RADIUS            = 30;
+    const HIDE_DELAY_MS     = 2000;
+    const LOW_BATTERY_PCT   = 30;
+    const CANVAS_W          = FONT_SIZE + 4;   // matches Lua's canvasWidth
+    const CANVAS_H          = FONT_SIZE + 2;
+    const EDGE_MARGIN       = 8;
+
+    const el = document.getElementById("hour");
+
+    let batteryLow = false;
+    let hideTimer = null;
+
+    function hourText() {
+      const d = new Date();
+      let h = IS_24H ? d.getHours() : (d.getHours() % 12);
+      if (!IS_24H && h === 0) h = 12;
+      return String(h).padStart(2, "0");
+    }
+    function minuteAngleDeg() {
+      const d = new Date();
+      return (d.getMinutes() * 6) + (d.getSeconds() * 0.1);
+    }
+    function refreshText() {
+      el.textContent = hourText();
+      el.style.color = batteryLow ? "red" : "white";
+    }
+    refreshText();
+    setInterval(refreshText, 1000);
+
+    sd.battery.subscribe(b => {
+      if (!b) return;
+      batteryLow = (b.percent <= LOW_BATTERY_PCT) && !b.charging;
+      refreshText();
+    });
+
+    sd.mouse.subscribe(m => {
+      if (!m) return;
+      const a = minuteAngleDeg() * Math.PI / 180;
+      // Lua does:  x = mx + R*sin(a) - 8 ;  y = my - R*cos(a) - 7
+      let x = m.x + RADIUS * Math.sin(a) - 8;
+      let y = m.y - RADIUS * Math.cos(a) - 7;
+      // Boundary clamp against the full screen (matches Lua's fullFrame).
+      const W = window.innerWidth, H = window.innerHeight;
+      if (x < EDGE_MARGIN)                 x = EDGE_MARGIN;
+      if (x + CANVAS_W > W - EDGE_MARGIN)  x = W - EDGE_MARGIN - CANVAS_W;
+      if (y < EDGE_MARGIN)                 y = EDGE_MARGIN;
+      if (y + CANVAS_H > H - EDGE_MARGIN)  y = H - EDGE_MARGIN - CANVAS_H;
+      el.style.transform = `translate(${x}px, ${y}px)`;
+      el.style.opacity = "1";
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => { el.style.opacity = "0"; }, HIDE_DELAY_MS);
+    });
+
+    // keyDown + leftMouseDragged → hide immediately (no fade).
+    function hideNow() {
+      el.style.opacity = "0";
+      clearTimeout(hideTimer);
+    }
+    window.onTap_hide = hideNow;
+  </script>
+</body>
+</html>

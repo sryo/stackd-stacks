@@ -1,0 +1,62 @@
+:root {
+  --bar-bg: rgb(13, 13, 15);
+  --bar-fg: rgba(235, 235, 235, 0.92);
+  --bar-font-size: 13px;
+  --bar-edge-pad: 12px;
+  --bar-item-gap: 14px;
+  --bar-notch-pad-w: 220px;
+  --bar-notch-gap: 10px;
+}
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: transparent;
+  color: var(--bar-fg);
+  font: var(--bar-font-size) -apple-system, system-ui;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+.bar {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  background: var(--bar-bg);
+}
+
+.zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.zone[data-side="left"]         { left:  var(--bar-edge-pad); flex-direction: row; }
+.zone[data-side="right"]        { right: var(--bar-edge-pad); flex-direction: row; }
+.zone[data-side="center-left"]  { right: calc(50% + var(--bar-notch-pad-w) / 2 + var(--bar-notch-gap)); flex-direction: row; }
+.zone[data-side="center-right"] { left:  calc(50% + var(--bar-notch-pad-w) / 2 + var(--bar-notch-gap)); flex-direction: row; }
+
+/* Non-notched displays don't reserve a center gap; center-right starts at 50%
+   and center-left is hidden. core.js folds center-left items into center-right
+   on these screens so nothing's lost. */
+.bar.no-notch .zone[data-side="center-left"] { display: none; }
+.bar.no-notch .zone[data-side="center-right"] { left: 50%; }
+
+.item {
+  padding: 0 8px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+/* The item-gap is the *space between* items, so apply it after every item
+   except the last in each zone. flex `gap` would do this for us but breaks
+   on the empty-item-hidden case in fullscreen-peek. */
+.item + .item { margin-left: var(--bar-item-gap); }
+
+.item.bold { font-weight: 600; letter-spacing: -0.01em; }
+
+.bar.fs-minimal { display: none; }
+.bar.fs-peek    { display: block; }

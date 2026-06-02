@@ -1,0 +1,244 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="index.css">
+</head><body>
+<div id="panel">
+  <div class="row"><h1>CloudPad</h1><span id="status" class="dot off"></span></div>
+  <div id="url">starting…</div>
+  <div id="hint">ctrl+cmd+c to copy</div>
+</div>
+
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const PORT = 1984;
+  const ASSETS_DIR = "~/stackd/stacks/cloudpad/assets";
+
+  const urlEl    = document.getElementById("url");
+  const statusEl = document.getElementById("status");
+  const hintEl   = document.getElementById("hint");
+
+  let currentUrl = null;
+
+  function pickScreenFor(mx, my, displays) {
+    if (!displays || displays.length === 0) return null;
+    for (const d of displays) {
+      const f = d.frame;
+      if (mx >= f.x && mx < f.x + f.w && my >= f.y && my < f.y + f.h) return d;
+    }
+    return displays[0];
+  }
+
+  function mousePos() {
+    const m = sd.mouse.peek();
+    if (m) return Promise.resolve(m);
+    return new Promise((res) => {
+      const unsub = sd.mouse.subscribe(v => { if (v) { unsub(); res(v); } });
+    });
+  }
+
+  const KEY_ALIASES = {
+    enter: "return", esc: "escape", back: "backspace",
+    del: "delete", pgup: "pageup", pgdn: "pagedown"
+  };
+
+  async function dispatchKey(spec) {
+    const raw = String(spec.key || "").toLowerCase();
+    const k = KEY_ALIASES[raw] || raw;
+    const mods = Array.isArray(spec.mods) ? spec.mods.map(m => String(m).toLowerCase()) : [];
+    const out = mods.concat([k]).join("+");
+    const ok = await sd.events.key(out);
+    if (!ok && k.length === 1 && mods.length === 0) {
+      await sd.events.type(k);
+    }
+  }
+
+  function accelerate(d) {
+    const a = Math.abs(d);
+    const sign = d < 0 ? -1 : 1;
+    let scaled;
+    if (a < 1.0) scaled = a * 0.5;
+    else if (a <= 6.0) scaled = 0.5 + (a - 1.0) * 0.6;
+    else scaled = 3.5 + Math.sqrt(a - 6.0) * 1.6;
+    return sign * scaled;
+  }
+
+  async function moveMouseTo(nx, ny) {
+    await sd.cursor.setPosition({ x: nx | 0, y: ny | 0 });
+  }
+
+  async function dispatchEvent(e) {
+    switch (e.t) {
+      case "move": {
+        const m = await mousePos();
+        if (!m) return;
+        const nx = m.x + accelerate(Number(e.dx) || 0);
+        const ny = m.y + accelerate(Number(e.dy) || 0);
+        await moveMouseTo(nx, ny);
+        return;
+      }
+      case "scroll":
+        await sd.events.scroll(Math.round(Number(e.dx) || 0), Math.round(Number(e.dy) || 0));
+        return;
+      case "click": {
+        const m = await mousePos();
+        if (!m) return;
+        const btn = e.button || "left";
+        await sd.events.click(m.x, m.y, btn);
+        if ((e.count || 1) >= 2) await sd.events.click(m.x, m.y, btn);
+        return;
+      }
+      case "key":
+        await dispatchKey(e);
+        return;
+      case "text":
+        if (typeof e.s === "string" && e.s.length) await sd.events.type(e.s);
+        return;
+    }
+  }
+
+  async function handleEvents(req) {
+    let payload = null;
+    try { payload = JSON.parse(req.body || "{}"); } catch (err) {}
+    if (!payload || !Array.isArray(payload.events)) {
+      return { status: 400, headers: { "Content-Type": "application/json" },
+               body: JSON.stringify({ ok: false, error: "missing events array" }) };
+    }
+    let drained = 0;
+    for (const ev of payload.events) {
+      try { await dispatchEvent(ev); drained++; } catch (err) {}
+    }
+    return { status: 200, headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({ ok: true, drained }) };
+  }
+
+  // stackd's HTTPServer response body is a String (UTF-8), so we can't ship
+  // raw JPEG bytes here — we wrap the base64 dataURL in a JSON envelope and
+  // the PWA's pointer.js drops it straight into background-image.
+  async function handleScreenshot() {
+    const m = await mousePos();
+    const displays = sd.display.all.peek() || [];
+    const target = m ? pickScreenFor(m.x, m.y, displays) : (displays[0] || null);
+    const opts = { format: "jpeg", quality: 0.6 };
+    if (target) opts.display = target.displayID;
+    const snap = await sd.display.snapshot(opts);
+    if (!snap) {
+      return { status: 500, headers: { "Content-Type": "application/json" },
+               body: JSON.stringify({ ok: false, error: "capture failed" }) };
+    }
+    let cursorX = 0, cursorY = 0;
+    if (m && target) {
+      cursorX = (m.x - target.frame.x) / target.frame.w;
+      cursorY = (m.y - target.frame.y) / target.frame.h;
+    }
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      body: JSON.stringify({ dataURL: snap.dataURL, cursorX, cursorY })
+    };
+  }
+
+  // MIME guessing for static assets — daemon ships raw bytes, stack labels them.
+  const MIME = {
+    html: "text/html; charset=utf-8",
+    htm:  "text/html; charset=utf-8",
+    js:   "text/javascript; charset=utf-8",
+    mjs:  "text/javascript; charset=utf-8",
+    css:  "text/css; charset=utf-8",
+    json: "application/json; charset=utf-8",
+    svg:  "image/svg+xml",
+    png:  "image/png",
+    jpg:  "image/jpeg",
+    jpeg: "image/jpeg",
+    gif:  "image/gif",
+    woff2: "font/woff2",
+    txt:  "text/plain; charset=utf-8"
+  };
+  function mimeFor(path) {
+    const i = path.lastIndexOf(".");
+    if (i < 0) return "application/octet-stream";
+    return MIME[path.slice(i + 1).toLowerCase()] || "application/octet-stream";
+  }
+
+  // Path safety: resolve `rel` inside ASSETS_DIR and reject traversal.
+  async function readAsset(reqPath) {
+    const rel = reqPath === "/" ? "index.html" : reqPath.replace(/^\/+/, "");
+    if (rel.includes("..")) return null;
+    const full = ASSETS_DIR + "/" + rel;
+    try {
+      const text = await sd.fs.read(full);
+      if (typeof text !== "string") return null;
+      return { body: text, mime: mimeFor(rel) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function handleHealth() {
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ ok: true, version: "stackd-1" })
+    };
+  }
+
+  async function handleOptions() {
+    return {
+      status: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS"
+      },
+      body: ""
+    };
+  }
+
+  const srv = await sd.httpserver.serve({
+    port: PORT,
+    bindHost: "0.0.0.0",
+    bonjour: { type: "_http._tcp.", name: "CloudPad" }
+  }, async (req) => {
+    // CORS preflight — same response for any path.
+    if (req.method === "OPTIONS") return handleOptions();
+
+    if (req.method === "GET" && req.path === "/health")     return handleHealth();
+    if (req.method === "GET" && req.path === "/screenshot") return handleScreenshot();
+    if (req.method === "POST" && req.path === "/events")    return handleEvents(req);
+
+    if (req.method === "GET") {
+      const asset = await readAsset(req.path);
+      if (asset) {
+        return {
+          status: 200,
+          headers: { "Content-Type": asset.mime, "Access-Control-Allow-Origin": "*" },
+          body: asset.body
+        };
+      }
+    }
+    return { status: 404, headers: { "Content-Type": "text/plain" }, body: "not found" };
+  });
+
+  function setUrl(lan) {
+    const host = (lan && lan.ipv4) || "localhost";
+    currentUrl = "http://" + host + ":" + PORT + "/";
+    urlEl.textContent = currentUrl;
+  }
+
+  if (!srv) {
+    urlEl.textContent = "serve failed (port " + PORT + " in use?)";
+    statusEl.classList.remove("on"); statusEl.classList.add("off");
+  } else {
+    statusEl.classList.remove("off"); statusEl.classList.add("on");
+    setUrl(sd.net.lan.peek());
+    sd.net.lan.subscribe(l => { if (l) setUrl(l); });
+  }
+
+  window.onHotkey_copyUrl = async () => {
+    if (!currentUrl) return;
+    await sd.pasteboard.set(currentUrl);
+    hintEl.textContent = "copied!";
+    setTimeout(() => { hintEl.textContent = "ctrl+cmd+c to copy"; }, 1400);
+  };
+</script>
+</body></html>

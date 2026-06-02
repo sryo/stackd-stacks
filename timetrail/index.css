@@ -1,0 +1,26 @@
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+.hour {
+  position: fixed; top: 0; left: 0;
+  font: 16px -apple-system, system-ui;
+  color: white;
+  /* Match the Lua shadow exactly: offset h=-1, blurRadius=2, color alpha=1.
+     CSS text-shadow is (offset-x, offset-y, blur, color). Lua's h is
+     vertical offset; offset-y = -h = 1 to push the shadow DOWN. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 1);
+  /* Fade matches Lua: 0.0125 step over 0.25s = ease over ~250ms.
+     Transform smoothing interpolates over the CG-tap → Bridge → WebKit-eval
+     jitter so motion looks fluid even when individual mouse events arrive
+     with small latency variance. 50ms linear is short enough to track the
+     cursor without visible lag. ChronoMouse doesn't need this because
+     NSWindow.setFrameOrigin is near-zero-latency. */
+  transition: transform 50ms linear, opacity 250ms ease;
+  opacity: 0;
+  will-change: transform, opacity;
+  pointer-events: none;
+  user-select: none;
+}

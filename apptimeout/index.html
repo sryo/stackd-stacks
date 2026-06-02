@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body>
+<script type="module">
+  // AppTimeout — port of AppTimeout.lua.
+  //
+  // Every 10s, scan running apps. Any non-ignored regular app that has zero
+  // windows AND is not frontmost gets a timestamp. If the same app is still
+  // windowless 5 minutes later, kill it. Gaining a window or becoming
+  // frontmost cancels the timer.
+  import { sd } from "sd://runtime/api.js";
+
+  const CHECK_INTERVAL_MS = 10_000;
+  const TIMEOUT_S         = 300;
+
+  // From AppTimeout.lua. Note: WhatsApp's display name contains a U+200E
+  // LEFT-TO-RIGHT MARK byte ("‎WhatsApp") in the Lua — preserved here
+  // so the name-equality check matches.
+  const IGNORED = new Set([
+    "Finder", "Dock", "SystemUIServer", "ControlCenter", "Transmission",
+    "Calendar", "Stickies", "Spotify", "‎WhatsApp", "Activity Monitor",
+    "Hammerspoon", "stackd", "loginwindow", "Spotlight", "Zed", "Antigravity",
+    "Xcode"
+  ]);
+
+  const windowlessSince = new Map();   // app name → epoch seconds
+
+  function check() {
+    const apps = sd.apps.running.value || [];
+    const wins = sd.windows.all.value || [];
+    const winCount = new Map();
+    for (const w of wins) winCount.set(w.app, (winCount.get(w.app) || 0) + 1);
+
+    const now = Math.floor(Date.now() / 1000);
+    const seen = new Set();
+    for (const app of apps) {
+      if (!app.name || IGNORED.has(app.name)) continue;
+      // Equivalent to Hammerspoon's app:kind() == 1: skip accessory
+      // (LSUIElement) and prohibited (XPC helper) processes so we don't
+      // try to kill Browser Helper / sandbox brokers / etc.
+      if (app.activationPolicy !== "regular") continue;
+      seen.add(app.name);
+      const count = winCount.get(app.name) || 0;
+      const isFrontmost = !!app.active;
+
+      if (count === 0 && !isFrontmost) {
+        if (!windowlessSince.has(app.name)) {
+          windowlessSince.set(app.name, now);
+          console.log("apptimeout: monitoring", app.name);
+        } else if (now - windowlessSince.get(app.name) >= TIMEOUT_S) {
+          console.log("apptimeout: closing", app.name, "(timeout)");
+          sd.apps.kill(app.bundleId);
+          windowlessSince.delete(app.name);
+        }
+      } else if (windowlessSince.has(app.name)) {
+        windowlessSince.delete(app.name);
+        console.log("apptimeout: stopped monitoring", app.name);
+      }
+    }
+    // Drop entries whose app quit entirely between ticks.
+    for (const name of windowlessSince.keys()) {
+      if (!seen.has(name)) windowlessSince.delete(name);
+    }
+  }
+
+  setInterval(check, CHECK_INTERVAL_MS);
+  check();
+</script>
+</body>
+</html>

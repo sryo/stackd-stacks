@@ -1,0 +1,948 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Palette</title>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="crumbs" id="crumbs"></div>
+    <input id="q" type="text" placeholder="Search…" autocomplete="off" spellcheck="false">
+    <div id="results" class="results"></div>
+    <div class="footer" id="footer">
+      <span class="hint">↑↓ navigate</span>
+      <span class="hint">↵ default</span>
+      <span class="hint">tab → verbs</span>
+      <span class="hint">1-9 quickpick</span>
+      <span class="hint">esc close</span>
+    </div>
+  </div>
+  <script type="module">
+    // Palette — faithful port of the user's Hammerspoon Palette.
+    // Two-stage noun→verb command palette with subsequence matcher + frecency
+    // boost + row quickpicks + verb quickpicks. Sources: menuitems / apps /
+    // installedapps / calc / shellrunner / files. Verbs: activate / launch /
+    // hide / quit / copypath / copynumber / enter / open / reveal / runshell.
+    // Askmuse intentionally omitted (Muse isn't part of this daemon).
+    //
+    // Trigger: Ctrl+Cmd+Space hotkey. (HS also opens on TTTaps 5-finger tap;
+    // deferred until gesture-payload extension lands.)
+    import { sd } from "sd://runtime/api.js";
+
+    // ───────────────────── matcher (port of matcher.lua) ─────────────────────
+    const BYPASS_SCORE = 600;
+    function isWordBoundary(prev, ch) {
+      if (prev == null) return true;
+      if (" /._-".indexOf(prev) >= 0) return true;
+      if (prev >= "a" && prev <= "z" && ch >= "A" && ch <= "Z") return true;
+      return false;
+    }
+    function fuzzyMatch(q, title) {
+      if (!q) return { score: 0, positions: [] };
+      if (!title) return null;
+      const tl = title.toLowerCase();
+      const ql = q.toLowerCase();
+      const positions = [];
+      let score = 0, ti = 0, consec = 0, firstIdx = null, lastIdx = null;
+      for (let qi = 0; qi < ql.length; qi++) {
+        const qc = ql[qi];
+        let found = false;
+        while (ti < tl.length) {
+          if (tl[ti] === qc) {
+            positions.push(ti);
+            const prev = ti > 0 ? title[ti - 1] : null;
+            let bonus = 0;
+            if (ti === 0) bonus += 25;
+            if (isWordBoundary(prev, title[ti])) bonus += 15;
+            if (lastIdx != null && (ti - lastIdx) === 1) {
+              consec += 1;
+              bonus += 8 + consec * 2;
+            } else { consec = 0; }
+            score += 10 + bonus;
+            if (firstIdx == null) firstIdx = ti;
+            lastIdx = ti;
+            ti += 1;
+            found = true;
+            break;
+          }
+          ti += 1;
+        }
+        if (!found) return null;
+      }
+      const span = lastIdx - firstIdx + 1;
+      score -= Math.floor((span - ql.length) * 1.5);
+      if (firstIdx > 0) score -= Math.min(firstIdx, 20);
+      if (tl === ql) score += 1000;
+      if (tl.startsWith(ql)) score += 200;
+      if (score < 1) score = 1;
+      return { score, positions };
+    }
+    function subtitleScore(q, sub) {
+      if (!q) return 0;
+      if (!sub) return null;
+      const s = sub.toLowerCase(), ql = q.toLowerCase();
+      if (s === ql) return 600;
+      if (s.startsWith(ql)) return 200;
+      const pos = s.indexOf(ql);
+      if (pos >= 0) return Math.max(0, 100 - pos);
+      return null;
+    }
+    function rank(items, q) {
+      const empty = q === "";
+      const matches = [];
+      for (const item of items) {
+        if (empty && item.hideOnEmptyQuery) continue;
+        if (item.bypassMatcher) {
+          const boost = recents.score(item.source, item.id);
+          item.fromHistory = boost > 0;
+          item.matchPositions = item.matchPositions || [];
+          matches.push({ item, score: BYPASS_SCORE + boost / 100 });
+          continue;
+        }
+        let tScore = null, tPositions = [];
+        if (empty) {
+          tScore = 0;
+        } else {
+          const m = fuzzyMatch(q, item.title || "");
+          if (m) { tScore = m.score; tPositions = m.positions; }
+        }
+        let sScore = null;
+        if (tScore == null && !empty) sScore = subtitleScore(q, item.subtitle || "");
+        const matchVal = tScore != null ? tScore : (sScore != null ? sScore * 0.6 : null);
+        const hit = empty || matchVal != null;
+        if (hit) {
+          const boost = recents.score(item.source, item.id);
+          item.fromHistory = boost > 0;
+          item.matchPositions = tPositions;
+          const total = empty ? boost : matchVal + boost / 10;
+          matches.push({ item, score: total });
+        } else {
+          item.matchPositions = [];
+        }
+      }
+      matches.sort((a, b) => b.score - a.score);
+      return matches.map(m => m.item);
+    }
+
+    // ───────────────────── recents (port of recents.lua) ─────────────────────
+    const recents = (() => {
+      let data = null;
+      async function load() {
+        if (data) return;
+        data = (await sd.settings.get("paletteUsage")) || {};
+      }
+      async function save() { await sd.settings.set("paletteUsage", data); }
+      return {
+        async init() {
+          await load();
+          const cutoff = Date.now() / 1000 - 30 * 86400;
+          let changed = false;
+          for (const src in data) {
+            for (const id in data[src]) {
+              if (data[src][id].lastUsed < cutoff) {
+                delete data[src][id]; changed = true;
+              }
+            }
+            if (Object.keys(data[src]).length === 0) { delete data[src]; changed = true; }
+          }
+          if (changed) await save();
+        },
+        record(src, id) {
+          if (!src || !id) return;
+          data[src] = data[src] || {};
+          const e = data[src][id] = data[src][id] || { count: 0, lastUsed: 0 };
+          e.count += 1;
+          e.lastUsed = Math.floor(Date.now() / 1000);
+          save();
+        },
+        score(src, id) {
+          if (!data) return 0;
+          const e = data[src] && data[src][id];
+          if (!e) return 0;
+          const recency = Math.floor(Date.now() / 1000) - e.lastUsed;
+          return e.count * 1000000 / (recency + 1);
+        },
+        entries(src) {
+          return (data && data[src]) || {};
+        },
+        forget(src, id) {
+          if (!data || !data[src] || !data[src][id]) return;
+          delete data[src][id];
+          if (Object.keys(data[src]).length === 0) delete data[src];
+          save();
+        }
+      };
+    })();
+
+    // ───────────────────────────── sources ──────────────────────────────────
+    const SELF = "stackd";
+
+    // The frontmost app at the *last moment before Palette stole focus*.
+    // Once Palette's window invokes, sd.app.frontmost becomes "stackd" —
+    // useless for "show me this app's menubar".
+    let priorFront = null;
+    sd.app.frontmost.subscribe((a) => {
+      if (!a || !a.name) return;
+      if (a.name === SELF) return;
+      priorFront = a;
+    });
+
+    // ───────────────── apps source (port of apps.lua) ───────────────────────
+    // Running apps with at least one visible window. Subtitle = "N windows"
+    // matching HS. visibleWindows is per-pid AX, slowish but n ≤ ~20.
+    const appsSource = {
+      id: "apps",
+      async list() {
+        const list = sd.apps.running.value || [];
+        const out = [];
+        for (const a of list) {
+          if (!a.name || !a.bundleId || a.name === SELF) continue;
+          if (a.activationPolicy && a.activationPolicy !== "regular") continue;
+          let wins = [];
+          try { wins = await sd.apps.visibleWindows(a.pid); } catch (e) {}
+          const n = Array.isArray(wins) ? wins.length : 0;
+          if (n === 0) continue;
+          out.push({
+            id:          "app:" + a.bundleId,
+            title:       a.name,
+            subtitle:    n + " window" + (n === 1 ? "" : "s"),
+            source:      "apps",
+            payload:     { bundleId: a.bundleId, pid: a.pid, appName: a.name },
+            defaultVerb: "activate",
+            verbs:       ["activate", "hide", "quit"]
+          });
+        }
+        return out;
+      }
+    };
+
+    // ─────────────── menu-items source (port of menuitems.lua) ──────────────
+    // One IPC call to sd.apps.menu(pid) → entire menu tree as nested
+    // {title, role, enabled?, marked?, shortcut?, children?} dicts. We flatten
+    // it into one Palette item per leaf. Per-app id prefixing so usage counts
+    // don't collide (Safari's "File > Save" ≠ Terminal's "File > Save").
+    let menuCache = { pid: null, items: null };
+    function collectMenuLeaves(node, menuPath, pathList, items) {
+      const title = node && node.title;
+      if (!title || title === "") {
+        // Wrapper without a title — recurse into kids.
+        if (node && Array.isArray(node.children)) {
+          for (const k of node.children) collectMenuLeaves(k, menuPath, pathList, items);
+        }
+        return;
+      }
+      const here = menuPath ? menuPath + " > " + title : title;
+      const childPath = pathList.concat([title]);
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        for (const k of node.children) collectMenuLeaves(k, here, childPath, items);
+      } else {
+        items.push({
+          id:          here,             // app prefix added by caller
+          title,
+          subtitle:    here,
+          source:      "menuitems",
+          payload:     { appPid: null, appName: null, path: childPath },
+          accessory:   node.shortcut || null,
+          enabled:     node.enabled !== false,
+          markChar:    node.marked ? "✓" : null,
+          defaultVerb: "activate",
+          verbs:       ["activate"]
+        });
+      }
+    }
+    async function rebuildMenuItems(pid, appName) {
+      const tree = await sd.apps.menu(pid);
+      if (!tree) return [];
+      const tops = Array.isArray(tree.children) ? tree.children : [];
+      const items = [];
+      for (const top of tops) collectMenuLeaves(top, null, [], items);
+      for (const it of items) {
+        it.payload.appPid = pid;
+        it.payload.appName = appName;
+        it.id = appName + " :: " + it.id;
+      }
+      return items;
+    }
+    const menuItemsSource = {
+      id: "menuitems",
+      async list() {
+        const a = priorFront || sd.app.frontmost.peek();
+        if (!a || !a.pid || a.name === SELF) return [];
+        if (menuCache.pid === a.pid && menuCache.items) return menuCache.items;
+        const items = await rebuildMenuItems(a.pid, a.name || "");
+        menuCache = { pid: a.pid, items };
+        return items;
+      }
+    };
+
+    // ─────────── installedapps source (port of installedapps.lua) ───────────
+    // mdfind for .app bundles. We can't read CFBundleIdentifier from JS
+    // without spawning a helper — use the path as the id and the .app stem
+    // as the display name. Hidden when query empty so palette doesn't flood.
+    let installedCache = [];
+    async function rebuildInstalled() {
+      const r = await sd.proc.exec("/usr/bin/mdfind",
+        ["kMDItemContentType == 'com.apple.application-bundle'"]);
+      if (!r || r.code !== 0) return;
+      const seen = new Set();
+      const out = [];
+      for (const path of (r.stdout || "").split("\n")) {
+        if (!path || path.indexOf(".app/") >= 0) continue;
+        if (path.indexOf("/Library/Application Support/") >= 0) continue;
+        if (!path.endsWith(".app")) continue;
+        const stem = path.replace(/^.*\//, "").replace(/\.app$/, "");
+        if (stem === SELF) continue;
+        if (seen.has(path)) continue;
+        seen.add(path);
+        out.push({ path, name: stem });
+      }
+      installedCache = out;
+    }
+    const installedSource = {
+      id: "installedapps",
+      async list() {
+        // HS hides installed apps already running with visible windows. We
+        // approximate by skipping anything whose name matches a running app
+        // (close enough without bundleID readback).
+        const runningNames = new Set((sd.apps.running.value || []).map(a => a.name));
+        return installedCache
+          .filter(e => !runningNames.has(e.name))
+          .map(e => ({
+            id:               "installedapp:" + e.path,
+            title:            e.name,
+            subtitle:         "",
+            source:           "installedapps",
+            payload:          { path: e.path, appName: e.name },
+            defaultVerb:      "launch",
+            verbs:            ["launch"],
+            hideOnEmptyQuery: true
+          }));
+      }
+    };
+
+    // ─────────────────── calc source (port of calc.lua) ─────────────────────
+    // Dynamic: re-evaluated per keystroke. One synthetic row when the query
+    // parses as an arithmetic expression.
+    function looksMathy(s) {
+      if (!/\d/.test(s)) return false;
+      if (/[+\-*/%^()]/.test(s)) return true;
+      if (s.indexOf(".") >= 0) return true;
+      return /\bpi\b|\be\b/i.test(s);
+    }
+    function evalCalc(src) {
+      const cleaned = src.replace(/\s+/g, "");
+      // Tight whitelist: digits, math ops, parens, dot, and the letters of pi/e.
+      if (!/^[0-9+\-*/%^().pieE]+$/i.test(cleaned)) return null;
+      const js = cleaned
+        .replace(/\^/g, "**")
+        .replace(/\bpi\b/gi, "Math.PI")
+        .replace(/\be\b/gi, "Math.E");
+      try {
+        // eslint-disable-next-line no-new-func
+        const v = Function("\"use strict\";return (" + js + ");")();
+        if (typeof v !== "number" || !isFinite(v)) return null;
+        return v;
+      } catch (e) { return null; }
+    }
+    function formatNumber(n) {
+      if (n === Math.floor(n) && Math.abs(n) < 1e15) return String(Math.trunc(n));
+      return Number(n.toPrecision(6)).toString();
+    }
+    const calcSource = {
+      id: "calc",
+      dynamic: true,
+      list(query) {
+        const q = (query || "").trim();
+        if (!q || !looksMathy(q)) return [];
+        const v = evalCalc(q);
+        if (v == null) return [];
+        const formatted = formatNumber(v);
+        return [{
+          id:               "calc:active",
+          title:            "= " + formatted,
+          subtitle:         q,
+          source:           "calc",
+          payload:          { expression: q, value: v, formatted },
+          defaultVerb:      "copynumber",
+          verbs:            ["copynumber"],
+          hideOnEmptyQuery: true,
+          bypassMatcher:    true
+        }];
+      }
+    };
+
+    // ───────────── shellrunner source (port of shellrunner.lua) ─────────────
+    // Dynamic: emits "Run shell command" row when query's first token is on
+    // $PATH. Cached lookups; fire-and-forget on activate.
+    const shellLookupCache = new Map();
+    async function isOnPath(token) {
+      if (shellLookupCache.has(token)) return shellLookupCache.get(token);
+      if (!token || token.indexOf("/") >= 0) { shellLookupCache.set(token, false); return false; }
+      try {
+        const r = await sd.proc.exec("/usr/bin/env", ["which", token], { timeout: 1 });
+        const ok = r && r.code === 0 && (r.stdout || "").trim().length > 0;
+        shellLookupCache.set(token, !!ok);
+        return !!ok;
+      } catch (e) { shellLookupCache.set(token, false); return false; }
+    }
+    const shellSource = {
+      id: "shellrunner",
+      dynamic: true,
+      async list(query) {
+        const q = (query || "").trim();
+        if (!q) return [];
+        const first = q.match(/^(\S+)/);
+        if (!first) return [];
+        const ok = await isOnPath(first[1]);
+        if (!ok) return [];
+        return [{
+          id:               "shell:active",
+          title:            q,
+          subtitle:         "Run shell command",
+          source:           "shellrunner",
+          payload:          { command: q },
+          defaultVerb:      "runshell",
+          verbs:            ["runshell"],
+          hideOnEmptyQuery: true,
+          bypassMatcher:    true
+        }];
+      }
+    };
+
+    // ─────────────────── files source (port of files.lua) ───────────────────
+    // Two modes: path mode (query starts with /, ~/, ./) lists directory
+    // children filtered by tail. Visited mode (no trigger) pulls dir entries
+    // from recents("files").
+    let HOME = "";
+    (async () => {
+      try {
+        const r = await sd.proc.exec("/usr/bin/whoami", []);
+        if (r && r.code === 0) HOME = "/Users/" + (r.stdout || "").trim();
+      } catch (e) {}
+    })();
+    function expandPath(p) {
+      if (p === "~") return HOME;
+      if (p.startsWith("~/")) return HOME + p.slice(1);
+      if (p.startsWith("./")) return HOME + p.slice(1);
+      return p;
+    }
+    function abbreviatePath(absPath) {
+      if (HOME && absPath.startsWith(HOME)) return "~" + absPath.slice(HOME.length);
+      return absPath;
+    }
+    function isPathTrigger(q) {
+      return q.startsWith("/") || q.startsWith("~/") || q.startsWith("./");
+    }
+    const MAX_PATH_RESULTS = 30;
+    const MAX_VISITED_RESULTS = 10;
+    async function listPathDir(query) {
+      const slashAt = query.lastIndexOf("/");
+      if (slashAt < 0) return [];
+      const dir = query.slice(0, slashAt);
+      const tail = query.slice(slashAt + 1);
+      let absDir;
+      if (dir === "") absDir = "/";
+      else if (dir === "~") absDir = HOME;
+      else absDir = expandPath(dir);
+      if (!absDir) absDir = "/";
+      const showHidden = tail.startsWith(".");
+      // ls -1A lists everything except . and ..; -1 hides dotfiles too.
+      const r = await sd.proc.exec("/bin/ls", [showHidden ? "-1A" : "-1", absDir],
+        { timeout: 2 }).catch(() => null);
+      if (!r || r.code !== 0) return [];
+      const names = (r.stdout || "").split("\n").filter(n => n && n !== "." && n !== "..");
+      const scored = [];
+      for (const name of names) {
+        let score = 0, positions = [];
+        if (tail !== "") {
+          const m = fuzzyMatch(tail, name);
+          if (!m) continue;
+          score = m.score;
+          positions = m.positions;
+        }
+        scored.push({ name, score, positions });
+      }
+      scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+      const slice = scored.slice(0, MAX_PATH_RESULTS);
+      const out = [];
+      for (const c of slice) {
+        const full = absDir === "/" ? "/" + c.name : absDir + "/" + c.name;
+        const st = await sd.proc.exec("/usr/bin/stat", ["-f", "%HT", full],
+          { timeout: 1 }).catch(() => null);
+        const isDir = st && st.code === 0 && (st.stdout || "").trim() === "Directory";
+        out.push({
+          id:               full,
+          title:            c.name,
+          subtitle:         abbreviatePath(absDir),
+          source:           "files",
+          payload:          { path: full, isDir },
+          defaultVerb:      isDir ? "enter" : "open",
+          verbs:            isDir
+                              ? ["enter", "open", "reveal", "copypath"]
+                              : ["open", "reveal", "copypath"],
+          hideOnEmptyQuery: true,
+          bypassMatcher:    true,
+          matchPositions:   c.positions
+        });
+      }
+      return out;
+    }
+    function listVisited(query) {
+      if (!query) return [];
+      const lower = query.toLowerCase();
+      const out = [];
+      const ent = recents.entries("files");
+      for (const absPath in ent) {
+        const base = absPath.split("/").pop() || absPath;
+        if (base.toLowerCase().indexOf(lower) >= 0) {
+          out.push({
+            id:               absPath,
+            title:            base,
+            subtitle:         abbreviatePath(absPath.replace(/\/[^/]+$/, "") || "/"),
+            source:           "files",
+            payload:          { path: absPath, isDir: true },
+            defaultVerb:      "enter",
+            verbs:            ["enter", "open", "reveal", "copypath"],
+            hideOnEmptyQuery: true
+          });
+          if (out.length >= MAX_VISITED_RESULTS) break;
+        }
+      }
+      return out;
+    }
+    const filesSource = {
+      id: "files",
+      dynamic: true,
+      abbreviatePath,
+      async list(query) {
+        const q = (query || "").trim();
+        if (!q) return [];
+        if (isPathTrigger(q)) return await listPathDir(q);
+        return listVisited(q);
+      }
+    };
+
+    // ──────────────────────────── verbs ─────────────────────────────────────
+    // keepOpen verbs return { rewriteQuery } to mutate state instead of
+    // closing the palette (enter directory).
+    const VERBS = {
+      activate: {
+        id: "activate", label: "Activate",
+        async run(item) {
+          if (item.source === "menuitems") {
+            if (item.enabled === false) return false;
+            const pid = item.payload && item.payload.appPid;
+            const path = item.payload && item.payload.path;
+            if (!pid || !path) return false;
+            return await sd.apps.selectMenuItem(pid, path);
+          }
+          if (item.payload && item.payload.bundleId) {
+            return await sd.apps.focus(item.payload.bundleId);
+          }
+        }
+      },
+      launch: {
+        id: "launch", label: "Launch",
+        async run(item) {
+          // installedapps: open the .app path. apps: focus by bundleId.
+          if (item.payload && item.payload.bundleId) {
+            return await sd.apps.launch(item.payload.bundleId);
+          }
+          if (item.payload && item.payload.path) {
+            return await sd.proc.exec("/usr/bin/open", [item.payload.path]);
+          }
+        }
+      },
+      hide: {
+        id: "hide", label: "Hide",
+        async run(item) {
+          if (item.payload && item.payload.bundleId) {
+            return await sd.apps.hide(item.payload.bundleId);
+          }
+        }
+      },
+      quit: {
+        id: "quit", label: "Quit",
+        async run(item) {
+          if (item.payload && item.payload.bundleId) {
+            return await sd.apps.kill(item.payload.bundleId);
+          }
+        }
+      },
+      copypath: {
+        id: "copypath", label: "Copy Path",
+        async run(item) {
+          const p = item.payload && item.payload.path;
+          if (p) await sd.pasteboard.set(p);
+        }
+      },
+      copynumber: {
+        id: "copynumber", label: "Copy",
+        async run(item) {
+          const v = item.payload && (item.payload.formatted || String(item.payload.value));
+          if (v != null) await sd.pasteboard.set(String(v));
+        }
+      },
+      enter: {
+        id: "enter", label: "Enter", keepOpen: true,
+        async run(item) {
+          const p = item.payload && item.payload.path;
+          if (!p) return null;
+          recents.record("files", p);
+          return { rewriteQuery: abbreviatePath(p) + "/" };
+        }
+      },
+      open: {
+        id: "open", label: "Open",
+        async run(item) {
+          const p = item.payload && item.payload.path;
+          if (!p) return;
+          await sd.proc.exec("/usr/bin/open", [p]);
+          const parent = p.replace(/\/[^/]+$/, "");
+          if (parent) recents.record("files", parent);
+        }
+      },
+      reveal: {
+        id: "reveal", label: "Reveal in Finder",
+        async run(item) {
+          const p = item.payload && item.payload.path;
+          if (!p) return;
+          await sd.proc.exec("/usr/bin/open", ["-R", p]);
+        }
+      },
+      runshell: {
+        id: "runshell", label: "Run",
+        async run(item) {
+          const cmd = item.payload && item.payload.command;
+          if (!cmd) return;
+          // Fire-and-forget via zsh -lc (matches runshell.lua).
+          sd.proc.exec("/bin/zsh", ["-lc", cmd]).catch(() => {});
+        }
+      }
+    };
+
+    // ───────────────────────────── state ─────────────────────────────────────
+    const state = {
+      open: false,
+      stage: "noun",                   // "noun" | "verb"
+      query: "",
+      raw: [],
+      items: [],
+      focused: 0,
+      selectedItem: null,
+      history: []
+    };
+
+    // ────────────────────────────── render ───────────────────────────────────
+    const $q = document.getElementById("q");
+    const $results = document.getElementById("results");
+    const $crumbs = document.getElementById("crumbs");
+    const $footer = document.getElementById("footer");
+    const iconCache = new Map();
+
+    function highlightTitle(title, positions) {
+      if (!positions || positions.length === 0) return title;
+      const out = [];
+      const set = new Set(positions);
+      for (let i = 0; i < title.length; i++) {
+        if (set.has(i)) out.push("<b>" + title[i] + "</b>");
+        else out.push(title[i]);
+      }
+      return out.join("");
+    }
+
+    async function iconFor(item) {
+      const key = item.id;
+      if (iconCache.has(key)) return iconCache.get(key);
+      let url = null;
+      if (item.source === "menuitems" && item.payload && item.payload.appPid) {
+        const running = sd.apps.running.peek() || [];
+        const a = running.find(x => x.pid === item.payload.appPid);
+        if (a && a.bundleId) url = await sd.icons.app(a.bundleId, { size: 32 });
+      } else if (item.payload && item.payload.bundleId) {
+        url = await sd.icons.app(item.payload.bundleId, { size: 32 });
+      } else if (item.payload && item.payload.path) {
+        url = await sd.icons.file(item.payload.path, { size: 32 });
+      }
+      iconCache.set(key, url);
+      return url;
+    }
+
+    function renderCrumbs() {
+      $crumbs.innerHTML = "";
+      if (state.stage === "verb" && state.selectedItem) {
+        const a = document.createElement("span");
+        a.className = "crumb";
+        a.textContent = state.selectedItem.title;
+        const arrow = document.createElement("span");
+        arrow.className = "arrow"; arrow.textContent = "›";
+        const verb = document.createElement("span"); verb.className = "stage"; verb.textContent = "verb";
+        $crumbs.append(a, arrow, verb);
+      }
+    }
+
+    function renderFooter() {
+      $footer.innerHTML = "";
+      const hints = [];
+      const item = state.items[state.focused];
+      if (state.stage === "noun" && item) {
+        const default_ = item.defaultVerb || "activate";
+        if (VERBS[default_]) hints.push(["↵", VERBS[default_].label]);
+        let n = 0;
+        for (const vid of (item.verbs || [])) {
+          if (vid === default_) continue;
+          const v = VERBS[vid];
+          if (!v) continue;
+          n += 1;
+          if (n > 9) break;
+          hints.push(["⌘" + n, v.label]);
+        }
+        if (item.fromHistory) hints.push(["⌘⌫", "Forget"]);
+        hints.push(["tab", "verbs"]);
+      } else if (state.stage === "verb") {
+        hints.push(["↵", "run"]);
+        hints.push(["⇧⇥", "back"]);
+      }
+      hints.push(["esc", "close"]);
+      for (const [k, l] of hints) {
+        const w = document.createElement("span"); w.className = "hint";
+        const kk = document.createElement("kbd"); kk.textContent = k;
+        const ll = document.createElement("span"); ll.textContent = " " + l;
+        w.append(kk, ll); $footer.append(w);
+      }
+    }
+
+    function render() {
+      renderCrumbs();
+      $results.innerHTML = "";
+      state.items.slice(0, 9).forEach((item, i) => {
+        const row = document.createElement("div");
+        row.className = "row" + (i === state.focused ? " selected" : "");
+        const ic = document.createElement("img"); ic.className = "icon";
+        iconFor(item).then(u => { if (u) ic.src = u; });
+        const num = document.createElement("span"); num.className = "num"; num.textContent = (i + 1).toString();
+        const name = document.createElement("span"); name.className = "name";
+        name.innerHTML = highlightTitle(item.title, item.matchPositions);
+        const sub = document.createElement("span"); sub.className = "sub";
+        // Menuitems lean on accessory (keyboard shortcut) over subtitle so
+        // long menu paths don't crowd the right edge of the row.
+        sub.textContent = item.accessory || item.subtitle || "";
+        const accessory = document.createElement("span"); accessory.className = "accessory";
+        if (item.fromHistory) accessory.textContent = "•";
+        row.append(num, ic, name, sub, accessory);
+        row.addEventListener("click", () => { state.focused = i; activateFocused(); });
+        $results.append(row);
+      });
+      renderFooter();
+    }
+
+    // ───────────────────────────── stage ops ─────────────────────────────────
+    async function buildPool() {
+      if (state.stage === "verb") return state.raw;
+      const pool = state.raw.slice();
+      // Dynamic sources re-evaluate per query.
+      const dyn = [calcSource, shellSource, filesSource];
+      for (const src of dyn) {
+        try {
+          const list = await src.list(state.query);
+          if (Array.isArray(list)) for (const it of list) pool.push(it);
+        } catch (e) { console.error("palette: dynamic source", src.id, e); }
+      }
+      return pool;
+    }
+    async function refresh() {
+      state.items = rank(await buildPool(), state.query);
+      state.focused = Math.min(Math.max(0, state.focused), Math.max(0, state.items.length - 1));
+      render();
+    }
+    function pushStage(newStage, newRaw, opts) {
+      state.history.push({
+        stage: state.stage, query: state.query, raw: state.raw, items: state.items,
+        focused: state.focused, selectedItem: state.selectedItem
+      });
+      state.stage = newStage;
+      state.query = "";
+      state.raw = newRaw;
+      state.focused = 0;
+      if (opts && opts.selectedItem) state.selectedItem = opts.selectedItem;
+      $q.value = "";
+      refresh();
+    }
+    function popStage() {
+      const prev = state.history.pop();
+      if (!prev) return false;
+      Object.assign(state, prev);
+      $q.value = state.query;
+      render();
+      return true;
+    }
+    function verbItemsFor(item) {
+      const declared = item.verbs || [item.defaultVerb || "activate"];
+      const out = [];
+      for (const vid of declared) {
+        const v = VERBS[vid];
+        if (v) out.push({
+          id: "verb:" + v.id, title: v.label, subtitle: "",
+          source: "verbs", payload: { verb: v }, defaultVerb: null,
+          matchPositions: []
+        });
+      }
+      return out;
+    }
+    function advanceFromNoun() {
+      if (state.stage !== "noun") return;
+      const item = state.items[state.focused];
+      if (!item) return;
+      const list = verbItemsFor(item);
+      if (list.length === 0) return;
+      pushStage("verb", list, { selectedItem: item });
+    }
+
+    async function runVerb(verb, item) {
+      if (!verb || !item) return;
+      if (verb.keepOpen) {
+        let directive = null;
+        try { directive = await verb.run(item); }
+        catch (e) { console.error("palette: verb failed", e); }
+        recents.record(item.source, item.id);
+        recents.record("verb:" + item.source, verb.id);
+        if (directive && directive.rewriteQuery != null) {
+          state.query = directive.rewriteQuery;
+          state.focused = 0;
+          $q.value = state.query;
+          await refresh();
+        }
+        return;
+      }
+      try { await verb.run(item); } catch (e) { console.error("palette: verb failed", e); }
+      recents.record(item.source, item.id);
+      recents.record("verb:" + item.source, verb.id);
+      dismiss();
+    }
+
+    async function activateFocused() {
+      if (state.stage === "noun") {
+        const item = state.items[state.focused];
+        if (!item) return;
+        const verb = VERBS[item.defaultVerb || "activate"];
+        if (verb) await runVerb(verb, item);
+      } else if (state.stage === "verb") {
+        const row = state.items[state.focused];
+        if (!row || !row.payload || !row.payload.verb) return;
+        await runVerb(row.payload.verb, state.selectedItem);
+      }
+    }
+
+    async function open() {
+      // Static sources fan out concurrently.
+      const [menuItems, apps, installed] = await Promise.all([
+        menuItemsSource.list().catch(() => []),
+        appsSource.list().catch(() => []),
+        installedSource.list().catch(() => [])
+      ]);
+      const raw = menuItems.concat(apps).concat(installed);
+      state.open = true; state.stage = "noun"; state.query = ""; state.raw = raw;
+      state.focused = 0; state.history = []; state.selectedItem = null;
+      $q.value = "";
+      await refresh();
+      await sd.window.invoke();
+      $q.focus();
+    }
+    async function dismiss() {
+      state.open = false; state.history = [];
+      await sd.window.dismiss();
+    }
+
+    // ──────────────────────────── keyboard ────────────────────────────────────
+    $q.addEventListener("input", () => { state.query = $q.value; state.focused = 0; refresh(); });
+    $q.addEventListener("keydown", async (e) => {
+      const item = state.items[state.focused];
+      if (e.key === "ArrowDown") { e.preventDefault();
+        if (state.focused < state.items.length - 1) { state.focused += 1; render(); }
+        return;
+      }
+      if (e.key === "ArrowUp") { e.preventDefault();
+        if (state.focused > 0) { state.focused -= 1; render(); }
+        return;
+      }
+      if (e.key === "Enter") { e.preventDefault(); await activateFocused(); return; }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        if (e.shiftKey) { if (!popStage()) await dismiss(); }
+        else {
+          // Files-source items: Tab autocompletes the query (HS behavior).
+          if (state.stage === "noun" && item && item.source === "files"
+              && item.payload && item.payload.path) {
+            let nq = abbreviatePath(item.payload.path);
+            if (item.payload.isDir) {
+              nq += "/";
+              recents.record("files", item.payload.path);
+            }
+            state.query = nq;
+            state.focused = 0;
+            $q.value = nq;
+            await refresh();
+            return;
+          }
+          advanceFromNoun();
+        }
+        return;
+      }
+      if (e.key === "Escape") { e.preventDefault();
+        if (!popStage()) await dismiss();
+        return;
+      }
+      if (e.key === "Backspace" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        if (state.stage === "noun" && item && item.fromHistory) {
+          recents.forget(item.source, item.id);
+          refresh();
+        }
+        return;
+      }
+      // Cmd+1..9 — pick alternate verb for focused noun.
+      if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        if (state.stage !== "noun" || !item) return;
+        const n = parseInt(e.key, 10);
+        const default_ = item.defaultVerb || "activate";
+        let count = 0;
+        for (const vid of (item.verbs || [])) {
+          if (vid === default_) continue;
+          count += 1;
+          if (count === n) {
+            const v = VERBS[vid];
+            if (v) await runVerb(v, item);
+            return;
+          }
+        }
+        return;
+      }
+      // Alt+1..9 — pick Nth visible row and run its default verb.
+      if (e.altKey && /^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        const n = parseInt(e.key, 10);
+        const row = state.items[n - 1];
+        if (!row) return;
+        state.focused = n - 1;
+        if (state.stage === "noun") {
+          const verb = VERBS[row.defaultVerb || "activate"];
+          if (verb) await runVerb(verb, row);
+        } else if (state.stage === "verb" && row.payload && row.payload.verb) {
+          await runVerb(row.payload.verb, state.selectedItem);
+        }
+      }
+    });
+
+    // ───────────────────────────── lifecycle ──────────────────────────────────
+    window.onHotkey_open = () => open();
+
+    (async () => {
+      await recents.init();
+      // Fire and forget — mdfind ~500ms; we don't block opening.
+      rebuildInstalled();
+    })();
+  </script>
+</body>
+</html>

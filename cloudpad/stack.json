@@ -1,0 +1,19 @@
+{
+  "id": "cloudpad",
+  "name": "CloudPad",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 260, "h": 96 },
+  "permissions": [
+    "httpserver",
+    "display",
+    "events",
+    "net",
+    "mouse",
+    "pasteboard",
+    "cursor",
+    "fs"
+  ],
+  "hotkeys": [
+    { "key": "ctrl+cmd+c", "callback": "copyUrl" }
+  ]
+}

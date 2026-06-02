@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const DOWNLOADS = "~/Downloads";
+  const SUPPORTED = {
+    dmg: "image", iso: "image", cdr: "image", img: "image", sparseimage: "image",
+    pkg: "package", mpkg: "package"
+  };
+  const PARTIAL_RE = /\.(part|download|crdownload)$/i;
+  const STABILITY_CHECKS = 3;
+  const STABILITY_INTERVAL_MS = 1000;
+  const DEBOUNCE_MS = 500;
+  const PENDING_RESCAN_MS = 3000;
+  const HANDLED_TTL_S = 86400;
+  const GRACEFUL_QUIT_DEADLINE_MS = 3000;
+  const GRACEFUL_QUIT_POLL_MS = 200;
+  const POST_KILL_DELAY_MS = 300;
+
+  const handledFiles = new Map();
+  const fileStates = new Map();
+  let debounceTimer = null;
+  let pendingTimer = null;
+
+  function notify(body) { sd.notify.show({ title: "AutoDMG", body }); }
+
+  function basename(p) { return p.split("/").pop() || p; }
+
+  function extOf(name) {
+    const m = name.match(/\.([^.]+)$/);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function getFileType(name) {
+    const e = extOf(name);
+    return e ? (SUPPORTED[e] || null) : null;
+  }
+
+  function shQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
+
+  async function runAdminScript(shellCmd) {
+    const script = 'do shell script "' + shellCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '" with administrator privileges';
+    const r = await sd.applescript.run(script);
+    return !!(r && r.ok);
+  }
+
+  async function checkStable(filePath) {
+    const stat = await sd.fs.stat(filePath);
+    if (!stat) return false;
+    const size = stat.size;
+    const state = fileStates.get(filePath);
+    if (!state) {
+      fileStates.set(filePath, { size, checks: 0 });
+      return false;
+    }
+    if (state.size === size) {
+      state.checks += 1;
+      if (state.checks >= STABILITY_CHECKS) return true;
+    } else {
+      state.size = size;
+      state.checks = 0;
+    }
+    return false;
+  }
+
+  async function scan() {
+    const names = await sd.fs.list(DOWNLOADS);
+    if (!names) return;
+    const nowS = Math.floor(Date.now() / 1000);
+    let pending = false;
+    const downloadsAbs = await resolveDownloadsAbs();
+
+    for (const name of names) {
+      const fType = getFileType(name);
+      if (!fType) continue;
+      if (PARTIAL_RE.test(name)) continue;
+      const fullPath = downloadsAbs + "/" + name;
+      const stamp = handledFiles.get(fullPath);
+      if (stamp && (nowS - stamp) > HANDLED_TTL_S) handledFiles.delete(fullPath);
+      if (handledFiles.has(fullPath)) continue;
+
+      const stable = await checkStable(fullPath);
+      if (stable) {
+        handledFiles.set(fullPath, nowS);
+        fileStates.delete(fullPath);
+        processFile(fullPath, fType);
+      } else {
+        pending = true;
+      }
+    }
+
+    if (pending) {
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => { pendingTimer = null; scan(); }, PENDING_RESCAN_MS);
+    }
+  }
+
+  let _downloadsAbs = null;
+  async function resolveDownloadsAbs() {
+    if (_downloadsAbs) return _downloadsAbs;
+    const s = await sd.fs.stat(DOWNLOADS);
+    _downloadsAbs = (s && s.path) ? s.path : DOWNLOADS;
+    return _downloadsAbs;
+  }
+
+  function processFile(fullPath, fType) {
+    if (fType === "image") openDiskImage(fullPath);
+    else if (fType === "package") installPKG(fullPath, null, fullPath);
+  }
+
+  async function openDiskImage(imagePath) {
+    notify("Mounting " + basename(imagePath));
+    const r = await sd.proc.exec("/usr/bin/hdiutil", [
+      "attach", imagePath, "-plist", "-nobrowse", "-noautoopen",
+      "-noverify", "-ignorebadchecksums", "-noidme"
+    ]);
+    if (!r || r.code !== 0) {
+      const err = (r && r.stderr) || "";
+      if (/authentication|password/i.test(err)) {
+        notify("Encrypted image — mount manually");
+        handledFiles.delete(imagePath);
+      } else {
+        notify("Failed to mount " + basename(imagePath));
+      }
+      return;
+    }
+    const mountPoint = extractMountPoint(r.stdout || "");
+    if (!mountPoint) {
+      notify("Mount failed (no path)");
+      handledFiles.delete(imagePath);
+      return;
+    }
+    installContents(mountPoint, imagePath);
+  }
+
+  function extractMountPoint(plistText) {
+    const lines = plistText.split("\n");
+    let lastKey = null;
+    let capture = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      const km = line.match(/^<key>([^<]+)<\/key>$/);
+      if (km) { lastKey = km[1]; capture = (lastKey === "mount-point"); continue; }
+      if (capture) {
+        const sm = line.match(/^<string>([^<]*)<\/string>$/);
+        if (sm && sm[1]) return sm[1];
+        capture = false;
+      }
+    }
+    const m = plistText.match(/<key>mount-point<\/key>\s*<string>([^<]+)<\/string>/);
+    return m ? m[1] : null;
+  }
+
+  async function installContents(mountPoint, sourceFile) {
+    const apps = await findFiles(mountPoint, "*.app");
+    if (apps.length > 0) {
+      pickAppAndInstall(apps, mountPoint, sourceFile);
+      return;
+    }
+    const pkgs = await findFiles(mountPoint, "*.pkg");
+    if (pkgs.length > 0) {
+      installPKG(pkgs[0], mountPoint, sourceFile);
+    } else {
+      notify("Empty or unsupported image");
+    }
+  }
+
+  async function findFiles(mountPoint, glob) {
+    const r = await sd.proc.exec("/usr/bin/find", [mountPoint, "-name", glob, "-maxdepth", "1"]);
+    if (!r || r.code !== 0 || !r.stdout) return [];
+    return r.stdout.split("\n").map(s => s.trim()).filter(s => s.length > 0);
+  }
+
+  async function pickAppAndInstall(apps, mountPoint, sourceFile) {
+    if (apps.length === 1) {
+      copyAppToApplications(apps[0], mountPoint, sourceFile);
+      return;
+    }
+    const items = apps.map((p, i) => ({
+      id: String(i),
+      title: (p.match(/([^/]+)\.app$/) || [])[1] || p
+    }));
+    const pickedId = await sd.menu.popup(items);
+    if (pickedId == null) {
+      notify("No app chosen; unmounting");
+      sd.proc.exec("/usr/bin/hdiutil", ["detach", mountPoint, "-force"]);
+      return;
+    }
+    const chosen = apps[parseInt(pickedId, 10)];
+    if (chosen) copyAppToApplications(chosen, mountPoint, sourceFile);
+  }
+
+  async function copyAppToApplications(appLocation, mountPoint, sourceFile) {
+    const appName = (appLocation.match(/([^/]+)\.app$/) || [])[1] || basename(appLocation);
+    const targetPath = "/Applications/" + appName + ".app";
+
+    const running = await isAppRunning(appName);
+    if (running) {
+      const proceed = await promptAndQuit(appName);
+      if (!proceed) { notify("Install cancelled for " + appName); return; }
+    }
+    await doInstall(appLocation, targetPath, appName, mountPoint, sourceFile);
+  }
+
+  async function isAppRunning(appName) {
+    const apps = sd.apps.running.value || [];
+    return apps.some(a => a.name === appName);
+  }
+
+  function bundleIdForName(appName) {
+    const apps = sd.apps.running.value || [];
+    const hit = apps.find(a => a.name === appName);
+    return hit ? hit.bundleId : null;
+  }
+
+  async function promptAndQuit(appName) {
+    const script =
+      'display dialog "' + appName.replace(/"/g, '\\"') +
+      ' is running. Quit it to replace with the new version?" ' +
+      'with title "AutoDMG: Install update for ' + appName.replace(/"/g, '\\"') + '?" ' +
+      'buttons {"Cancel", "Quit & Install"} default button "Quit & Install"';
+    const r = await sd.applescript.run(script);
+    if (!r || !r.ok) return false;
+    if (!/Quit & Install/.test(r.result || "")) return false;
+    await gracefulQuit(appName);
+    return true;
+  }
+
+  async function gracefulQuit(appName) {
+    const bid = bundleIdForName(appName);
+    if (!bid) return;
+    await sd.apps.kill(bid, false);
+    const deadline = Date.now() + GRACEFUL_QUIT_DEADLINE_MS;
+    while (Date.now() < deadline) {
+      await sleep(GRACEFUL_QUIT_POLL_MS);
+      if (!(await isAppRunning(appName))) return;
+    }
+    await sd.apps.kill(bid, true);
+    await sleep(POST_KILL_DELAY_MS);
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function doInstall(appLocation, targetPath, appName, mountPoint, sourceFile) {
+    const rm = await sd.proc.exec("/bin/rm", ["-rf", targetPath]);
+    if (rm && rm.code === 0) {
+      const cp = await sd.proc.exec("/bin/cp", ["-Rf", appLocation, "/Applications/"]);
+      if (cp && cp.code === 0) {
+        await sd.proc.exec("/usr/bin/xattr", ["-dr", "com.apple.quarantine", targetPath]);
+        notify(appName + " installed");
+        cleanup(mountPoint, sourceFile);
+        return;
+      }
+      notify("Install failed: " + ((cp && cp.stderr) || "unknown"));
+      return;
+    }
+    const fullCmd =
+      "rm -rf " + shQuote(targetPath) +
+      " && cp -Rf " + shQuote(appLocation) + " /Applications/" +
+      " && xattr -dr com.apple.quarantine " + shQuote(targetPath);
+    const ok = await runAdminScript(fullCmd);
+    if (ok) {
+      notify(appName + " installed (admin)");
+      cleanup(mountPoint, sourceFile);
+    } else {
+      notify("Admin install cancelled");
+    }
+  }
+
+  async function installPKG(pkgPath, mountPoint, sourceFile) {
+    notify("Installing " + basename(pkgPath));
+    const installCmd = "/usr/sbin/installer -pkg " + shQuote(pkgPath) + " -target /";
+    const ok = await runAdminScript(installCmd);
+    if (ok) {
+      notify("PKG installed");
+      cleanup(mountPoint, sourceFile);
+    } else {
+      notify("PKG install cancelled");
+    }
+  }
+
+  async function cleanup(mountPoint, sourceFile) {
+    if (mountPoint) {
+      const r = await sd.proc.exec("/usr/bin/hdiutil", ["detach", mountPoint, "-force"]);
+      if (!r || r.code !== 0) {
+        handledFiles.delete(sourceFile);
+        notify("Couldn't unmount; will retry");
+        return;
+      }
+    }
+    const ok = await sd.fs.delete(sourceFile);
+    const name = basename(sourceFile);
+    if (ok) {
+      notify("Cleaned up " + name);
+    } else {
+      await sd.proc.exec("/bin/rm", ["-f", sourceFile]);
+    }
+  }
+
+  async function start() {
+    await resolveDownloadsAbs();
+    await sd.fs.watch(DOWNLOADS, () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => { debounceTimer = null; scan(); }, DEBOUNCE_MS);
+    });
+    scan();
+  }
+
+  start();
+</script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Undo Close</title>
+</head>
+<body>
+  <div id="toast" class="toast" aria-hidden="true">
+    <span class="base">Undo close </span><span id="label" class="bold"></span><span class="bold">  ⌘⌥Z  </span><span id="left" class="dim">5s</span>
+  </div>
+  <script type="module">
+    // UndoClose — faithful port of UndoClose.lua (sryo).
+    //
+    // Watches for app terminations + Finder window closes. On either, shows a
+    // transient toast at top of screen with a 5-second countdown; ⌘⌥Z within
+    // that window relaunches the app, or `open`s the folder. After 5s, hidden.
+    // No persistent recents list — just the last thing.
+    import { sd } from "sd://runtime/api.js";
+
+    const TIMEOUT_S = 5;
+    const $toast = document.getElementById("toast");
+    const $label = document.getElementById("label");
+    const $left  = document.getElementById("left");
+
+    let armedAction = null;
+    let armedDeadline = 0;
+    let tickHandle = null;
+
+    function showToast(label) {
+      $label.textContent = label;
+      $toast.classList.add("on");
+    }
+    function hideToast() {
+      $toast.classList.remove("on");
+      armedAction = null;
+      armedDeadline = 0;
+      clearInterval(tickHandle);
+      tickHandle = null;
+    }
+    function tick() {
+      const leftMs = armedDeadline - Date.now();
+      if (leftMs <= 0) { hideToast(); return; }
+      $left.textContent = Math.ceil(leftMs / 1000) + "s";
+    }
+    function arm(label, action) {
+      armedAction = action;
+      armedDeadline = Date.now() + TIMEOUT_S * 1000;
+      showToast(label);
+      $left.textContent = TIMEOUT_S + "s";
+      clearInterval(tickHandle);
+      tickHandle = setInterval(tick, 250);
+    }
+
+    window.onHotkey_undo = async () => {
+      if (!armedAction) return;
+      const a = armedAction;
+      hideToast();
+      try { await a(); } catch (e) { console.error("undoclose: action failed", e); }
+    };
+
+    // ──────────────────── App-terminated detector ────────────────────────────
+    // sd.apps doesn't expose a terminated event; diff the running list.
+    let prevApps = new Map();   // bundleId → name
+    sd.apps.running.subscribe((apps) => {
+      if (!apps) return;
+      const now = new Map();
+      for (const a of apps) if (a.bundleId) now.set(a.bundleId, a.name);
+      if (prevApps.size > 0) {
+        for (const [bid, name] of prevApps) {
+          if (!now.has(bid)) {
+            // The Lua filtered to apps with a bundle ID — we already do.
+            arm(name, async () => { await sd.apps.launch(bid); });
+          }
+        }
+      }
+      prevApps = now;
+    });
+
+    // ──────────────────── Finder window path tracker ─────────────────────────
+    // Per the Lua: track each Finder window's current folder via AppleScript.
+    // The Lua keys by hs.window:id() which is a stable CGWindowID; stackd's
+    // sd.windows.focused doesn't expose a window id yet (the AX/CG mapping
+    // needs _AXUIElementGetWindow private SPI). v0: track only the most
+    // recently focused Finder path. Trade-off: if you have multiple Finder
+    // windows and close a background one, we offer to reopen the foreground
+    // one instead. Good enough until window-id support lands.
+    let lastFinderPath = null;
+    let captureTimer = null;
+
+    async function captureFinderPath() {
+      const r = await sd.proc.exec("/usr/bin/osascript", ["-e",
+        'tell application "Finder"\n' +
+        '  try\n' +
+        '    return POSIX path of (target of front window as alias)\n' +
+        '  on error\n' +
+        '    return ""\n' +
+        '  end try\n' +
+        'end tell'
+      ]);
+      const path = (r && r.stdout || "").trim();
+      if (path) lastFinderPath = path;
+    }
+
+    sd.windows.focused.subscribe((w) => {
+      if (!w || w.app !== "Finder") return;
+      // Match the Lua's 0.2s wait for AppleScript to settle after focus change.
+      clearTimeout(captureTimer);
+      captureTimer = setTimeout(captureFinderPath, 200);
+    });
+
+    window.onBang_sd_window_destroyed = (detail) => {
+      if (!detail) return;
+      if (detail.app === "Finder" && lastFinderPath) {
+        const path = lastFinderPath;
+        lastFinderPath = null;
+        const folderName = (path.replace(/\/$/, "").split("/").pop()) || "Folder";
+        arm(`Finder: ${folderName}`, async () => {
+          await sd.proc.exec("/usr/bin/open", [path]);
+        });
+      }
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "id": "muse",
+  "name": "Muse",
+  "invocable": true,
+  "region": "fullscreen",
+  "size": { "w": 0, "h": 0 },
+  "permissions": ["ax", "windows", "appearance", "events", "pasteboard", "proc", "fs", "settings", "app"],
+  "eventtap": [
+    { "event": "flagsChanged", "callback": "flags" }
+  ],
+  "hotkeys": [
+    { "key": "cmd+shift+s",   "callback": "captureRegion" },
+    { "key": "cmd+shift+v",   "callback": "pasteContext" },
+    { "key": "cmd+backspace", "callback": "clearAttachments" }
+  ]
+}

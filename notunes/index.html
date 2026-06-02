@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body>
+<script type="module">
+  // NoTunes — port of NoTunes.lua.
+  //
+  // If Music or iTunes launches, kill it; then launch Spotify instead.
+  //
+  // The Lua also intercepts the systemDefined Play media key when Spotify
+  // isn't running and launches Spotify (consuming the event so Music doesn't
+  // open). stackd's EventTap is currently .listenOnly so handlers can't
+  // consume events — deferred until sd.eventtap.intercept lands.
+  import { sd } from "sd://runtime/api.js";
+
+  const BLOCKED = new Set(["com.apple.Music", "com.apple.iTunes"]);
+  const SPOTIFY = "com.spotify.client";
+
+  // Kill Music/iTunes whenever they're seen, not just on new launches —
+  // the lua version watches the launch event only, but in practice users
+  // want this stronger guarantee (a Music process that survives a stack
+  // reload, or appears mid-session via some indirect launch path, should
+  // still get killed). Every snapshot fire, scan for any blocked app and
+  // kill it; the next snapshot will confirm it's gone.
+  sd.apps.running.subscribe(async (apps) => {
+    if (!apps) return;
+    let killed = false;
+    for (const app of apps) {
+      if (BLOCKED.has(app.bundleId)) {
+        await sd.apps.kill(app.bundleId);
+        killed = true;
+      }
+    }
+    if (killed) {
+      // Match the Lua's 0.1s delay — gives macOS time to register the kill
+      // before launchOrFocus, otherwise the launch can race the death and
+      // re-open Music briefly.
+      setTimeout(() => {
+        const running = apps.find(a => a.bundleId === SPOTIFY);
+        if (!running) sd.apps.launch(SPOTIFY);
+      }, 100);
+    }
+  });
+</script>
+</body>
+</html>

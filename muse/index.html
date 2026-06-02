@@ -1,0 +1,593 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Muse</title>
+</head>
+<body>
+  <div id="muse" data-open="0">
+    <div class="input-band">
+      <div class="input" id="input" contenteditable="false" spellcheck="false"></div>
+      <div class="chips">
+        <div class="chip-text" id="chip-text" title="text context">T</div>
+        <div class="chip-stack" id="chip-stack" data-count="0">
+          <span class="more" id="chip-more"></span>
+          <img class="s0" id="chip-s0"><img class="s1" id="chip-s1"><img class="s2" id="chip-s2">
+        </div>
+      </div>
+    </div>
+    <div class="middle">
+      <div class="hints" id="hints">
+        <div class="row"><span class="key">⌘⇧S</span> attach</div>
+        <div class="row"><span class="key">⌘⇧V</span> paste</div>
+        <div class="row"><span class="key">⌘⌫</span> clear</div>
+      </div>
+      <div class="matrix" id="matrix"></div>
+      <div class="spacer"></div>
+    </div>
+    <div class="output" id="output"></div>
+  </div>
+
+  <script type="module">
+    import { sd }       from "sd://runtime/api.js";
+    import { backends, pick } from "./backends/index.js";
+
+    const TIMINGS = {
+      doubleTapMs:     250,
+      continueMs:      600,
+      typingPauseMs:   1000,
+      successHoldMs:   700,
+      cursorBlinkMs:   530,
+      pasteInjectMs:   40,
+      pasteRestoreMs:  120,
+      streamThrottleMs: 33
+    };
+    const PANEL = 320;
+    const ANCHOR_OFFSET = 8;
+    const SCREEN_MARGIN = 8;
+
+    const RIGHT_CMD_KEYCODE      = 54;
+    const CGEVENT_CMD_FLAG       = 0x100000;
+
+    const $muse    = document.getElementById("muse");
+    const $input   = document.getElementById("input");
+    const $output  = document.getElementById("output");
+    const $chipText  = document.getElementById("chip-text");
+    const $chipStack = document.getElementById("chip-stack");
+    const $chipMore  = document.getElementById("chip-more");
+    const $chipImgs  = [
+      document.getElementById("chip-s0"),
+      document.getElementById("chip-s1"),
+      document.getElementById("chip-s2")
+    ];
+    const $matrix = document.getElementById("matrix");
+    const $hints  = document.getElementById("hints");
+
+    const MATRIX_CELLS = 25;
+    const cellEls = [];
+    for (let i = 0; i < MATRIX_CELLS; i++) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      $matrix.appendChild(cell);
+      cellEls.push(cell);
+    }
+    const PERIMETER = [0,1,2,3,4, 9,14,19,24, 23,22,21,20, 15,10,5];
+    const MATRIX_FRAMES = PERIMETER.map((_, f) => {
+      const lit = new Set();
+      for (let t = 0; t < 3; t++) {
+        const p = ((f - t) % PERIMETER.length + PERIMETER.length) % PERIMETER.length;
+        lit.add(PERIMETER[p]);
+      }
+      return lit;
+    });
+    const IDLE_MASK   = new Set([12]);
+    const CHECK_MASK  = new Set([4, 8, 10, 12, 16]);
+    const SAD_MASK    = new Set([6, 8, 16, 17, 18, 20, 24]);
+    const CROSS_MASK  = new Set([0, 4, 6, 8, 12, 16, 18, 20, 24]);
+    const RETURN_MASK = new Set([9, 11, 14, 15, 16, 17, 18, 21]);
+    const SMILEY_MASK = new Set([0, 2, 13, 16, 17]);
+
+    function paintMatrix(mask, klass) {
+      for (let i = 0; i < MATRIX_CELLS; i++) {
+        cellEls[i].className = "cell" + (mask.has(i) ? (" " + klass) : "");
+      }
+    }
+
+    let state = {
+      open:           false,
+      buffer:         "",
+      caret:          0,
+      response:       "",
+      history:        [],
+      attachments:    [],
+      textContext:    null,
+      pendingPrompt:  null,
+      capturing:      false,
+      streamingCtrl:  null,
+      lastClose:      0,
+      lastRCmdEdge:   0,
+      rCmdHeld:       false,
+      statusKind:     "idle",
+      statusTimer:    null,
+      typingTimer:    null,
+      streamThrottle: 0,
+      lastSubmittedPrompt: null
+    };
+
+    function setStatus(kind, opts) {
+      const reposition = opts && opts.reposition;
+      if (!reposition && state.statusTimer) { clearInterval(state.statusTimer); state.statusTimer = null; }
+      if (state.typingTimer && kind !== "typing") { clearTimeout(state.typingTimer); state.typingTimer = null; }
+      state.statusKind = kind;
+
+      if (kind === "thinking") {
+        let f = 0;
+        paintMatrix(MATRIX_FRAMES[0], "lit");
+        if (!reposition) {
+          const t0 = Date.now();
+          state.statusTimer = setInterval(() => {
+            const next = Math.floor((Date.now() - t0) / 100) % MATRIX_FRAMES.length;
+            if (next === f) return;
+            f = next;
+            paintMatrix(MATRIX_FRAMES[f], "lit");
+          }, 16);
+        }
+      } else if (kind === "success") {
+        paintMatrix(CHECK_MASK, "lit");
+        if (!reposition) {
+          state.statusTimer = setTimeout(() => {
+            if (state.statusKind === "success") {
+              setStatus(hasPasteableResponse() ? "ready" : "idle");
+            }
+          }, TIMINGS.successHoldMs);
+        }
+      } else if (kind === "ready")     paintMatrix(RETURN_MASK, "lit");
+      else if (kind === "typing")      paintMatrix(SMILEY_MASK, "lit");
+      else if (kind === "error")       paintMatrix(CROSS_MASK,  "err");
+      else if (kind === "softError")   paintMatrix(SAD_MASK,    "err");
+      else                             paintMatrix(IDLE_MASK,   "lit");
+    }
+
+    function hasPasteableResponse() {
+      for (let i = state.history.length - 1; i >= 0; i--) {
+        if (state.history[i].role === "assistant") return true;
+      }
+      return false;
+    }
+
+    function updateReadyState() {
+      if (state.streamingCtrl) return;
+      let want;
+      if (state.buffer !== "")          want = "typing";
+      else if (hasPasteableResponse())  want = "ready";
+      else                              want = "idle";
+      if (state.statusKind === "success" && want === "idle") return;
+      if (state.statusKind !== want) setStatus(want);
+      if (want === "typing") {
+        if (state.typingTimer) clearTimeout(state.typingTimer);
+        state.typingTimer = setTimeout(() => {
+          if (state.statusKind === "typing") setStatus("ready");
+        }, TIMINGS.typingPauseMs);
+      }
+    }
+
+    function lastReplyPreview(max) {
+      for (let i = state.history.length - 1; i >= 0; i--) {
+        if (state.history[i].role === "assistant") {
+          const s = (state.history[i].content || "").replace(/\s+/g, " ").replace(/^\s+/, "");
+          if (s.length === 0) return "";
+          if (s.length <= max) return s;
+          return s.slice(0, max) + "…";
+        }
+      }
+      return "";
+    }
+
+    function placeholderHTML() {
+      if (state.streamingCtrl) return `<span style="color:var(--muse-muted)">thinking…</span>`;
+      if (state.attachments.length > 0) {
+        const s = state.attachments.length === 1 ? "about this image…" : "about these images…";
+        return `<span style="color:var(--muse-muted)">${s}</span>`;
+      }
+      if (state.textContext)           return `<span style="color:var(--muse-muted)">about this selection…</span>`;
+      if (state.history.length > 0 && !state.pendingPrompt) {
+        const p = lastReplyPreview(50);
+        if (!p) return `<span class="accent">↵ to insert</span>`;
+        return `<span class="accent">↵ to insert</span><span style="color:var(--muse-muted)">: ${escapeHtml(p)}</span>`;
+      }
+      return `<span style="color:var(--muse-muted)">ask, summarize, rewrite…</span>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    }
+
+    function renderInput() {
+      if (state.buffer === "") {
+        $input.innerHTML = placeholderHTML();
+        $input.classList.add("placeholder");
+      } else {
+        $input.textContent = state.buffer;
+        $input.classList.remove("placeholder");
+      }
+
+      const n = state.attachments.length;
+      $chipStack.dataset.count = String(Math.min(n, 9));
+      $chipStack.dataset.overflow = n > 3 ? "1" : "0";
+      $chipMore.textContent = n > 3 ? `+${n - 3}` : "";
+      for (let slot = 0; slot < 3; slot++) {
+        const stepsFromFront = 2 - slot;
+        const idx = n - 1 - stepsFromFront;
+        const att = (idx >= 0) ? state.attachments[idx] : null;
+        if (att && att.dataUrl) {
+          $chipImgs[slot].src = att.dataUrl;
+          $chipImgs[slot].style.display = "block";
+        } else {
+          $chipImgs[slot].removeAttribute("src");
+          $chipImgs[slot].style.display = "none";
+        }
+      }
+
+      const hasText = !!(state.textContext && state.textContext.length);
+      $chipText.dataset.on = hasText ? "1" : "0";
+      $chipText.textContent = hasText
+        ? formatCount(countChars(state.textContext))
+        : "T";
+
+      $hints.style.display = (state.history.length === 0 && !state.pendingPrompt && !state.streamingCtrl) ? "block" : "none";
+    }
+
+    function renderOutput() {
+      let content = state.response;
+      if (!content) {
+        for (let i = state.history.length - 1; i >= 0; i--) {
+          if (state.history[i].role === "assistant") { content = state.history[i].content || ""; break; }
+        }
+      }
+      $output.classList.remove("error");
+      $output.textContent = content || "";
+    }
+
+    function renderError(message) {
+      $output.classList.add("error");
+      $output.textContent = message || "";
+    }
+
+    function countChars(s) {
+      return s ? [...s].length : 0;
+    }
+    function formatCount(n) {
+      if (n < 1000) return String(n);
+      if (n < 10000) return (n / 1000).toFixed(1) + "k";
+      return Math.round(n / 1000) + "k";
+    }
+
+    async function anchorPoint() {
+      try {
+        const elH = await sd.ax.focusedElement();
+        if (typeof elH === "number") {
+          let placed = null;
+          try {
+            const range = await sd.ax.attribute(elH, "AXSelectedTextRange");
+            if (range) {
+              const b = await sd.ax.parameterizedAttribute(elH, "AXBoundsForRange", range);
+              if (rectValid(b)) placed = { x: b.x, y: b.y, w: b.w, h: b.h };
+            }
+            if (!placed) {
+              const frame = await sd.ax.attribute(elH, "AXFrame");
+              if (rectValid(frame)) placed = { x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+            }
+          } finally {
+            await sd.ax.release(elH);
+          }
+          if (placed) return placed;
+        }
+      } catch (_) {}
+      const win = sd.windows.focused.peek();
+      if (win && win.frame) {
+        const f = win.frame;
+        return { x: f.x, y: f.y, w: f.w, h: f.h };
+      }
+      return null;
+    }
+
+    function rectValid(r) {
+      return r && typeof r.x === "number" && typeof r.y === "number"
+          && (r.w || 0) > 0 && (r.h || 0) > 0;
+    }
+
+    function placePanel(anchor) {
+      const sf = sd.screen.current && sd.screen.current.frame;
+      if (!sf) return;
+      let leadX, trailX, bottom;
+      if (anchor) {
+        leadX = anchor.x;
+        trailX = anchor.x + anchor.w;
+        bottom = anchor.y + anchor.h;
+      } else {
+        leadX = sf.x + sf.w / 2 - PANEL / 2;
+        trailX = leadX + PANEL;
+        bottom = sf.y + sf.h / 2 - PANEL / 2;
+      }
+
+      let x = leadX;
+      if (x + PANEL > sf.x + sf.w - SCREEN_MARGIN) x = trailX - PANEL;
+      if (x < sf.x + SCREEN_MARGIN) x = sf.x + SCREEN_MARGIN;
+      if (x + PANEL > sf.x + sf.w - SCREEN_MARGIN) x = sf.x + sf.w - PANEL - SCREEN_MARGIN;
+
+      let yScreen = bottom + ANCHOR_OFFSET;
+      if (yScreen + PANEL > sf.y + sf.h - SCREEN_MARGIN) yScreen = sf.y + sf.h - SCREEN_MARGIN - PANEL;
+      if (yScreen < sf.y + SCREEN_MARGIN) yScreen = sf.y + SCREEN_MARGIN;
+
+      // Convert from native screen coords (origin top-left of this display)
+      // to in-window px relative to our fullscreen WKWebView.
+      const localX = x - sf.x;
+      const localY = yScreen - sf.y;
+      $muse.style.left = `${localX}px`;
+      $muse.style.top  = `${localY}px`;
+    }
+
+    async function readSelectedTextContext() {
+      try {
+        const ax = await sd.ax.focused();
+        if (ax && typeof ax.selectedText === "string" && ax.selectedText.length > 0) {
+          return ax.selectedText;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    async function openOverlay(opts) {
+      if (state.open) return;
+      opts = opts || {};
+      const anchor = await anchorPoint();
+      placePanel(anchor);
+
+      state.open = true;
+      state.buffer = "";
+      state.caret = 0;
+      state.response = "";
+      state.attachments = [];
+      state.textContext = null;
+      state.pendingPrompt = null;
+      state.statusKind = "idle";
+      if (!opts.continued) {
+        state.history = [];
+        state.lastSubmittedPrompt = null;
+      }
+
+      const sel = await readSelectedTextContext();
+      if (sel) state.textContext = sel;
+
+      $muse.dataset.open = "1";
+      renderInput();
+      renderOutput();
+      setStatus("idle");
+      await sd.window.invoke();
+    }
+
+    async function closeOverlay() {
+      if (!state.open) return;
+      state.open = false;
+      if (state.statusTimer)   { clearInterval(state.statusTimer); clearTimeout(state.statusTimer); state.statusTimer = null; }
+      if (state.typingTimer)   { clearTimeout(state.typingTimer); state.typingTimer = null; }
+      if (state.streamingCtrl) { try { state.streamingCtrl.abort(); } catch (_) {} state.streamingCtrl = null; }
+      state.attachments = [];
+      state.textContext = null;
+      state.pendingPrompt = null;
+      state.buffer = "";
+      state.caret = 0;
+      state.response = "";
+      state.lastClose = Date.now();
+      $muse.dataset.open = "0";
+      await sd.window.dismiss();
+    }
+
+    async function commitResponse() {
+      let out = state.response;
+      if (!out) {
+        for (let i = state.history.length - 1; i >= 0; i--) {
+          if (state.history[i].role === "assistant") { out = state.history[i].content; break; }
+        }
+      }
+      if (!out) { await closeOverlay(); return; }
+      await closeOverlay();
+      setTimeout(async () => {
+        const saved = await sd.pasteboard.get();
+        await sd.pasteboard.set(out);
+        await sd.events.key("cmd+v");
+        setTimeout(() => {
+          if (saved && typeof saved === "string") sd.pasteboard.set(saved);
+        }, TIMINGS.pasteRestoreMs);
+      }, TIMINGS.pasteInjectMs);
+    }
+
+    async function submitPrompt() {
+      const userText = state.buffer;
+      if (!userText) return;
+      const ctx = state.textContext;
+      state.textContext = null;
+      let finalPrompt = userText;
+      if (ctx) finalPrompt = `<context>\n${ctx}\n</context>\n\n${userText}`;
+      const atts = state.attachments;
+      state.attachments = [];
+
+      const preferred = (await sd.settings.get("backend")) || "claude";
+      const needsVision = atts.length > 0;
+      let chosen = await pick(preferred, { needsVision });
+      if (!chosen && needsVision) chosen = await pick(preferred);
+
+      if (!chosen) {
+        const primary = backends[preferred];
+        const a = primary ? await primary.available() : null;
+        const why = a && a.reason ? a.reason : `no backend named ${preferred}`;
+        const hint = (primary && primary.guidance) || "(no setup hint)";
+        renderError(`Set up ${preferred} (${why}):\n${hint}.\n\nOther options live under backends/.`);
+        setStatus("softError");
+        return;
+      }
+      const backend = chosen.backend;
+      if (needsVision && !backend.multimodal) atts.length = 0;
+
+      state.response = "";
+      state.pendingPrompt = userText;
+      state.lastSubmittedPrompt = userText;
+      state.buffer = "";
+      state.caret = 0;
+      renderInput();
+      renderOutput();
+      setStatus("thinking");
+
+      const ctrl = new AbortController();
+      state.streamingCtrl = ctrl;
+      state.streamThrottle = 0;
+      try {
+        for await (const chunk of backend.stream({
+          prompt:      finalPrompt,
+          history:     state.history,
+          attachments: atts,
+          signal:      ctrl.signal
+        })) {
+          state.response += chunk;
+          const now = Date.now();
+          if (now - state.streamThrottle >= TIMINGS.streamThrottleMs) {
+            state.streamThrottle = now;
+            renderOutput();
+          }
+        }
+        renderOutput();
+        state.history.push({ role: "user",      content: finalPrompt });
+        state.history.push({ role: "assistant", content: state.response });
+        state.response = "";
+        state.pendingPrompt = null;
+        renderInput();
+        renderOutput();
+        setStatus("success");
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        setStatus("error");
+        const msg = (e && e.message) ? e.message : String(e);
+        renderError(`Muse [${chosen.name}]: ${msg.slice(0, 200)}`);
+        await sd.fs.write(
+          "~/.config/muse/muse.log",
+          `[${new Date().toISOString()}] ERROR backend=${chosen.name} prompt=${JSON.stringify(finalPrompt.slice(0, 500))} err=${msg}\n`
+        );
+      } finally {
+        if (state.streamingCtrl === ctrl) state.streamingCtrl = null;
+      }
+    }
+
+    async function captureRegion() {
+      if (state.capturing || !state.open) return;
+      state.capturing = true;
+      const path = `/tmp/muse-cap-${Date.now()}.png`;
+      $muse.style.visibility = "hidden";
+      try {
+        const r = await sd.proc.exec("/usr/sbin/screencapture", ["-i", "-x", "-t", "png", path], { timeout: 60 });
+        if (r && r.code === 0) {
+          const enc = await sd.proc.exec("/usr/bin/base64", ["-i", path], { timeout: 5 });
+          if (enc && enc.code === 0 && enc.stdout) {
+            const b64 = enc.stdout.replace(/\s+/g, "");
+            state.attachments.push({
+              mime:   "image/png",
+              base64: b64,
+              dataUrl: `data:image/png;base64,${b64}`
+            });
+            renderInput();
+          }
+          await sd.proc.exec("/bin/rm", ["-f", path]);
+        }
+      } finally {
+        $muse.style.visibility = "visible";
+        state.capturing = false;
+      }
+    }
+
+    async function pasteContext() {
+      if (!state.open) return;
+      const clip = await sd.pasteboard.get();
+      if (clip && typeof clip === "string" && clip.length > 0) {
+        state.textContext = clip;
+        renderInput();
+      }
+    }
+
+    function clearAttachments() {
+      if (!state.open) return;
+      if (state.attachments.length === 0 && !state.textContext) return;
+      state.attachments = [];
+      state.textContext = null;
+      renderInput();
+    }
+
+    sd.appearance.subscribe((a) => {
+      const dark = !!(a && a.dark);
+      document.documentElement.dataset.dark = dark ? "1" : "0";
+    });
+
+    window.onTap_flags = (e) => {
+      if (!e || e.keyCode !== RIGHT_CMD_KEYCODE) return;
+      const downNow = (e.flags & CGEVENT_CMD_FLAG) !== 0;
+      const now = Date.now();
+      if (downNow && !state.rCmdHeld) {
+        state.rCmdHeld = true;
+        const elapsed = now - state.lastRCmdEdge;
+        if (state.lastRCmdEdge > 0 && elapsed <= TIMINGS.doubleTapMs) {
+          state.lastRCmdEdge = 0;
+          if (state.open) {
+            closeOverlay();
+          } else {
+            const continued = state.history.length > 0 && (now - state.lastClose) <= TIMINGS.continueMs;
+            openOverlay({ continued });
+          }
+        } else {
+          state.lastRCmdEdge = now;
+        }
+      } else if (!downNow && state.rCmdHeld) {
+        state.rCmdHeld = false;
+        state.lastRCmdEdge = now;
+      }
+    };
+
+    window.onHotkey_captureRegion  = () => captureRegion();
+    window.onHotkey_pasteContext   = () => pasteContext();
+    window.onHotkey_clearAttachments = () => clearAttachments();
+
+    document.addEventListener("keydown", async (e) => {
+      if (!state.open) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        await closeOverlay();
+        return;
+      }
+      if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        if (state.streamingCtrl) return;
+        if (state.buffer !== "") await submitPrompt();
+        else                     await commitResponse();
+        return;
+      }
+      if (e.key === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        if (state.buffer.length > 0) {
+          state.buffer = [...state.buffer].slice(0, -1).join("");
+          renderInput();
+          updateReadyState();
+        }
+        return;
+      }
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        state.buffer += e.key;
+        renderInput();
+        updateReadyState();
+      }
+    });
+
+    window.addEventListener("blur", () => {
+      if (state.open && !state.capturing) closeOverlay();
+    });
+  </script>
+</body>
+</html>

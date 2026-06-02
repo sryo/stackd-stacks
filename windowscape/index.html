@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WindowScape</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <!-- The host WebView no longer renders anything visible — the focused-window
+       outline is drawn by sd.overlay (a separate, daemon-owned WKWebView
+       pinned to the target window). This document is just a hidden ES-module
+       host for the tiler / event plumbing. -->
+  <script type="module" src="./modules/main.js"></script>
+</body>
+</html>

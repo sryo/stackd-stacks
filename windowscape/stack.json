@@ -1,0 +1,25 @@
+{
+  "id": "windowscape",
+  "name": "WindowScape",
+  "region": "fullscreen",
+  "size": { "h": 0 },
+  "clickThrough": true,
+  "display": "primary",
+  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "overlay"],
+  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged"],
+  "hotkeys": [
+    { "key": "ctrl+cmd+,",            "callback": "toggleExcluded" },
+    { "key": "ctrl+cmd+left",         "callback": "movePrev" },
+    { "key": "ctrl+cmd+right",        "callback": "moveNext" },
+    { "key": "ctrl+cmd+alt+left",     "callback": "moveScreenPrev" },
+    { "key": "ctrl+cmd+alt+right",    "callback": "moveScreenNext" },
+    { "key": "ctrl+cmd+0",            "callback": "resetWeights" },
+    { "key": "ctrl+cmd+=",            "callback": "grow" },
+    { "key": "ctrl+cmd+-",            "callback": "shrink" },
+    { "key": "ctrl+cmd+w",            "callback": "cycleWidth" },
+    { "key": "ctrl+cmd+f",            "callback": "toggleFullscreen" },
+    { "key": "ctrl+cmd+r",            "callback": "forceRetile" },
+    { "key": "ctrl+cmd+p",            "callback": "toggleExcluded" },
+    { "key": "ctrl+cmd+d",            "callback": "toggleDebug" }
+  ]
+}

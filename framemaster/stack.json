@@ -1,0 +1,15 @@
+{
+  "id": "framemaster",
+  "name": "FrameMaster",
+  "region": "fullscreen",
+  "size": { "h": 0 },
+  "clickThrough": true,
+  "permissions": [
+    "windows", "apps", "applescript", "display",
+    "events", "app", "mouse"
+  ],
+  "eventtap": [
+    { "event": "leftMouseDown", "callback": "click" },
+    { "event": "flagsChanged",  "callback": "flags" }
+  ]
+}

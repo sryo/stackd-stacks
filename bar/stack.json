@@ -1,0 +1,15 @@
+{
+  "id": "bar",
+  "name": "Rebar",
+  "region": "menubar",
+  "size": { "h": 40 },
+  "display": "all",
+  "permissions": [
+    "battery", "display", "appearance", "input", "net", "media",
+    "audio", "apps", "proc", "settings", "spaces", "menubar", "menu",
+    "mouse", "app"
+  ],
+  "hotkeys": [
+    { "key": "ctrl+alt+cmd+m", "callback": "toggleSystemMenubar" }
+  ]
+}

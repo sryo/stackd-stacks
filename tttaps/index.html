@@ -1,0 +1,336 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body>
+<script type="module">
+  // TTTaps — port of TTTaps.lua. Trackpad multi-finger recognizer running
+  // off the private NSEventTypeGesture stream. Fires four bangs:
+  //
+  //   sd.tttap.tap      — { fingers }                           N fingers land, one lifts
+  //   sd.tttap.plusOne  — { cluster, side: "left"|"right" }     +1 tap on a 2/3/4 cluster
+  //   sd.tttap.drag     — { fingers, direction }                cluster slides past commit threshold
+  //   sd.tttap.dragStep — { fingers, direction }                each commit-distance within a drag
+  //
+  // Subscribers register the normal way:
+  //   handles: ["sd.tttap.tap"]  in manifest
+  //   window.onBang_sd_tttap_tap = (d) => { if (d.fingers === 5) ... };
+  import { sd } from "sd://runtime/api.js";
+
+  const CFG = {
+    gestureStartThreshold:   0.15,
+    ambiguousInitWindow:     0.20,
+    dragThreshold:           0.15,
+    phantomLiftWindow:       0.20,
+    staleStateWindow:        0.30,
+    dragArmThreshold:        0.04,
+    dragCommitThreshold:     0.08,
+    directionFlipMultiplier: 1.5,
+    clusterCap:              5,
+    debugLog:                false,
+    // Per-cluster recognizer gating. Lua's TTTaps uses handler registration
+    // to know which sizes the user actually cares about; the broadcast port
+    // needs an explicit list so the ambiguous-init disambig path can engage
+    // (it only triggers when the current cluster size has NO tap consumer).
+    //
+    // tapClusters    — sizes that emit sd.tttap.tap
+    // plusOneClusters — sizes whose +1 emits sd.tttap.plusOne
+    // dragClusters    — sizes that emit one-shot sd.tttap.drag
+    // dragStepClusters — sizes that emit per-step sd.tttap.dragStep (axis-locked)
+    //
+    // Defaults: tap + drag for 2..5, plusOne for 2..4. dragStep OFF by default
+    // because most consumers want "drag fires once" semantics. Flip a number
+    // into dragStepClusters (e.g. [3]) to opt in per cluster.
+    tapClusters:      [2, 3, 4, 5],
+    plusOneClusters:  [2, 3, 4],
+    dragClusters:     [2, 3, 4, 5],
+    dragStepClusters: [],
+  };
+
+  function emitsTapAt(n)     { return CFG.tapClusters.includes(n); }
+  function emitsPlusAt(c)    { return CFG.plusOneClusters.includes(c); }
+  function emitsDragAt(n)    { return CFG.dragClusters.includes(n); }
+  function emitsDragStepAt(n) { return CFG.dragStepClusters.includes(n); }
+
+  // ─────────────────────────── state ───────────────────────────────────────
+  let initialFingerCount     = 0;
+  let gestureStartTime       = 0;
+  let initialTouchIdentities = {};   // id → true
+  let initialTouchPositions  = {};   // id → {x, y}
+  let gestureDragged         = false;
+  let ambiguousInitTime      = null;
+  let plusOneActive          = false;
+  let lastNonZeroTouchTime   = null;
+  let pendingPhantomLift     = false;
+  let peakCount              = 0;
+  let plusOneFired           = false;
+  let onTapFiredThisCycle    = false;
+  let dragArmed              = false;
+  let dragDirection          = null;
+  let dragFired              = false;
+  let dragAxisLock           = null;
+
+  function resetState() {
+    initialFingerCount     = 0;
+    gestureStartTime       = 0;
+    initialTouchIdentities = {};
+    initialTouchPositions  = {};
+    gestureDragged         = false;
+    ambiguousInitTime      = null;
+    plusOneActive          = false;
+    peakCount              = 0;
+    plusOneFired           = false;
+    onTapFiredThisCycle    = false;
+    dragArmed              = false;
+    dragDirection          = null;
+    dragFired              = false;
+    dragAxisLock           = null;
+  }
+
+  function snapshotInitial(touches) {
+    initialTouchIdentities = {};
+    initialTouchPositions  = {};
+    for (const t of touches) {
+      initialTouchIdentities[t.identity] = true;
+      initialTouchPositions[t.identity] = {
+        x: t.normalizedPosition.x,
+        y: t.normalizedPosition.y
+      };
+    }
+  }
+
+  function newFingerPos(touches) {
+    for (const t of touches) {
+      if (!initialTouchIdentities[t.identity]) return t.normalizedPosition;
+    }
+    return null;
+  }
+
+  function dispatchPlusOne(extraX) {
+    // Side is relative to the cluster's centroid, not the trackpad midpoint —
+    // a cluster planted off-center still resolves left/right intuitively.
+    let sum = 0, count = 0;
+    for (const id in initialTouchPositions) {
+      sum += initialTouchPositions[id].x; count += 1;
+    }
+    const centroidX = count > 0 ? sum / count : 0.5;
+    const side = extraX <= centroidX ? "left" : "right";
+    if (CFG.debugLog) {
+      console.log(`tttaps: PLUSONE cluster=${initialFingerCount} side=${side} extraX=${extraX.toFixed(2)} centroid=${centroidX.toFixed(2)}`);
+    }
+    plusOneFired = true;
+    if (emitsPlusAt(initialFingerCount)) {
+      sd.bang("sd.tttap.plusOne", { cluster: initialFingerCount, side });
+    }
+  }
+
+  // ─────────────────────────── recognizer ──────────────────────────────────
+  window.onTap_onGesture = (event) => {
+    // The Lua bails on event:getTouchDetails().pressure — that's a force-touch
+    // event. Stackd's Gesture.describe doesn't expose pressure yet; force
+    // touches typically arrive as a different subtype, so filtering by
+    // touches.length being a normal cluster keeps this from misfiring.
+    const touches = (event.touches || []).filter(t =>
+      t.phase === "began" || t.phase === "moved" || t.phase === "stationary" || t.phase === "ended" || t.phase === "cancelled"
+    );
+    // touchCount counts only fingers currently down (Hammerspoon: .touching).
+    const live = touches.filter(t => t.touching);
+    const touchCount = live.length;
+    const currentTime = Date.now() / 1000;
+
+    if (CFG.debugLog) {
+      console.log(`tttaps: t=${currentTime.toFixed(3)} n=${touchCount} init=${initialFingerCount} drag=${gestureDragged}`);
+    }
+
+    if (touchCount === 0) {
+      if (!onTapFiredThisCycle) {
+        if (!plusOneFired && !gestureDragged && emitsTapAt(peakCount)) {
+          sd.bang("sd.tttap.tap", { fingers: peakCount });
+        }
+        onTapFiredThisCycle = true;
+      }
+      if (lastNonZeroTouchTime && currentTime - lastNonZeroTouchTime < CFG.phantomLiftWindow) {
+        pendingPhantomLift = true;
+        return;
+      }
+      resetState();
+      lastNonZeroTouchTime = null;
+      pendingPhantomLift   = false;
+      return;
+    }
+
+    if (pendingPhantomLift && lastNonZeroTouchTime
+        && currentTime - lastNonZeroTouchTime > CFG.staleStateWindow) {
+      resetState();
+    }
+    pendingPhantomLift   = false;
+    lastNonZeroTouchTime = currentTime;
+
+    if (touchCount > peakCount) peakCount = touchCount;
+
+    if (plusOneActive && touchCount <= initialFingerCount) {
+      plusOneActive = false;
+    }
+
+    if (initialFingerCount === 0) {
+      if (touchCount >= 2 && touchCount <= CFG.clusterCap) {
+        initialFingerCount = touchCount;
+        gestureStartTime   = currentTime;
+        snapshotInitial(live);
+        if (touchCount >= 3) ambiguousInitTime = currentTime;
+      }
+      return;
+    }
+
+    if (touchCount > initialFingerCount) {
+      if (gestureDragged || plusOneActive) return;
+      const age = currentTime - gestureStartTime;
+      if (age < CFG.gestureStartThreshold) {
+        if (touchCount <= CFG.clusterCap) {
+          initialFingerCount = touchCount;
+          gestureStartTime   = currentTime;
+          snapshotInitial(live);
+          ambiguousInitTime  = currentTime;
+        }
+        return;
+      }
+      if (touchCount === initialFingerCount + 1) {
+        const pos = newFingerPos(live);
+        if (pos) {
+          plusOneActive = true;
+          dispatchPlusOne(pos.x);
+        }
+      }
+      return;
+    }
+
+    if (touchCount < initialFingerCount) {
+      // Ambiguous-init disambiguation: 3+ landed together, a quick lift means
+      // the lifted finger was a +1 on a smaller cluster. Skip if the current
+      // cluster size has a tap handler — N-finger tap is more likely intended.
+      if (ambiguousInitTime && currentTime - ambiguousInitTime < CFG.ambiguousInitWindow
+          && !gestureDragged && !plusOneActive
+          && !emitsTapAt(initialFingerCount)) {
+        const presentIds = {};
+        for (const t of live) presentIds[t.identity] = true;
+        let liftedX = null;
+        for (const id in initialTouchPositions) {
+          if (!presentIds[id]) { liftedX = initialTouchPositions[id].x; break; }
+        }
+        if (liftedX != null) {
+          plusOneActive      = true;
+          initialFingerCount = touchCount;
+          snapshotInitial(live);
+          dispatchPlusOne(liftedX);
+          ambiguousInitTime = null;
+          return;
+        }
+      }
+      ambiguousInitTime  = null;
+      initialFingerCount = touchCount;
+      gestureStartTime   = currentTime;
+      snapshotInitial(live);
+      return;
+    }
+
+    if (ambiguousInitTime && currentTime - ambiguousInitTime > CFG.ambiguousInitWindow) {
+      ambiguousInitTime = null;
+    }
+
+    // ──────────────── drag detection ────────────────
+    const hasOneShot = emitsDragAt(initialFingerCount);
+    const hasStep    = emitsDragStepAt(initialFingerCount);
+    const dragSpent  = dragFired && !hasStep;
+    if ((hasOneShot || hasStep) && !dragSpent) {
+      const signNoise = 0.005;
+      let sumDx = 0, sumDy = 0, count = 0;
+      let posX = 0, negX = 0, posY = 0, negY = 0;
+      for (const t of live) {
+        const initPos = initialTouchPositions[t.identity];
+        if (!initPos) continue;
+        const dx = t.normalizedPosition.x - initPos.x;
+        const dy = t.normalizedPosition.y - initPos.y;
+        sumDx += dx; sumDy += dy; count += 1;
+        if (dx > signNoise) posX += 1;
+        else if (dx < -signNoise) negX += 1;
+        if (dy > signNoise) posY += 1;
+        else if (dy < -signNoise) negY += 1;
+      }
+      if (count > 0) {
+        const avgDx = sumDx / count;
+        const avgDy = sumDy / count;
+        const absX = Math.abs(avgDx);
+        const absY = Math.abs(avgDy);
+        const agreeX = (posX === 0) || (negX === 0);
+        const agreeY = (posY === 0) || (negY === 0);
+        const lockH = dragAxisLock === "horizontal";
+        const lockV = dragAxisLock === "vertical";
+
+        if (!dragArmed) {
+          if (!lockV && absX >= CFG.dragArmThreshold
+              && (lockH || absX > absY) && agreeX) {
+            dragArmed     = true;
+            dragDirection = avgDx > 0 ? "right" : "left";
+          } else if (!lockH && absY >= CFG.dragArmThreshold
+                     && (lockV || absY > absX) && agreeY) {
+            dragArmed     = true;
+            dragDirection = avgDy > 0 ? "up" : "down";
+          }
+        } else if (!dragAxisLock) {
+          const flipThresh = CFG.dragArmThreshold * CFG.directionFlipMultiplier;
+          if (dragDirection === "left" || dragDirection === "right") {
+            if (absY > flipThresh && absY > absX && agreeY) {
+              dragDirection = avgDy > 0 ? "up" : "down";
+            }
+          } else {
+            if (absX > flipThresh && absX > absY && agreeX) {
+              dragDirection = avgDx > 0 ? "right" : "left";
+            }
+          }
+        }
+        if (dragArmed) {
+          const onAxis = (dragDirection === "left" || dragDirection === "right") ? absX : absY;
+          if (onAxis >= CFG.dragCommitThreshold) {
+            if (CFG.debugLog) {
+              console.log(`tttaps: DRAG cluster=${initialFingerCount} dir=${dragDirection} dx=${avgDx.toFixed(3)} dy=${avgDy.toFixed(3)}`);
+            }
+            gestureDragged = true;
+            if (hasOneShot && !dragFired) {
+              sd.bang("sd.tttap.drag", { fingers: initialFingerCount, direction: dragDirection });
+            }
+            if (hasStep) {
+              sd.bang("sd.tttap.dragStep", { fingers: initialFingerCount, direction: dragDirection });
+            }
+            dragFired = true;
+            if (hasStep) {
+              if (!dragAxisLock) {
+                dragAxisLock = (dragDirection === "left" || dragDirection === "right")
+                  ? "horizontal" : "vertical";
+              }
+              snapshotInitial(live);
+              dragArmed     = false;
+              dragDirection = null;
+            }
+          }
+        }
+      }
+    }
+
+    // Tip dispatch into "dragged" mode (cancels tap) if any finger has moved
+    // past the drag threshold from its initial position. Matches the Lua's
+    // safety net for clusters without registered drag handlers.
+    if (!gestureDragged) {
+      for (const t of live) {
+        const initPos = initialTouchPositions[t.identity];
+        if (!initPos) continue;
+        const dx = t.normalizedPosition.x - initPos.x;
+        const dy = t.normalizedPosition.y - initPos.y;
+        if ((dx * dx + dy * dy) > (CFG.dragThreshold * CFG.dragThreshold)) {
+          gestureDragged = true;
+          break;
+        }
+      }
+    }
+  };
+</script>
+</body>
+</html>

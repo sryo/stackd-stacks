@@ -1,0 +1,184 @@
+:root {
+  --muse-bg:        rgba(255, 255, 255, 0.98);
+  --muse-fg:        #111;
+  --muse-muted:     rgba(0, 0, 0, 0.55);
+  --muse-accent:    #1a4dd9;
+  --muse-error:     #d93434;
+  --muse-stroke:    rgba(26, 77, 217, 0.85);
+  --muse-radius:    12px;
+  --muse-pad:       16px;
+  --muse-panel:     320px;
+  --muse-font:      -apple-system, "SF Pro Text", system-ui, ui-sans-serif;
+  --muse-font-bold: -apple-system, "SF Pro Display", system-ui, ui-sans-serif;
+}
+
+[data-dark="1"] {
+  --muse-bg:        rgba(30, 30, 32, 0.96);
+  --muse-fg:        #f4f4f5;
+  --muse-muted:     rgba(244, 244, 245, 0.55);
+}
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: transparent;
+  font-family: var(--muse-font);
+  font-size: 14px;
+  color: var(--muse-fg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+#muse {
+  position: absolute;
+  width: var(--muse-panel);
+  height: var(--muse-panel);
+  box-sizing: border-box;
+  background: var(--muse-bg);
+  border: 2px solid var(--muse-stroke);
+  border-radius: var(--muse-radius);
+  padding: var(--muse-pad);
+  display: none;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+#muse[data-open="1"] { display: flex; }
+
+.input-band {
+  position: relative;
+  height: 96px;
+  display: flex;
+  align-items: flex-start;
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--muse-fg);
+  outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  caret-color: var(--muse-accent);
+  font-family: var(--muse-font);
+  height: 100%;
+  overflow: hidden;
+}
+
+.input.placeholder { color: var(--muse-muted); }
+.input .accent { color: var(--muse-accent); }
+
+.chips {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.chip-text {
+  width: 30px; height: 30px;
+  border: 0.6px solid var(--muse-accent);
+  background: rgba(26, 77, 217, 0.10);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--muse-accent);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--muse-font);
+}
+.chip-text[data-on="1"] { display: flex; }
+
+.chip-stack {
+  position: relative;
+  width: 54px;
+  height: 30px;
+  display: none;
+}
+.chip-stack[data-count="1"], .chip-stack[data-count="2"], .chip-stack[data-count="3"],
+.chip-stack[data-count="4"], .chip-stack[data-count="5"], .chip-stack[data-count="6"],
+.chip-stack[data-count="7"], .chip-stack[data-count="8"], .chip-stack[data-count="9"] { display: block; }
+
+.chip-stack img {
+  position: absolute;
+  top: 0;
+  width: 30px; height: 30px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 0.6px solid rgba(0, 0, 0, 0.15);
+  background: #fff;
+}
+.chip-stack img.s0 { left: 0;  opacity: 0.55; }
+.chip-stack img.s1 { left: 12px; opacity: 0.80; }
+.chip-stack img.s2 { left: 24px; opacity: 1.00; }
+
+.chip-stack .more {
+  position: absolute;
+  left: -18px; top: 8px;
+  font-size: 11px;
+  color: var(--muse-accent);
+  display: none;
+}
+.chip-stack[data-overflow="1"] .more { display: block; }
+
+.middle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 80px;
+  padding: 4px 0;
+}
+
+.hints {
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: right;
+  color: var(--muse-muted);
+  width: 80px;
+}
+.hints .row { white-space: nowrap; }
+.hints .key { color: var(--muse-accent); }
+
+.matrix {
+  display: grid;
+  grid-template-columns: repeat(5, 12px);
+  grid-template-rows: repeat(5, 12px);
+  gap: 2px;
+}
+.matrix .cell {
+  width: 12px; height: 12px;
+  background: rgba(26, 77, 217, 0.12);
+  border-radius: 2px;
+}
+.matrix .cell.lit  { background: var(--muse-accent); }
+.matrix .cell.err  { background: var(--muse-error); }
+
+.spacer { width: 80px; }
+
+.output {
+  flex: 1;
+  min-height: 0;
+  font-family: var(--muse-font-bold);
+  font-weight: 600;
+  font-size: 18px;
+  line-height: 1.3;
+  color: var(--muse-fg);
+  text-align: right;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+.output::-webkit-scrollbar { display: none; }
+.output.error { color: var(--muse-error); font-weight: 500; font-size: 14px; }

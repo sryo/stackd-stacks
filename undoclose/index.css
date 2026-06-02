@@ -1,0 +1,33 @@
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+  font: 14px -apple-system, system-ui;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Toast at top-center of screen. Matches the Lua's hs.alert.show: dark
+   translucent background, radius 10, padding 12, base/bold/dim text styles. */
+.toast {
+  position: fixed;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 10px;
+  padding: 12px 18px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+  user-select: none;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 40px -8px rgba(0, 0, 0, 0.6);
+}
+.toast.on { opacity: 1; }
+
+.base { font-size: 14px; color: rgba(255,255,255,0.8); }
+.bold { font-size: 18px; font-weight: 600; color: rgba(255,255,255,1); }
+.dim  { font-size: 14px; color: rgba(255,255,255,0.8); font-variant-numeric: tabular-nums; }

@@ -14,7 +14,7 @@
       <span class="hint">↑↓ navigate</span>
       <span class="hint">↵ default</span>
       <span class="hint">tab → verbs</span>
-      <span class="hint">1-9 quickpick</span>
+      <span class="hint">⌥1-9 quickpick</span>
       <span class="hint">esc close</span>
     </div>
   </div>
@@ -447,11 +447,13 @@
       else absDir = expandPath(dir);
       if (!absDir) absDir = "/";
       const showHidden = tail.startsWith(".");
-      // ls -1A lists everything except . and ..; -1 hides dotfiles too.
-      const r = await sd.proc.exec("/bin/ls", [showHidden ? "-1A" : "-1", absDir],
-        { timeout: 2 }).catch(() => null);
-      if (!r || r.code !== 0) return [];
-      const names = (r.stdout || "").split("\n").filter(n => n && n !== "." && n !== "..");
+      // sd.fs.list is in-process FileManager — no fork+exec per directory.
+      const names = (await sd.fs.list(absDir, { hidden: showHidden }).catch(() => null)) || [];
+      // Stat first so the sort can promote directories above files at equal
+      // score (matches Lua files.lua's tertiary sort key). Doing it inline
+      // means we stat all matches, not just the top 30 — acceptable because
+      // the fuzzy filter has already culled most names and sd.fs.stat is
+      // in-process (FileManager.attributesOfItem), not a subprocess.
       const scored = [];
       for (const name of names) {
         let score = 0, positions = [];
@@ -461,16 +463,21 @@
           score = m.score;
           positions = m.positions;
         }
-        scored.push({ name, score, positions });
+        const full = absDir === "/" ? "/" + name : absDir + "/" + name;
+        const st = await sd.fs.stat(full).catch(() => null);
+        const isDir = !!(st && st.isDir);
+        scored.push({ name, score, positions, full, isDir });
       }
-      scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+      scored.sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score;
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
       const slice = scored.slice(0, MAX_PATH_RESULTS);
       const out = [];
       for (const c of slice) {
-        const full = absDir === "/" ? "/" + c.name : absDir + "/" + c.name;
-        const st = await sd.proc.exec("/usr/bin/stat", ["-f", "%HT", full],
-          { timeout: 1 }).catch(() => null);
-        const isDir = st && st.code === 0 && (st.stdout || "").trim() === "Directory";
+        const full = c.full;
+        const isDir = c.isDir;
         out.push({
           id:               full,
           title:            c.name,
@@ -835,6 +842,11 @@
     }
 
     async function open() {
+      // Rebuild the menu tree every open (matches menuitems.lua, which
+      // re-walks the AX menu bar each time). Caching across opens would
+      // surface stale enabled/marked state when the user toggles "View >
+      // Show X" outside the palette and re-opens.
+      menuCache = { pid: null, items: null };
       // Static sources fan out concurrently.
       const [menuItems, apps, installed] = await Promise.all([
         menuItemsSource.list().catch(() => []),

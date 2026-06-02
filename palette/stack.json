@@ -4,7 +4,7 @@
   "invocable": true,
   "anchor": { "edge": "top", "inset": [200, 0] },
   "size": { "w": 640, "h": 440 },
-  "permissions": ["apps", "icons", "proc", "settings", "app", "pasteboard"],
+  "permissions": ["apps", "icons", "proc", "settings", "app", "pasteboard", "fs"],
   "hotkeys": [
     { "key": "ctrl+cmd+space", "callback": "open" }
   ]

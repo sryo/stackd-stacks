@@ -61,15 +61,44 @@
 
     // ──────────────────── App-terminated detector ────────────────────────────
     // sd.apps doesn't expose a terminated event; diff the running list.
+    //
+    // Hammerspoon's hs.application.watcher.terminated only fires for real user
+    // apps (regular activationPolicy + has been a "proper" app in this session).
+    // sd.apps.running emits every NSRunningApplication, including LSUIElement
+    // helpers, XPC services, and background processes. To match the Lua's
+    // behavior we filter to:
+    //   1. activationPolicy === "regular"  (skip accessory/prohibited)
+    //   2. has a bundleId                  (skip anonymous helpers)
+    //   3. has had at least one on-screen window at some point during its
+    //      lifetime — tracked in parallel via sd.windows.all. This filters
+    //      out regular-policy processes that never present UI (rare but real,
+    //      e.g. some launchers and update helpers).
+    const bidsWithWindows = new Set();
+    sd.windows.all.subscribe((wins) => {
+      if (!wins) return;
+      for (const w of wins) {
+        // w.app is the app name; we need bundleId. Cross-reference via pid in
+        // the current running snapshot — pids are unique per process lifetime.
+        // Simpler: just record the pid here, then resolve to bundleId in the
+        // running-apps callback below.
+        if (w.pid) bidsWithWindows.add(w.pid);
+      }
+    });
+
     let prevApps = new Map();   // bundleId → name
     sd.apps.running.subscribe((apps) => {
       if (!apps) return;
       const now = new Map();
-      for (const a of apps) if (a.bundleId) now.set(a.bundleId, a.name);
+      for (const a of apps) {
+        if (!a.bundleId) continue;
+        if (a.activationPolicy !== "regular") continue;
+        // Only track apps that have had a visible window during this session.
+        if (!bidsWithWindows.has(a.pid)) continue;
+        now.set(a.bundleId, a.name);
+      }
       if (prevApps.size > 0) {
         for (const [bid, name] of prevApps) {
           if (!now.has(bid)) {
-            // The Lua filtered to apps with a bundle ID — we already do.
             arm(name, async () => { await sd.apps.launch(bid); });
           }
         }

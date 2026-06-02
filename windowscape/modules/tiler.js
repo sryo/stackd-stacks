@@ -6,6 +6,7 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log } from "./core.js";
 import { tileWeighted } from "./layouts.js";
+import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 
 export function getWindowWeight(winId) {
   return state.windowWeights[winId] ?? 1.0;
@@ -78,28 +79,44 @@ async function tileWindowsInternal() {
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight);
 
     log(`tile ${screenWindows.length} on display ${d.displayID} (${horizontal ? "H" : "V"})`);
-    // Commit all setFrame calls atomically. The daemon-side batch coalesces
-    // origin moves onto a single compositor flip, removing the per-window
-    // cascade that previously made tiles snap one-by-one. Sizes still go
-    // through AX per-window (no SLS size symbol), so a brief size cascade
-    // can still show, but origins land together.
-    await sd.windows.batch(async () => {
+    if (cfg.enableAnimations) {
+      // Animation module ticks its own batch per frame; here we just
+      // kick off all the per-window interpolations. animatedSetFrame is
+      // fire-and-forget, returns immediately.
       for (const t of targets) {
-        await sd.windows.setFrame(t.winId, t.frame);
+        const cur = state.windowsById[t.winId]?.frame;
+        animatedSetFrame(t.winId, cur, t.frame);
       }
-    });
+    } else {
+      // Original snap path — one SLSTransaction commits every origin
+      // move on the same compositor flip.
+      await sd.windows.batch(async () => {
+        for (const t of targets) {
+          await sd.windows.setFrame(t.winId, t.frame);
+        }
+      });
+    }
   }
 }
 
 let tilingTimer = null;
 export async function tileWindows() {
   // Snapshot/fullscreen guards stubbed out (those subsystems are deferred).
+  // Match lua tiler.lua line 133: cancel any in-flight animations before
+  // kicking off a new tile pass so two rapid retiles don't fight each other.
+  cancelAllAnimations();
   state.tilingCount = 1;
   try {
     await tileWindowsInternal();
   } catch (e) {
     console.warn("[WindowScape] tile error:", e);
   }
+  // Hold tilingCount past the animation duration so the events module's
+  // tilingCount > 0 guard suppresses re-entrant tile triggered by the
+  // intermediate setFrame events the animation loop emits.
   if (tilingTimer) clearTimeout(tilingTimer);
-  tilingTimer = setTimeout(() => { state.tilingCount = 0; tilingTimer = null; }, 150);
+  const cooldown = cfg.enableAnimations
+    ? (cfg.animationDuration * 1000 + 100)
+    : 150;
+  tilingTimer = setTimeout(() => { state.tilingCount = 0; tilingTimer = null; }, cooldown);
 }

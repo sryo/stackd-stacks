@@ -239,19 +239,21 @@ export function start() {
   let lastMovedId = null;
   const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
-    // Distinguish user-driven moves from the tiler's own setFrame echoes.
-    // The TahoeSynthPoll fires .moved/.resized bangs ~250ms after the CG
-    // frame changes — well past tileWindows()'s 150ms cooldown — so the
-    // tilingCount guard alone won't catch them. Frame-match suppression:
-    // if detail.frame == the last frame the tiler asked for (within a few
-    // px of jitter from app min-width clamping), it's an echo and we bail.
-    // A user drag always lands at a NEW frame, so it's never confused.
+    const app = state.windowsById[detail.id]?.app?.slice(0, 12);
     const tgt = state.lastTileTarget && state.lastTileTarget[+detail.id];
     if (tgt && detail.frame) {
       const f = detail.frame;
-      if (Math.abs(f.x - tgt.x) <= 3 && Math.abs(f.y - tgt.y) <= 3 &&
-          Math.abs(f.w - tgt.w) <= 3 && Math.abs(f.h - tgt.h) <= 3) return;
+      // 20px tolerance covers Terminal-style column rounding (~11px per col),
+      // Finder list-view row rounding, Xcode min-height clamping, and Activity
+      // Monitor's hard ~740px min-width. A user drag changes the frame by far
+      // more than 20px (drags are gestures, not pixel pokes).
+      if (Math.abs(f.x - tgt.x) <= 20 && Math.abs(f.y - tgt.y) <= 20 &&
+          Math.abs(f.w - tgt.w) <= 20 && Math.abs(f.h - tgt.h) <= 20) {
+        log(`DRAG-IGNORED echo id=${detail.id} (${app}) f=${JSON.stringify(detail.frame)} tgt=${JSON.stringify(tgt)}`);
+        return;
+      }
     }
+    log(`DRAG-ACCEPTED id=${detail.id} (${app}) f=${JSON.stringify(detail.frame)} tgt=${JSON.stringify(tgt || null)}`);
 
     // Hydrate state.windowsById with the live frame from the bang. The
     // sd.windows.all channel is throttled (fires on focus/title change only),
@@ -281,6 +283,7 @@ export function start() {
       // the window and its adjacent tile and bail before reorder. Only
       // pure moves fall through to spatial reorder.
       const resized = await applyResizeIfNeeded(movedId);
+      log(`DRAG-DEBOUNCED id=${movedId} resize=${resized}`);
       if (resized) return;
       reorderOnDrop(movedId);
     }, 300);
@@ -307,16 +310,20 @@ async function applyResizeIfNeeded(movedId) {
   if (space == null) return false;
   const order = state.windowOrderBySpace[space] || [];
 
-  // Non-collapsed peers on the same display+space, in current spatial
-  // order. Excluding the moved window's collapsed check pattern matches
-  // the lua's getScreenWindows(..., includeCollapsed=false).
+  // Mirror the tiler's actual membership for this display. Using the
+  // unfiltered order list here would include phantom/unaddressable windows
+  // the tiler skipped, inflating totalWeight and making expected sizes
+  // tiny → every tile-echo bang looks like "user resized by 400px" and
+  // weight transfers cascade across windows the user never touched.
+  const tiled = state.lastTiledByDisplay[d.displayID];
+  if (!tiled || tiled.length === 0) return false;
+  const tiledSet = new Set(tiled.map(id => +id));
   const screenWindows = [];
   for (const id of order) {
+    if (!tiledSet.has(+id)) continue;
     const w = state.windowsById[id];
     if (!w || !w.frame) continue;
     if (w.frame.h <= cfg.collapsedWindowHeight) continue;
-    const wd = displayForWindow(w);
-    if (!wd || wd.displayID !== d.displayID) continue;
     screenWindows.push(w);
   }
   if (screenWindows.length < 2) return false;
@@ -361,7 +368,12 @@ async function applyResizeIfNeeded(movedId) {
   const myWeight = state.windowWeights[movedId] ?? 1.0;
   const expectedSize = availableSpace * myWeight / totalWeight;
   const actualSize = horizontal ? moved.frame.w : moved.frame.h;
-  if (Math.abs(actualSize - expectedSize) <= 20) return false;
+  const sizeDelta = actualSize - expectedSize;
+  if (Math.abs(sizeDelta) <= 20) {
+    log(`RESIZE-CHECK id=${movedId} no-change actual=${Math.round(actualSize)} expected=${Math.round(expectedSize)} delta=${Math.round(sizeDelta)}`);
+    return false;
+  }
+  log(`RESIZE-DETECTED id=${movedId} actual=${Math.round(actualSize)} expected=${Math.round(expectedSize)} delta=${Math.round(sizeDelta)} myWeight=${myWeight.toFixed(2)} total=${totalWeight.toFixed(2)}`);
 
   // Position-vs-expected-position: did the window's leading edge move?
   // If yes, the LEFT/UP neighbor gave up space. If no, the RIGHT/DOWN
@@ -392,6 +404,7 @@ async function applyResizeIfNeeded(movedId) {
   newWeight = Math.max(0.2, Math.min(newWeight, combined - 0.2));
   const adjNewWeight = Math.max(0.2, combined - newWeight);
 
+  log(`RESIZE-APPLY id=${movedId} ${myWeight.toFixed(2)}→${newWeight.toFixed(2)} adj=${adjacent.id} ${adjWeight.toFixed(2)}→${adjNewWeight.toFixed(2)} positionMoved=${positionMoved}`);
   state.windowWeights[movedId]    = newWeight;
   state.windowWeights[adjacent.id] = adjNewWeight;
   if (state.onLayoutChange) state.onLayoutChange();
@@ -410,9 +423,14 @@ async function reorderOnDrop(movedId) {
   const order = state.windowOrderBySpace[space] || [];
 
   // Same-display, non-collapsed peers (excluding the moved window itself).
+  // Filter by lastTiledByDisplay so we only reorder among windows the tiler
+  // actually placed — phantom CGWindowList entries don't get a slot.
+  const tiled = state.lastTiledByDisplay[d.displayID];
+  const tiledSet = tiled && tiled.length ? new Set(tiled.map(id => +id)) : null;
   const peers = [];
   for (const id of order) {
     if (id === movedId) continue;
+    if (tiledSet && !tiledSet.has(+id)) continue;
     const w = state.windowsById[id];
     if (!w || !w.frame) continue;
     if (w.frame.h <= cfg.collapsedWindowHeight) continue;

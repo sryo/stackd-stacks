@@ -33,6 +33,14 @@ export const state = {
   // infinite retile loop). Frame-match is more precise than a time window:
   // a user drag changes the frame, so it's never confused with an echo.
   lastTileTarget:     Object.create(null),
+  // { [displayID]: [winId, ...] } — the exact set of window IDs the tiler
+  // included in its most recent layout pass for each display. The drag
+  // handlers (applyResizeIfNeeded, reorderOnDrop) read this so they
+  // compute expected positions against the same membership the tiler did.
+  // Without this, the handlers iterate the unfiltered windowOrderBySpace
+  // and totalWeight diverges → false "user resized!" detections that
+  // transfer weight to windows the user didn't touch.
+  lastTiledByDisplay: Object.create(null),
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.

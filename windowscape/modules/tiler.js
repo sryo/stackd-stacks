@@ -89,6 +89,14 @@ async function tileWindowsInternal() {
     }
     if (screenWindows.length === 0) continue;
 
+    // Publish the per-display tile membership so applyResizeIfNeeded /
+    // reorderOnDrop in events.js can compute the same totalWeight the
+    // tiler used. Without this, those handlers iterate the unfiltered
+    // windowOrderBySpace (which can include phantom or unaddressable
+    // windows the tiler skipped), totalWeight diverges, and the
+    // expected-vs-actual math fires false "user resized!" transitions.
+    state.lastTiledByDisplay[d.displayID] = [...screenWindows];
+
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));
 
@@ -100,7 +108,7 @@ async function tileWindowsInternal() {
     const horizontal = screenFrame.w > screenFrame.h;
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight);
 
-    log(`tile ${screenWindows.length} on display ${d.displayID} (${horizontal ? "H" : "V"})`);
+    log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
     if (cfg.enableAnimations) {
       // Animation module ticks its own batch per frame; here we just
       // kick off all the per-window interpolations. animatedSetFrame is

@@ -98,9 +98,33 @@ export function moveWindowInOrder(direction) {
     }
   }
   state.windowOrderBySpace[space] = newOrder;
+
+  // Capture the BEFORE frame and the mouse position so we can drag the
+  // cursor along with the window — port-of operations.lua moveMouseWithWindow.
+  // Without this the mouse stays in place while the window slides out from
+  // under it, which is disorienting during keyboard-driven reorders.
+  const oldFrame = { ...w.frame };
+  const mousePos = sd.mouse.peek();
+  const mouseWasInside = mousePos &&
+    mousePos.x >= oldFrame.x && mousePos.x <= oldFrame.x + oldFrame.w &&
+    mousePos.y >= oldFrame.y && mousePos.y <= oldFrame.y + oldFrame.h;
+
   tileWindows();
-  // Keep focus on the same window — its slot moved.
   sd.windows.focus(w.id);
+
+  if (mouseWasInside) {
+    // tileWindows runs the AX setFrame batch synchronously inside sd.windows.batch,
+    // but the new frame snapshot lands on the next windowsAll tick. Re-read
+    // the moved window's frame after a short delay and translate the mouse.
+    setTimeout(() => {
+      const updated = state.windowsById[w.id];
+      if (!updated || !updated.frame) return;
+      const nf = updated.frame;
+      const newX = nf.x + (mousePos.x - oldFrame.x);
+      const newY = nf.y + (mousePos.y - oldFrame.y);
+      sd.mouse.warp(newX, newY);
+    }, 50);
+  }
 }
 
 // Focus next/previous window in tiling order on the current display.
@@ -124,7 +148,16 @@ export function focusAdjacentWindow(direction) {
   const idx = w ? onScreen.indexOf(w.id) : -1;
   const target = direction === "forward" || direction === "next" ? idx + 1 : idx - 1;
   if (target < 0 || target >= onScreen.length) return;
-  sd.windows.focus(onScreen[target]);
+  const targetId = onScreen[target];
+  sd.windows.focus(targetId);
+  // Center the mouse on the newly focused window — port-of operations.lua
+  // line 170-173. Without this, focus jumps but the cursor stays behind,
+  // which makes keyboard-driven focus cycling feel disconnected.
+  const targetWin = state.windowsById[targetId];
+  if (targetWin && targetWin.frame) {
+    const f = targetWin.frame;
+    sd.mouse.warp(f.x + f.w / 2, f.y + f.h / 2);
+  }
 }
 
 // Move focused window to the previous/next display, preserving relative frame.
@@ -147,11 +180,31 @@ export async function moveWindowToAdjacentScreen(direction) {
   const relW = w.frame.w / d.frame.w;
   const relH = w.frame.h / d.frame.h;
 
+  // Same mouse-follow-window pattern as moveWindowInOrder, port-of
+  // operations.lua line 247 moveMouseWithWindow(oldFrame, finalFrame).
+  const oldFrame = { ...w.frame };
+  const mousePos = sd.mouse.peek();
+  const mouseWasInside = mousePos &&
+    mousePos.x >= oldFrame.x && mousePos.x <= oldFrame.x + oldFrame.w &&
+    mousePos.y >= oldFrame.y && mousePos.y <= oldFrame.y + oldFrame.h;
+
   await sd.windows.setFrame(w.id, {
     x: target.frame.x + relX * target.frame.w,
     y: target.frame.y + relY * target.frame.h,
     w: relW * target.frame.w,
     h: relH * target.frame.h
   });
-  setTimeout(() => { tileWindows(); sd.windows.focus(w.id); }, 150);
+  setTimeout(() => {
+    tileWindows();
+    sd.windows.focus(w.id);
+    if (mouseWasInside) {
+      const updated = state.windowsById[w.id];
+      if (!updated || !updated.frame) return;
+      const nf = updated.frame;
+      sd.mouse.warp(
+        nf.x + (mousePos.x - oldFrame.x),
+        nf.y + (mousePos.y - oldFrame.y)
+      );
+    }
+  }, 150);
 }

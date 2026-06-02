@@ -44,6 +44,15 @@ async function tileWindowsInternal() {
   for (const d of state.displays) {
     const space = activeSpaceOnDisplay(d.uuid);
     if (space == null) continue;
+    // Lua tiler.lua line 130: bail on fullscreen. Native fullscreen apps
+    // get their own space and shouldn't be tiled — touching their frames
+    // pops them out of fullscreen and is very disruptive. Detect via the
+    // spaces channel's isFullscreen flag on this display's active space.
+    const spaceInfo = state.spacesByDisplay[d.uuid];
+    if (spaceInfo && spaceInfo.isFullscreen) {
+      log(`skip tiling display ${d.displayID} — fullscreen space`);
+      continue;
+    }
     const ordered = state.windowOrderBySpace[space] || [];
 
     const screenWindows = [];

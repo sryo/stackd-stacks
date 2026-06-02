@@ -130,7 +130,14 @@ async function handleWindowEvent() {
 }
 
 export function start() {
-  // Snapshot of all windows → state.windowsById rebuilt each tick.
+  // Snapshot of all windows → state.windowsById rebuilt each tick. We use
+  // this channel ONLY to keep windowsById fresh (frame/title/app props for
+  // the windows already in the rotation). We deliberately do NOT trigger
+  // tile passes here — the daemon's sd.windows.all push refires on every
+  // focused-window title change (e.g. Terminal spinner), which used to
+  // produce 75+ no-op tile passes per second. Tile triggers now come from
+  // the lifecycle bangs below (created / destroyed / minimized /
+  // deminimized) which only fire on actual layout-relevant transitions.
   sd.windows.all.subscribe(async (list) => {
     if (!Array.isArray(list)) return;
     const next = Object.create(null);
@@ -142,7 +149,6 @@ export function start() {
     for (const id of state.minimizedIds) {
       if (!next[id]) state.minimizedIds.delete(id);
     }
-    debouncedHandleWindowEvent();
   });
 
   // Post-R1b: subscribe to the granular focusedChanged channel, not the legacy
@@ -198,7 +204,8 @@ export function start() {
     }, 250);
   });
 
-  // Lifecycle bangs — invalidate space cache for destroyed windows.
+  // Lifecycle bangs — invalidate space cache for destroyed windows AND
+  // retile (closed window leaves a gap the remaining tiles should fill).
   window.onBang_sd_window_destroyed = (detail) => {
     if (detail && detail.id) {
       delete state.windowSpacesCache[detail.id];
@@ -207,6 +214,7 @@ export function start() {
       fullscreenOnDestroyed(detail.id);
     }
     pruneStaleWeights();
+    debouncedHandleWindowEvent();
   };
   window.onBang_sd_window_created = (detail) => {
     debouncedHandleWindowEvent();

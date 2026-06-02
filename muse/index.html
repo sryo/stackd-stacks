@@ -528,6 +528,19 @@
       document.documentElement.dataset.dark = dark ? "1" : "0";
     });
 
+    // External-stack entry point. Other stacks (palette's askmuse verb,
+    // future hotkey stacks, etc.) fire sd.bang('muse.ask', { context })
+    // to open Muse with pre-attached text context. Sets state.textContext
+    // then invokes the panel.
+    window.onBang_muse_ask = async (detail) => {
+      const ctx = detail && typeof detail.context === "string" ? detail.context : "";
+      state.textContext = ctx || null;
+      renderInput();
+      if (!state.open) {
+        await sd.window.invoke();
+      }
+    };
+
     window.onTap_flags = (e) => {
       if (!e || e.keyCode !== RIGHT_CMD_KEYCODE) return;
       const downNow = (e.flags & CGEVENT_CMD_FLAG) !== 0;

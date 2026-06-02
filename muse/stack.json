@@ -7,5 +7,6 @@
   "permissions": ["ax", "windows", "appearance", "events", "pasteboard", "proc", "fs", "settings", "app"],
   "eventtap": [
     { "event": "flagsChanged", "callback": "flags" }
-  ]
+  ],
+  "handles": ["muse.ask"]
 }

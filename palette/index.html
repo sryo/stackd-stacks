@@ -262,7 +262,7 @@
           enabled:     node.enabled !== false,
           markChar:    node.marked ? "✓" : null,
           defaultVerb: "activate",
-          verbs:       ["activate"]
+          verbs:       ["activate", "askmuse"]
         });
       }
     }
@@ -651,6 +651,22 @@
           if (!cmd) return;
           // Fire-and-forget via zsh -lc (matches runshell.lua).
           sd.proc.exec("/bin/zsh", ["-lc", cmd]).catch(() => {});
+        }
+      },
+      askmuse: {
+        id: "askmuse", label: "Ask Muse",
+        async run(item) {
+          // Port of askmuse.lua. Builds the same "describe" payload
+          // (title, distinct subtitle, app name, bundle id) and fires
+          // muse.ask — muse stack subscribes via handles: ["muse.ask"].
+          if (!item) return false;
+          const lines = [];
+          if (item.title) lines.push(item.title);
+          if (item.subtitle && item.subtitle !== item.title) lines.push(item.subtitle);
+          const p = item.payload || {};
+          if (p.appName)  lines.push("App: "    + p.appName);
+          if (p.bundleId) lines.push("Bundle: " + p.bundleId);
+          sd.bang('muse.ask', { context: lines.join("\n") });
         }
       }
     };

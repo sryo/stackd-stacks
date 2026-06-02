@@ -7,10 +7,5 @@
   "permissions": ["ax", "windows", "appearance", "events", "pasteboard", "proc", "fs", "settings", "app"],
   "eventtap": [
     { "event": "flagsChanged", "callback": "flags" }
-  ],
-  "hotkeys": [
-    { "key": "cmd+shift+s",   "callback": "captureRegion" },
-    { "key": "cmd+shift+v",   "callback": "pasteContext" },
-    { "key": "cmd+backspace", "callback": "clearAttachments" }
   ]
 }

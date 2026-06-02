@@ -398,7 +398,9 @@
         await sd.pasteboard.set(out);
         await sd.events.key("cmd+v");
         setTimeout(() => {
-          if (saved && typeof saved === "string") sd.pasteboard.set(saved);
+          // Restore regardless of empty/non-empty (lua parity): an empty
+          // clipboard pre-paste should stay empty post-paste, not retain `out`.
+          if (typeof saved === "string") sd.pasteboard.set(saved);
         }, TIMINGS.pasteRestoreMs);
       }, TIMINGS.pasteInjectMs);
     }
@@ -550,15 +552,30 @@
       }
     };
 
-    window.onHotkey_captureRegion  = () => captureRegion();
-    window.onHotkey_pasteContext   = () => pasteContext();
-    window.onHotkey_clearAttachments = () => clearAttachments();
-
     document.addEventListener("keydown", async (e) => {
       if (!state.open) return;
       if (e.key === "Escape") {
         e.preventDefault();
         await closeOverlay();
+        return;
+      }
+      // In-overlay chords (only active while open). Mirrors the lua source,
+      // which registers these inside its input eventtap — NOT as global
+      // hotkeys — so cmd+backspace etc. reach the focused app normally when
+      // Muse is closed.
+      if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        await captureRegion();
+        return;
+      }
+      if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "v" || e.key === "V")) {
+        e.preventDefault();
+        await pasteContext();
+        return;
+      }
+      if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "Backspace" || e.key === "Delete")) {
+        e.preventDefault();
+        clearAttachments();
         return;
       }
       if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {

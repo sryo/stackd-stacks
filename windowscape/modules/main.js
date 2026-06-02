@@ -1,12 +1,11 @@
 // Bootloader — equivalent to init.lua. Wires the modules and starts watchers.
 
 import { sd } from "sd://runtime/api.js";
-import { state, loadList, updateWindowOrder } from "./core.js";
+import { state, loadList, updateWindowOrder, isAppIncluded } from "./core.js";
 import { start as startEvents } from "./events.js";
 import { bind as bindKeybinds } from "./keybinds.js";
 import { tileWindows } from "./tiler.js";
 import { scheduleSave, loadLayout } from "./restore.js";
-import { drawOutlineForFocused } from "./outline.js";
 import {
   init as initSnapshots,
   updateLayout as updateSnapshotsLayout,
@@ -47,7 +46,15 @@ async function init() {
     // bangs so externally-driven minimize doesn't desync.
     await initSnapshots();
     await tileWindows();
-    drawOutlineForFocused();
+    // Push the focused window's inclusion verdict to overlay-border so it
+    // can paint the right palette before its own first focusedChanged tick
+    // resolves. Without this, the boot border briefly shows the default
+    // "included" color for an excluded window.
+    const fid = sd.windows.focused.peek()?.id;
+    if (fid != null) {
+      const w = state.windowsById[fid];
+      if (w) sd.bang('overlay-border.inclusion', { winId: fid, included: isAppIncluded(w) });
+    }
     console.log("[WindowScape] initialized");
   }, 500);
 }

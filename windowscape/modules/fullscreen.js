@@ -19,9 +19,18 @@
 // .active to bail out, this module owns writes.
 
 import { sd } from "sd://runtime/api.js";
-import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log } from "./core.js";
+import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, isAppIncluded, log } from "./core.js";
 import { tileWindows } from "./tiler.js";
-import { drawOutlineForFocused, hideOutline } from "./outline.js";
+
+// Belt-and-suspenders push to overlay-border so the border has the right
+// color even if the focused window's id didn't change across the
+// fullscreen flip (focusedChanged would have already pushed otherwise).
+function emitInclusionBang(winId) {
+  if (!winId) return;
+  const w = state.windowsById[winId];
+  if (!w) return;
+  sd.bang('overlay-border.inclusion', { winId, included: isAppIncluded(w) });
+}
 
 // Returns true if the window is on the same display + active space as the
 // fullscreened window. Used to decide which peers get parked.
@@ -99,8 +108,6 @@ export async function enterSimulatedFullscreen(winId) {
   fs.savedOrder = [...(state.windowOrderBySpace[spaceId] || [])];
   fs.savedWeights = { ...state.windowWeights };
 
-  hideOutline();
-
   // Park peers + fullscreen the target in one atomic compositor flip.
   await sd.windows.batch(async () => {
     for (const pid of peerIds) {
@@ -113,9 +120,9 @@ export async function enterSimulatedFullscreen(winId) {
   // depending on app behavior. Idempotent if focus didn't move.
   await sd.windows.focus(winId);
 
-  // Post-park outline refresh so the focused-window border sits on the
-  // newly expanded frame, not the pre-enter one.
-  drawOutlineForFocused();
+  // Belt-and-suspenders bang to overlay-border in case the focus didn't
+  // change (toggling fullscreen on the already-focused window).
+  emitInclusionBang(winId);
 }
 
 export async function exitSimulatedFullscreen() {
@@ -173,7 +180,9 @@ export async function exitSimulatedFullscreen() {
     await sd.windows.focus(focusedWinId);
   }
 
-  drawOutlineForFocused();
+  // Belt-and-suspenders bang — same id may be focused, so focusedChanged
+  // wouldn't fire, but the border needs to reset to the right palette.
+  if (focusedWinId) emitInclusionBang(focusedWinId);
 }
 
 // Exported keybind verb — flips between enter/exit based on current state.

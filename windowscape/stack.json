@@ -5,7 +5,7 @@
   "size": { "h": 0 },
   "clickThrough": true,
   "display": "primary",
-  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "overlay", "mouse"],
+  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "mouse"],
   "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved"],
   "eventtap": [
     { "event": "scrollWheel",      "callback": "snapshotsScroll" },

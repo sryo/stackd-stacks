@@ -15,11 +15,12 @@
   </style>
 </head>
 <body>
-  <!-- The focused-window outline is drawn by sd.overlay (a separate,
-       daemon-owned WKWebView pinned to the target window). This document
-       hosts the snapshot strip(s) — bottom-anchored thumbnails of minimized
-       windows. snapshots.js builds the strip DOM dynamically into <body>;
-       no static markup is needed.
+  <!-- The focused-window outline is drawn by the overlay-border stack
+       (subscribes to sd.windows.focusedChanged + listens for our
+       overlay-border.inclusion bang). This document hosts the snapshot
+       strip(s) — bottom-anchored thumbnails of minimized windows.
+       snapshots.js builds the strip DOM dynamically into <body>; no
+       static markup is needed.
 
        Panel notes:
          - region:"fullscreen" + display:"primary" → the WebView covers the

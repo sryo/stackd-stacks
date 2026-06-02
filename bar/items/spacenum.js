@@ -15,6 +15,11 @@ export default {
       if (!info || !Array.isArray(info.spaces) || info.active == null) {
         cached = ""; refresh(); return;
       }
+      // Hide the indicator when there's only one space — a single ● dot
+      // conveys no useful information and just consumes pixels in the bar.
+      if (info.spaces.length <= 1) {
+        cached = ""; refresh(); return;
+      }
       const dots = info.spaces.map((id) => (id === info.active ? "●" : "○"));
       cached = dots.join(" ");
       refresh();

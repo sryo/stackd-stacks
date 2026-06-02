@@ -60,15 +60,30 @@ const zones = {
 function detectNotched() {
   const screen = sd.screen.current;
   if (!screen) return false;
+  // Prefer the actual notch geometry from NSScreen.auxiliaryTopLeftArea /
+  // auxiliaryTopRightArea (exposed via Bridge.screenInfo). Fall back to
+  // the menubar-height heuristic if the daemon's running an older build
+  // that doesn't include the .notch field.
+  if (screen.notch && screen.notch.width > 0) return true;
   const menubarH = screen.frame.h - screen.visibleFrame.h;
   return menubarH > 30;
 }
 
 function applyGeometry() {
   // The window's outer height is set by StackHost (region:"menubar" auto-grows
-  // to the system menu bar height). Here we only toggle the notch class so
-  // center-left / center-right zones know whether to leave a notch gap.
-  $bar.classList.toggle("no-notch", !detectNotched());
+  // to the system menu bar height). Here we toggle the notch class AND set
+  // CSS vars from the actual notch geometry so center-left / center-right
+  // zones leave exactly the right gap for THIS display's notch.
+  const notched = detectNotched();
+  $bar.classList.toggle("no-notch", !notched);
+  const screen = sd.screen.current;
+  if (notched && screen && screen.notch && screen.notch.width > 0) {
+    // Use the real notch width — Rebar's geometryFor() uses
+    // auxiliaryTopLeftArea.size.width + auxiliaryTopRightArea.origin.x
+    // for exact per-display fitting. A small gap (8px) keeps text from
+    // crashing into the notch edge.
+    document.documentElement.style.setProperty('--bar-notch-pad-w', screen.notch.width + 'px');
+  }
 }
 
 function findItem(id) {

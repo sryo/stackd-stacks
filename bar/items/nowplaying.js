@@ -11,7 +11,9 @@ let cached = "";
 
 export default {
   id: "nowplaying",
-  side: "center-left",
+  // center-right matches Rebar (Now Playing reads right→left from the notch).
+  // center-left here would push the song under the menubar app menu.
+  side: "center-right",
   order: 50,
   interval: 0,
   setup(refresh) {

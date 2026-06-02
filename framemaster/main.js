@@ -207,8 +207,10 @@ function showTip(corner, x, y, customText) {
   placeTip(corner, x, y);
   tip.textContent = truncate(text);
   tip.classList.add("show");
+  // No auto-hide timer — the cursor-leave handler in fcEnter calls hideTip
+  // when the cursor exits the corner band. Auto-hiding mid-hover would
+  // make the tooltip flicker out while the user is still on the corner.
   if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-  hideTimer = setTimeout(hideTip, TIP_HIDE_MS);
 }
 
 function hideTip() {

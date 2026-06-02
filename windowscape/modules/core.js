@@ -25,6 +25,13 @@ export const state = {
   // out of the eligible set and the tile would re-flow to fill its slot,
   // then re-flow back when the occlusion lifted.
   minimizedIds:       new Set(),
+  // { [winId]: timestamp_ms } — the last time the tiler called setFrame for
+  // each window. Drag-event handlers in events.js consult this to suppress
+  // bangs caused by the tiler's own setFrame (the TahoeSynthPoll fires
+  // .moved/.resized ~250ms after CG sees the change — well past the
+  // tilingCount cooldown — so an unsuppressed handler turns every tile
+  // pass into an infinite retile loop).
+  recentlyTiledAt:    Object.create(null),
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.

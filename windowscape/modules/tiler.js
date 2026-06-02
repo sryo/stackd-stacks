@@ -120,7 +120,9 @@ async function tileWindowsInternal() {
       // but POSITION silently drops, leaving tiles half-positioned.
       // The non-batched setFrame in Windows.swift uses AX for both,
       // which works reliably across macOS versions.
+      const now = Date.now();
       for (const t of targets) {
+        state.recentlyTiledAt[+t.winId] = now;
         await sd.windows.setFrame(t.winId, t.frame);
       }
     }

@@ -239,6 +239,19 @@ export function start() {
   let lastMovedId = null;
   const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
+    // Distinguish user-driven moves from the tiler's own setFrame echoes.
+    // The TahoeSynthPoll fires .moved/.resized bangs ~250ms after the CG
+    // frame changes — well past tileWindows()'s 150ms cooldown timer, so
+    // state.tilingCount=0 by the time the bang arrives. Lua side-steps this
+    // because AX windowMoved fires synchronously inside the setFrame call
+    // (no poll latency); we don't have that path on Tahoe.
+    //
+    // Track when the tiler last issued setFrame for an id, and skip any
+    // bang that arrives within ~700ms (covers synth-poll latency +
+    // debounce). state.recentlyTiledAt is populated by tiler.js.
+    const tiledAt = state.recentlyTiledAt && state.recentlyTiledAt[+detail.id];
+    if (tiledAt != null && (Date.now() - tiledAt) < 700) return;
+
     // Hydrate state.windowsById with the live frame from the bang. The
     // sd.windows.all channel is throttled (fires on focus/title change only),
     // so by the time the debounce resolves, state.windowsById[id].frame is
@@ -255,6 +268,10 @@ export function start() {
       moveDebounceTimer = null;
       const movedId = lastMovedId;
       lastMovedId = null;
+      // Re-check the recently-tiled guard after the debounce — a tile pass
+      // that started DURING the debounce window would still be too fresh.
+      const t = state.recentlyTiledAt && state.recentlyTiledAt[+movedId];
+      if (t != null && (Date.now() - t) < 700) return;
       // Belt-and-suspenders live read — the synth poll can lose intermediate
       // frames if the user drags faster than 4Hz; query AX one more time so
       // the final values are guaranteed-fresh (mirrors lua's win:frame()).

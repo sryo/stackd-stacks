@@ -2,7 +2,7 @@
   "id": "bar",
   "name": "Rebar",
   "region": "menubar",
-  "size": { "h": 40 },
+  "size": { "h": 0 },
   "display": "all",
   "permissions": [
     "battery", "display", "appearance", "input", "net", "media",

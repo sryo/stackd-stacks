@@ -60,19 +60,11 @@ async function tileWindowsInternal() {
     // Per-pass eligibility — port of hs.window.visibleWindows() (window.lua:131
     // and isVisible() at window.lua:255: `not parentApp:isHidden() and not
     // self:isMinimized()`). Lua re-queries AX state every pass; mirror that.
-    //
-    // The prior cached approach (commit f3c9ca5 unaddressableIds + bang-driven
-    // minimizedIds) had two failure modes:
-    //   1. unaddressableIds was a never-expired denylist — a transient AX miss
-    //      (Spotify dock-collapsed, app slow under load, 100ms AX timeout)
-    //      permanently flagged the window
-    //   2. minimizedIds depended on sd.window.minimized BANGS — but windows
-    //      already minimized at daemon start emit no bang (the synth poll only
-    //      fires on transitions), so they stayed in the tile rotation
-    //
-    // Two AX calls per candidate (frame + isMinimized) is the cost of fresh
-    // truth and matches lua's per-pass model.
-    const screenWindows = [];
+    // All N×2 AX queries fire in parallel so the per-pass latency is one
+    // AX round-trip (~100ms cap via AXUIElementSetMessagingTimeout in
+    // Windows.swift:334), not N×100ms — important for tile passes that
+    // run inside focus-change debounce.
+    const candidates = [];
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w) continue;
@@ -81,14 +73,19 @@ async function tileWindowsInternal() {
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const df = d.frame;
       if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) continue;
-      const [live, minimized] = await Promise.all([
-        sd.windows.frame(id).catch(() => null),
-        sd.windows.isMinimized(id).catch(() => false)
-      ]);
-      if (!live) continue;
-      if (minimized) continue;
-      screenWindows.push(id);
-      state.windowLastScreen[id] = d.displayID;
+      candidates.push(id);
+    }
+    const probes = await Promise.all(candidates.map(async (id) => ({
+      id,
+      live: await sd.windows.frame(id).catch(() => null),
+      minimized: await sd.windows.isMinimized(id).catch(() => false)
+    })));
+    const screenWindows = [];
+    for (const p of probes) {
+      if (!p.live) continue;
+      if (p.minimized) continue;
+      screenWindows.push(p.id);
+      state.windowLastScreen[p.id] = d.displayID;
     }
     if (screenWindows.length === 0) continue;
 
@@ -120,9 +117,12 @@ async function tileWindowsInternal() {
       // but POSITION silently drops, leaving tiles half-positioned.
       // The non-batched setFrame in Windows.swift uses AX for both,
       // which works reliably across macOS versions.
-      const now = Date.now();
       for (const t of targets) {
-        state.recentlyTiledAt[+t.winId] = now;
+        // Remember the frame we just asked for so events.js's drag-handler
+        // can identify tiler-echo bangs by exact frame match (vs the brittle
+        // 700ms timer it used before, which suppressed legitimate user drags
+        // that happened right after a focus-change retile).
+        state.lastTileTarget[+t.winId] = { ...t.frame };
         await sd.windows.setFrame(t.winId, t.frame);
       }
     }

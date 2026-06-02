@@ -29,8 +29,15 @@
   function check() {
     const apps = sd.apps.running.value || [];
     const wins = sd.windows.all.value || [];
+    // Count by PID rather than display name. kCGWindowOwnerName (what
+    // sd.windows.all surfaces as `w.app`) is the *process* name —
+    // "Code" for VS Code, "Electron Helper" for some Electron apps —
+    // while sd.apps.running's `name` is NSRunningApplication.localizedName
+    // ("Visual Studio Code"). Matching on names misses windows for any
+    // app where the two diverge and the app would be wrongly considered
+    // windowless, then killed mid-session.
     const winCount = new Map();
-    for (const w of wins) winCount.set(w.app, (winCount.get(w.app) || 0) + 1);
+    for (const w of wins) winCount.set(w.pid, (winCount.get(w.pid) || 0) + 1);
 
     const now = Math.floor(Date.now() / 1000);
     const seen = new Set();
@@ -41,7 +48,7 @@
       // try to kill Browser Helper / sandbox brokers / etc.
       if (app.activationPolicy !== "regular") continue;
       seen.add(app.name);
-      const count = winCount.get(app.name) || 0;
+      const count = winCount.get(app.pid) || 0;
       const isFrontmost = !!app.active;
 
       if (count === 0 && !isFrontmost) {

@@ -7,7 +7,8 @@ import { cfg } from "./config.js";
 import { state, saveList, updateWindowOrder, log } from "./core.js";
 import {
   grow, shrink, cycleWidth, resetAllWeights, forceRetile,
-  moveWindowInOrder, focusAdjacentWindow, moveWindowToAdjacentScreen
+  moveWindowInOrder, focusAdjacentWindow, moveWindowToAdjacentScreen,
+  minimizeFocused
 } from "./operations.js";
 import { tileWindows } from "./tiler.js";
 import { drawOutlineForFocused } from "./outline.js";
@@ -69,4 +70,5 @@ export function bind() {
   window.onHotkey_toggleDebug      = toggleDebug;
   window.onHotkey_focusNext        = () => focusAdjacentWindow("forward");
   window.onHotkey_focusPrev        = () => focusAdjacentWindow("backward");
+  window.onHotkey_minimize         = minimizeFocused;
 }

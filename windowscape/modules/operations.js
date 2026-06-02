@@ -50,6 +50,52 @@ export function forceRetile() {
   tileWindows();
 }
 
+// Minimize the focused window, shifting focus to a sibling first so the
+// user doesn't end up with focus on the dock or nothing. Lua's full
+// windowScapeMinimize sits on top of the snapshot subsystem (which is
+// not ported); this preserves the focus-shift half — the user-visible
+// behavior that the test `focus_shifts_on_minimize.sh` pins.
+//
+// Sibling selection mirrors the lua: prefer the most recent entry in
+// focusHistory whose window is still alive AND not the one being
+// minimized AND not minimized itself; fall back to the next non-collapsed
+// window in windowOrderBySpace on the same display.
+export async function minimizeFocused() {
+  const w = focusedWin();
+  if (!w) return;
+  const movedId = w.id;
+  const d = displayForWindow(w);
+  const space = d ? activeSpaceOnDisplay(d.uuid) : getCurrentSpace();
+  const order = (space != null && state.windowOrderBySpace[space]) || [];
+
+  const isLive = (id) => {
+    if (id === movedId) return false;
+    const win = state.windowsById[id];
+    if (!win || !win.frame) return false;
+    if (win.frame.h <= cfg.collapsedWindowHeight) return false;
+    if (!d) return true;
+    const wd = displayForWindow(win);
+    return wd && wd.displayID === d.displayID;
+  };
+
+  let sibling = null;
+  for (const id of state.focusHistory) {
+    if (isLive(id)) { sibling = id; break; }
+  }
+  if (sibling == null) {
+    for (const id of order) if (isLive(id)) { sibling = id; break; }
+  }
+
+  // AX-minimize first, then focus the sibling — focusing before minimize
+  // causes the system to immediately re-focus the about-to-minimize
+  // window on the minimize call, which defeats the point.
+  await sd.windows.minimize(movedId, true);
+  if (sibling != null) sd.windows.focus(sibling);
+  // Layout will re-flow on the next windowsAll tick (the minimized
+  // window drops out of windowsById since its frame collapses to 0×0
+  // off-screen).
+}
+
 // Swap focused window with its neighbor in tiling order. Direction-aware:
 // landscape "forward" = right neighbor, portrait "forward" = down neighbor.
 export function moveWindowInOrder(direction) {

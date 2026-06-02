@@ -39,8 +39,19 @@
 
   const KEY_ALIASES = {
     enter: "return", esc: "escape", back: "backspace",
-    del: "delete", pgup: "pageup", pgdn: "pagedown"
+    del: "delete", pgup: "pageup", pgdn: "pagedown",
+    arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right"
   };
+
+  // Media/brightness keys ride the HID Consumer page (NX_KEYTYPE_*) and can't
+  // be synthesized via CGEvent virtual-keycodes — sd.events.key returns false
+  // for these. Silently drop instead of falling back to sd.events.type, which
+  // would literally type the word "play" / "brightnessup" / etc. Mirrors the
+  // HS source where keymap.normalize returns nil and pressKey just warns.
+  const UNSUPPORTED_KEYS = new Set([
+    "play", "previous", "next", "mute", "soundup", "sounddown",
+    "brightnessup", "brightnessdown"
+  ]);
 
   async function dispatchKey(spec) {
     const raw = String(spec.key || "").toLowerCase();
@@ -48,7 +59,7 @@
     const mods = Array.isArray(spec.mods) ? spec.mods.map(m => String(m).toLowerCase()) : [];
     const out = mods.concat([k]).join("+");
     const ok = await sd.events.key(out);
-    if (!ok && k.length === 1 && mods.length === 0) {
+    if (!ok && k.length === 1 && mods.length === 0 && !UNSUPPORTED_KEYS.has(k)) {
       await sd.events.type(k);
     }
   }
@@ -83,7 +94,10 @@
       case "click": {
         const m = await mousePos();
         if (!m) return;
-        const btn = e.button || "left";
+        // sd.events.click accepts "left" | "right" | "other" — the PWA labels
+        // middle-button as "middle", so rename before the wire call.
+        const raw = e.button || "left";
+        const btn = raw === "middle" ? "other" : raw;
         await sd.events.click(m.x, m.y, btn);
         if ((e.count || 1) >= 2) await sd.events.click(m.x, m.y, btn);
         return;
@@ -220,7 +234,13 @@
   });
 
   function setUrl(lan) {
-    const host = (lan && lan.ipv4) || "localhost";
+    // Prefer ipv4 (always reachable from peers on the same subnet); fall back
+    // to a .local Bonjour hostname (mirrors HS source's lanAddress order).
+    let host = (lan && lan.ipv4) || null;
+    if (!host && lan && lan.hostname) {
+      host = /\.local$/.test(lan.hostname) ? lan.hostname : lan.hostname + ".local";
+    }
+    if (!host) host = "localhost";
     currentUrl = "http://" + host + ":" + PORT + "/";
     urlEl.textContent = currentUrl;
   }

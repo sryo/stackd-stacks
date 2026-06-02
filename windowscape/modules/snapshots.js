@@ -1012,24 +1012,35 @@ async function loadPersistedSnapshots() {
   try {
     const saved = await sd.settings.get("snapshots");
     if (!saved || !saved.snapshots) return;
-    state.snapshotsState.snapshots = saved.snapshots;
-    state.snapshotsState.order = Array.isArray(saved.order) ? saved.order : Object.keys(saved.snapshots).map(Number);
-    // Drop entries whose underlying winId is no longer alive AND whose AX
-    // says not minimized either. The CGWindowID space is unstable across
-    // reload — most persisted tiles will be stale.
-    const live = [];
-    for (const id of state.snapshotsState.order) {
+    const candidateSnapshots = saved.snapshots;
+    const candidateOrder = Array.isArray(saved.order) ? saved.order : Object.keys(saved.snapshots).map(Number);
+    // A persisted entry survives reload ONLY if AX still reports the
+    // window as minimized. A live entry in windowsById means the window
+    // is NOT minimized (minimized windows drop out of windowsById), so a
+    // live `w` MUST disqualify the persisted snapshot — otherwise the
+    // tiler would reserve strip space for windows the user can actually
+    // see, the strip would render thumbnails of visible windows, and the
+    // outline would land on shrunk-down tiled frames. Was the source of
+    // the "windows mis-tiled + outline mis-aligned" regression on reload.
+    const liveOrder = [];
+    const liveSnapshots = Object.create(null);
+    for (const id of candidateOrder) {
       const w = state.windowsById[id];
       let stillMinimized = false;
       try { stillMinimized = await sd.windows.isMinimized(id); } catch (_) {}
-      if (w || stillMinimized) {
-        live.push(id);
-      } else {
-        delete state.snapshotsState.snapshots[id];
+      if (!w && stillMinimized && candidateSnapshots[id]) {
+        liveOrder.push(id);
+        liveSnapshots[id] = candidateSnapshots[id];
       }
     }
-    state.snapshotsState.order = live;
-    log(`snapshots restored: ${live.length}/${Object.keys(saved.snapshots).length}`);
+    state.snapshotsState.snapshots = liveSnapshots;
+    state.snapshotsState.order = liveOrder;
+    log(`snapshots restored: ${liveOrder.length}/${candidateOrder.length}`);
+    // Re-save the filtered set so any stale persisted entries (windows that
+    // were minimized in a prior session but no longer exist) get evicted
+    // from sd.settings. Without this the same stale CGWindowIDs get re-
+    // evaluated every reload and may collide with new live windows.
+    if (liveOrder.length !== candidateOrder.length) scheduleSnapshotSave();
   } catch (e) {
     console.warn("[WindowScape] loadPersistedSnapshots:", e);
   }

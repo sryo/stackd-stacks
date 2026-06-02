@@ -4,6 +4,7 @@
   "region": "fullscreen",
   "size": { "h": 0 },
   "clickThrough": true,
+  "level": "tooltip",
   "permissions": [
     "windows", "apps", "applescript", "display",
     "events", "app", "mouse"

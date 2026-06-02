@@ -4,6 +4,7 @@
   "region": "fullscreen",
   "size": { "h": 0 },
   "clickThrough": true,
+  "level": "cursor",
   "permissions": ["mouse", "battery"],
   "eventtap": [
     { "event": "keyDown",          "callback": "hide" },

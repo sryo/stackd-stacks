@@ -7,11 +7,29 @@ import { bind as bindKeybinds } from "./keybinds.js";
 import { tileWindows } from "./tiler.js";
 import { scheduleSave, loadLayout } from "./restore.js";
 import { drawOutlineForFocused } from "./outline.js";
+import {
+  init as initSnapshots,
+  updateLayout as updateSnapshotsLayout,
+  onScrollWheelEvent,
+  onRightClickEvent,
+  onLeftClickEvent,
+  onMouseMoveEvent
+} from "./snapshots.js";
 
 async function init() {
   await loadList();
   startEvents();
   bindKeybinds();
+
+  // Hook the manifest-declared eventtap callbacks (see stack.json's
+  // `eventtap` array). The Bridge invokes onTap_<name> for each match.
+  // Left-click + mouse-move are routed here (not via DOM) because the
+  // stack panel is clickThrough:true and the WebView never receives the
+  // events natively.
+  window.onTap_snapshotsScroll     = onScrollWheelEvent;
+  window.onTap_snapshotsRightClick = onRightClickEvent;
+  window.onTap_snapshotsLeftClick  = onLeftClickEvent;
+  window.onTap_snapshotsMouseMove  = onMouseMoveEvent;
 
   // Wait one tick for signals (windowsAll / displays / spaces) to populate
   // before we restore + tile. The signal subscriptions in startEvents replay
@@ -20,7 +38,11 @@ async function init() {
   setTimeout(async () => {
     await loadLayout();
     updateWindowOrder();
-    state.onLayoutChange = scheduleSave;
+    state.onLayoutChange = () => { scheduleSave(); updateSnapshotsLayout(); };
+    // Boot the snapshot subsystem — loads persisted tiles, paints strip(s),
+    // starts the refresh + save timers, wires the OS minimize/deminimize
+    // bangs so externally-driven minimize doesn't desync.
+    await initSnapshots();
     await tileWindows();
     drawOutlineForFocused();
     console.log("[WindowScape] initialized");

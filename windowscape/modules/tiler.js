@@ -7,6 +7,7 @@ import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log } from "./core.js";
 import { tileWeighted } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
+import { adjustedFrameForDisplay } from "./snapshots.js";
 
 export function getWindowWeight(winId) {
   return state.windowWeights[winId] ?? 1.0;
@@ -74,7 +75,11 @@ async function tileWindowsInternal() {
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));
 
-    const screenFrame = { ...d.visibleFrame };
+    // Honor snapshot-strip reservation: tiles must not draw under the bottom
+    // strip on displays that host snapshotted tiles. adjustedFrameForDisplay
+    // returns visibleFrame minus the strip height, or null when no snapshots
+    // live on that display (fall back to plain visibleFrame).
+    const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
     const horizontal = screenFrame.w > screenFrame.h;
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight);
 
@@ -110,7 +115,13 @@ export async function tileWindows() {
     log("skip tiling — simulated fullscreen active");
     return;
   }
-  // Snapshot guard stubbed out (subsystem deferred).
+  // Snapshot guard — captureAndMinimize parks the in-flight window and
+  // drives its own retile after the AX-minimize settles. A tile pass
+  // racing the capture would fight the off-screen sliver pose.
+  if (state.snapshotsState && state.snapshotsState.isCreating) {
+    log("skip tiling — snapshot in flight");
+    return;
+  }
   // Match lua tiler.lua line 133: cancel any in-flight animations before
   // kicking off a new tile pass so two rapid retiles don't fight each other.
   cancelAllAnimations();

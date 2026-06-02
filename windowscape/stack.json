@@ -5,8 +5,14 @@
   "size": { "h": 0 },
   "clickThrough": true,
   "display": "primary",
-  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "overlay"],
-  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged"],
+  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "overlay", "mouse"],
+  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved"],
+  "eventtap": [
+    { "event": "scrollWheel",      "callback": "snapshotsScroll" },
+    { "event": "rightMouseDown",   "callback": "snapshotsRightClick" },
+    { "event": "leftMouseDown",    "callback": "snapshotsLeftClick" },
+    { "event": "mouseMoved",       "callback": "snapshotsMouseMove" }
+  ],
   "hotkeys": [
     { "key": "ctrl+cmd+,",            "callback": "toggleExcluded" },
     { "key": "ctrl+cmd+left",         "callback": "movePrev" },
@@ -20,6 +26,10 @@
     { "key": "ctrl+cmd+f",            "callback": "toggleFullscreen" },
     { "key": "ctrl+cmd+r",            "callback": "forceRetile" },
     { "key": "ctrl+cmd+p",            "callback": "toggleExcluded" },
-    { "key": "ctrl+cmd+d",            "callback": "toggleDebug" }
+    { "key": "ctrl+cmd+d",            "callback": "toggleDebug" },
+    { "key": "ctrl+cmd+m",            "callback": "minimize" },
+    { "key": "ctrl+cmd+shift+r",      "callback": "snapshotsRestoreAll" },
+    { "key": "ctrl+cmd+shift+x",      "callback": "snapshotsCloseAll" },
+    { "key": "ctrl+cmd+shift+c",      "callback": "snapshotsClearAll" }
   ]
 }

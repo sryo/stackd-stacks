@@ -32,6 +32,20 @@ export const state = {
     savedOrder:    null,             // [winId, ...] for the affected space
     savedWeights:  null,             // { winId: weight } snapshot
     spaceId:       null              // space the fullscreen owns
+  },
+  // Snapshot subsystem state — see modules/snapshots.js.
+  // snapshots: { [winId]: { app, bundleId, title, frame, image, screenId,
+  //                         displayID, snapSize, capturedAt } }
+  // isCreating flips true during the capture-animation so the tiler's guard
+  // suppresses retile passes that would race with the in-flight setFrame
+  // calls. stripScrollOffsets: { [displayID]: pixels } — accumulated scroll
+  // applied as CSS transform: translateX on each strip's tile container.
+  snapshotsState: {
+    snapshots:          Object.create(null),
+    order:              [],            // insertion order across all displays
+    isCreating:         false,
+    isCreatingStart:    0,
+    stripScrollOffsets: Object.create(null)
   }
 };
 

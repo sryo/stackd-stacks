@@ -8,6 +8,7 @@ import {
   state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log, warn
 } from "./core.js";
 import { tileWindows, getWindowWeight, setWindowWeight } from "./tiler.js";
+import { captureAndMinimize } from "./snapshots.js";
 
 function focusedWinId() {
   const f = sd.windows.focused.peek();
@@ -51,10 +52,9 @@ export function forceRetile() {
 }
 
 // Minimize the focused window, shifting focus to a sibling first so the
-// user doesn't end up with focus on the dock or nothing. Lua's full
-// windowScapeMinimize sits on top of the snapshot subsystem (which is
-// not ported); this preserves the focus-shift half — the user-visible
-// behavior that the test `focus_shifts_on_minimize.sh` pins.
+// user doesn't end up with focus on the dock or nothing. Routes through
+// the snapshot subsystem — captureAndMinimize grabs the window image,
+// AX-minimizes, and the strip's CSS-driven zoom-in animation renders.
 //
 // Sibling selection mirrors the lua: prefer the most recent entry in
 // focusHistory whose window is still alive AND not the one being
@@ -86,10 +86,12 @@ export async function minimizeFocused() {
     for (const id of order) if (isLive(id)) { sibling = id; break; }
   }
 
-  // AX-minimize first, then focus the sibling — focusing before minimize
-  // causes the system to immediately re-focus the about-to-minimize
-  // window on the minimize call, which defeats the point.
-  await sd.windows.minimize(movedId, true);
+  // Snapshot + AX-minimize first, then focus the sibling — focusing
+  // before minimize causes the system to immediately re-focus the
+  // about-to-minimize window on the minimize call, which defeats the
+  // point. captureAndMinimize handles the snapshot grab and renders the
+  // tile into the strip.
+  await captureAndMinimize(movedId);
   if (sibling != null) sd.windows.focus(sibling);
   // Layout will re-flow on the next windowsAll tick (the minimized
   // window drops out of windowsById since its frame collapses to 0×0

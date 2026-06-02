@@ -13,6 +13,11 @@ import {
 import { tileWindows } from "./tiler.js";
 import { drawOutlineForFocused } from "./outline.js";
 import { toggleSimulatedFullscreen } from "./fullscreen.js";
+import {
+  clearAll as snapshotsClearAll,
+  restoreAll as snapshotsRestoreAll,
+  closeAll as snapshotsCloseAll
+} from "./snapshots.js";
 
 async function toggleFocusedWindowInList() {
   const f = sd.windows.focused.peek();
@@ -61,4 +66,9 @@ export function bind() {
   window.onHotkey_focusNext        = () => focusAdjacentWindow("forward");
   window.onHotkey_focusPrev        = () => focusAdjacentWindow("backward");
   window.onHotkey_minimize         = minimizeFocused;
+  // Snapshot bulk verbs — port of snapshots.lua's context-menu Restore All /
+  // Close All / Clear All. Each operates on every tile in the strip.
+  window.onHotkey_snapshotsRestoreAll = snapshotsRestoreAll;
+  window.onHotkey_snapshotsCloseAll   = snapshotsCloseAll;
+  window.onHotkey_snapshotsClearAll   = snapshotsClearAll;
 }

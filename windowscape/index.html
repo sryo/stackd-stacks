@@ -4,14 +4,29 @@
   <meta charset="utf-8">
   <title>WindowScape</title>
   <style>
-    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
   </style>
 </head>
 <body>
-  <!-- The host WebView no longer renders anything visible — the focused-window
-       outline is drawn by sd.overlay (a separate, daemon-owned WKWebView
-       pinned to the target window). This document is just a hidden ES-module
-       host for the tiler / event plumbing. -->
+  <!-- The focused-window outline is drawn by sd.overlay (a separate,
+       daemon-owned WKWebView pinned to the target window). This document
+       hosts the snapshot strip(s) — bottom-anchored thumbnails of minimized
+       windows. snapshots.js builds the strip DOM dynamically into <body>;
+       no static markup is needed.
+
+       Panel notes:
+         - region:"fullscreen" + display:"primary" → the WebView covers the
+           primary display. Strips for other displays will render off-screen
+           (documented primitive gap in modules/snapshots.js).
+         - clickThrough:true → DOM events don't reach this WebView; left-
+           click + mouse-move are routed via eventtap callbacks in main.js. -->
   <script type="module" src="./modules/main.js"></script>
 </body>
 </html>

@@ -102,11 +102,7 @@
     // bail. The in-flight call's finally block will re-enter to pick up
     // the queued id — that way rapid focus changes don't leave the overlay
     // stranded on the first window of a burst.
-    if (attachInFlight) {
-      console.log(`[overlay-border] queue winId=${winId} (in-flight, current=${currentWid})`);
-      pendingWid = winId;
-      return;
-    }
+    if (attachInFlight) { pendingWid = winId; return; }
     if (!winId || typeof winId !== "number") { await hideOverlay(); return; }
 
     const color = colorForWin(winId);
@@ -114,11 +110,7 @@
     // Same window, same color → fast no-op. Color-drift guard mirrors the
     // legacy outline.js so an inclusion-bang for the *focused* window can
     // re-enter this path and detect "needs new color".
-    if (currentWid === winId && current && current.__lastColor === color) {
-      console.log(`[overlay-border] dedupe winId=${winId} same-window same-color`);
-      return;
-    }
-    console.log(`[overlay-border] ATTACH winId=${winId} (was=${currentWid}) color=${color.slice(0,15)}`);
+    if (currentWid === winId && current && current.__lastColor === color) return;
 
     attachInFlight = true;
     try {

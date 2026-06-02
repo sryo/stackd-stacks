@@ -10,6 +10,26 @@ import {
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
 import { drawOutlineForFocused, hideOutline } from "./outline.js";
 
+// Spatial drop-position calculator — port of operations.lua calculateDropPosition.
+// Returns the 0-based insertion index for a window dropped at `dropFrame`
+// among `screenWindows` (already filtered to same-display, non-collapsed).
+// Horizontal displays compare centers on x, vertical on y. This is what
+// makes "drag window2 to the left of window1" actually reorder them.
+function calculateDropPosition(dropFrame, screenWindows, horizontal) {
+  if (!dropFrame) return 0;
+  const dcx = dropFrame.x + dropFrame.w / 2;
+  const dcy = dropFrame.y + dropFrame.h / 2;
+  let insertIdx = 0;
+  for (let i = 0; i < screenWindows.length; i++) {
+    const f = screenWindows[i].frame;
+    if (!f) continue;
+    const cx = f.x + f.w / 2;
+    const cy = f.y + f.h / 2;
+    if (horizontal ? dcx > cx : dcy > cy) insertIdx = i + 1;
+  }
+  return insertIdx;
+}
+
 let eventDebounceTimer = null;
 let lastKnownIds = new Set();
 let lastKnownFrames = Object.create(null); // id -> { app, frame }
@@ -142,4 +162,77 @@ export function start() {
   window.onBang_sd_window_created = (detail) => {
     debouncedHandleWindowEvent();
   };
+
+  // Spatial reorder on window-moved — port-of events.lua handleWindowMoved
+  // line 521+. Without this, dragging a window leftmost doesn't promote it
+  // to order[1] and the next retile snaps it back to its old slot.
+  // Debounced 300ms (matches lua's pendingReposition timer) so the final
+  // event after the drag-drop is what reorders, not every intra-drag tick.
+  let moveDebounceTimer = null;
+  let lastMovedId = null;
+  window.onBang_sd_window_moved = (detail) => {
+    if (!detail || !detail.id) return;
+    lastMovedId = detail.id;
+    if (moveDebounceTimer) clearTimeout(moveDebounceTimer);
+    moveDebounceTimer = setTimeout(() => {
+      moveDebounceTimer = null;
+      const movedId = lastMovedId;
+      lastMovedId = null;
+      reorderOnDrop(movedId);
+    }, 300);
+  };
+}
+
+async function reorderOnDrop(movedId) {
+  const moved = state.windowsById[movedId];
+  if (!moved || !moved.frame) return;
+  if (!isAppIncluded(moved)) return;
+  const d = displayForWindow(moved);
+  if (!d) return;
+  const space = state.spacesByDisplay[d.uuid]?.active;
+  if (space == null) return;
+  const order = state.windowOrderBySpace[space] || [];
+
+  // Same-display, non-collapsed peers (excluding the moved window itself).
+  const peers = [];
+  for (const id of order) {
+    if (id === movedId) continue;
+    const w = state.windowsById[id];
+    if (!w || !w.frame) continue;
+    if (w.frame.h <= cfg.collapsedWindowHeight) continue;
+    const wd = displayForWindow(w);
+    if (!wd || wd.displayID !== d.displayID) continue;
+    peers.push(w);
+  }
+  if (peers.length === 0) { await tileWindows(); return; }
+
+  const horizontal = d.frame.w > d.frame.h;
+  const newIdx = calculateDropPosition(moved.frame, peers, horizontal);
+
+  // Splice moved into peers at newIdx; rebuild order keeping off-display
+  // and on-display-collapsed entries in place.
+  peers.splice(newIdx, 0, moved);
+  const peerById = new Map(peers.map(w => [w.id, w]));
+  const collapsedOnScreen = [];
+  for (const id of order) {
+    const w = state.windowsById[id];
+    if (!w || !w.frame) continue;
+    if (w.frame.h <= cfg.collapsedWindowHeight) {
+      const wd = displayForWindow(w);
+      if (wd && wd.displayID === d.displayID) collapsedOnScreen.push(id);
+    }
+  }
+  const newOrder = [];
+  for (const id of order) {
+    const w = state.windowsById[id];
+    if (!w) continue;
+    const wd = displayForWindow(w);
+    const onOther = !wd || wd.displayID !== d.displayID;
+    if (onOther) newOrder.push(id);
+  }
+  for (const w of peers) newOrder.push(w.id);
+  for (const id of collapsedOnScreen) newOrder.push(id);
+
+  state.windowOrderBySpace[space] = newOrder;
+  await tileWindows();
 }

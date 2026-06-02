@@ -91,13 +91,14 @@
     function rank(items, q) {
       const empty = q === "";
       const matches = [];
+      let nativeIdx = 0;
       for (const item of items) {
         if (empty && item.hideOnEmptyQuery) continue;
         if (item.bypassMatcher) {
           const boost = recents.score(item.source, item.id);
           item.fromHistory = boost > 0;
           item.matchPositions = item.matchPositions || [];
-          matches.push({ item, score: BYPASS_SCORE + boost / 100 });
+          matches.push({ item, score: BYPASS_SCORE + boost / 100, nativeIdx: nativeIdx++ });
           continue;
         }
         let tScore = null, tPositions = [];
@@ -116,12 +117,26 @@
           item.fromHistory = boost > 0;
           item.matchPositions = tPositions;
           const total = empty ? boost : matchVal + boost / 10;
-          matches.push({ item, score: total });
+          matches.push({ item, score: total, nativeIdx: nativeIdx++ });
         } else {
           item.matchPositions = [];
         }
       }
-      matches.sort((a, b) => b.score - a.score);
+      // Empty-query ordering: menu items must keep their native order (File
+      // → Edit → View — the user's mental map of the menubar). Recently-used
+      // items still bubble to the top via frecency. Other sources (apps,
+      // installedapps, calc, shellrunner) keep score-based ordering since
+      // they have no meaningful "native" order to preserve.
+      // Non-empty query: rank by fuzzy score for everyone — the user is
+      // searching, native order no longer matters.
+      matches.sort((a, b) => {
+        if (empty && a.item.source === "menuitems" && b.item.source === "menuitems") {
+          // Recents win first (boost > 0 = recently used), then native order.
+          if (a.score !== b.score) return b.score - a.score;
+          return a.nativeIdx - b.nativeIdx;
+        }
+        return b.score - a.score;
+      });
       return matches.map(m => m.item);
     }
 
@@ -256,7 +271,18 @@
       if (!tree) return [];
       const tops = Array.isArray(tree.children) ? tree.children : [];
       const items = [];
-      for (const top of tops) collectMenuLeaves(top, null, [], items);
+      // The first top-level menu is the system Apple menu (About / Sleep /
+      // Restart / Shut Down / System Settings / …). It IS exposed via the
+      // frontmost app's AXMenuBar, but it belongs to the system, not the
+      // app — so its items shouldn't be tagged with the frontmost app's
+      // icon. Mark them here so iconFor can branch.
+      tops.forEach((top, topIdx) => {
+        const before = items.length;
+        collectMenuLeaves(top, null, [], items);
+        if (topIdx === 0) {
+          for (let i = before; i < items.length; i++) items[i].appleMenu = true;
+        }
+      });
       for (const it of items) {
         it.payload.appPid = pid;
         it.payload.appName = appName;
@@ -668,9 +694,14 @@
       if (iconCache.has(key)) return iconCache.get(key);
       let url = null;
       if (item.source === "menuitems" && item.payload && item.payload.appPid) {
-        const running = sd.apps.running.peek() || [];
-        const a = running.find(x => x.pid === item.payload.appPid);
-        if (a && a.bundleId) url = await sd.icons.app(a.bundleId, { size: 32 });
+        // Apple-menu items are system-level — don't decorate them with the
+        // frontmost app's icon. Leave the slot empty so the system origin
+        // reads visually distinct from per-app menu rows.
+        if (!item.appleMenu) {
+          const running = sd.apps.running.peek() || [];
+          const a = running.find(x => x.pid === item.payload.appPid);
+          if (a && a.bundleId) url = await sd.icons.app(a.bundleId, { size: 32 });
+        }
       } else if (item.payload && item.payload.bundleId) {
         url = await sd.icons.app(item.payload.bundleId, { size: 32 });
       } else if (item.payload && item.payload.path) {
@@ -728,7 +759,12 @@
       renderCrumbs();
       $results.innerHTML = "";
       let focusedRow = null;
-      state.items.slice(0, 9).forEach((item, i) => {
+      // Render every match, not just the first 9. The original cap dropped
+      // ~255 of ~264 menu items into the void — the container scrolls but
+      // the DOM only had 9 nodes. Alt+1-9 still picks among the first 9
+      // (matches HS quickpick semantics); arrow keys scroll through the
+      // rest via focusedRow.scrollIntoView below.
+      state.items.forEach((item, i) => {
         const row = document.createElement("div");
         row.className = "row" + (i === state.focused ? " selected" : "");
         const ic = document.createElement("img"); ic.className = "icon";

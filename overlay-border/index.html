@@ -3,47 +3,160 @@
 <head><meta charset="utf-8"></head>
 <body>
 <script type="module">
-  // Draws a 2px accent border around whichever window is focused. Re-attaches
-  // every time sd.windows.focused changes; the previous overlay is detached
-  // before the next attach so we always own at most one overlay panel.
+  // Sole owner of the focused-window border.
   //
-  // Rendering is plain WebKit — the overlay's WebView hosts a <div> with
-  // position: absolute; inset: 1px; border: …; border-radius: …. The daemon
-  // pins the overlay's NSPanel to the target window's frame each vsync, so
-  // the border just inherits the panel's size — no per-frame draw callback,
-  // no JS round-trip.
+  // Subscribes to sd.windows.focusedChanged (the granular channel — the
+  // sd.windows.focused union also refires on titleChanged, which would
+  // detach/reattach the overlay on every Slack/Code/Chrome tab edit).
+  //
+  // Color policy lives in OTHER stacks (e.g. windowscape). They emit a
+  // user-defined bang `overlay-border.inclusion` with `{ winId, included }`;
+  // we cache the verdict per-id so when focus returns to a window we already
+  // know which palette to use. Without a hint we default to the "included"
+  // color — the first-paint flash before windowscape's bang arrives is the
+  // documented tradeoff (no boot-handshake on a fast-path overlay).
+  //
+  // Color flips: the overlay's WebView lives in its own world, so we can't
+  // poke a style on a live <div> from this stack. We detach+reattach when
+  // the cached inclusion verdict for the current window changes. The brief
+  // flicker is accepted in lieu of adding an `sd.overlay.eval` primitive.
+  //
+  // Per-window corner radius via sd.windows.cornerHints — same mapping the
+  // legacy windowscape/outline.lua used on Tahoe.
   import { sd } from "sd://runtime/api.js";
 
-  let current = null;
-  let currentWid = null;
-
-  sd.windows.focused.subscribe(async (win) => {
-    if (!win || typeof win.id !== "number") {
-      if (current) {
-        await current.detach();
-        current = null;
-        currentWid = null;
+  // --- config (persisted via sd.settings) ---------------------------------
+  const DEFAULTS = {
+    thickness:     2,
+    colorIncluded: "#7c8cff",
+    colorExcluded: "rgba(230,153,26,0.8)"  // windowscape's outlineColorPinned
+  };
+  let cfg = { ...DEFAULTS };
+  async function loadConfig() {
+    for (const key of Object.keys(DEFAULTS)) {
+      const saved = await sd.settings.get(key);
+      if (saved == null) {
+        await sd.settings.set(key, DEFAULTS[key]);
+      } else {
+        cfg[key] = saved;
       }
-      return;
     }
-    if (currentWid === win.id) return;
-    if (current) await current.detach();
-    currentWid = win.id;
-    // Per-window corner radius: daemon returns raw AX hints; stack picks the
-    // mapping the same way WindowScape's outline.lua does on Tahoe.
-    const hints = (await sd.windows.cornerHints?.(win.id)) ?? {};
-    const radius =
-      hints.subrole === "AXSystemDialog" || hints.role === "AXScrollArea" ? 0 :
-      hints.toolbarPresent ? 26 : 16;
-    current = await sd.overlay.attach(win.id, {
+  }
+
+  // --- state --------------------------------------------------------------
+  let current = null;          // overlay handle ({ id, detach() }) or null
+  let currentWid = null;       // CGWindowID the overlay is attached to
+  let attachInFlight = false;  // dedupe rapid focus changes
+  // Inclusion verdicts pushed in by other stacks (windowscape etc.). Missing
+  // entries default to `true` so an unknown window paints the included color.
+  const inclusionByWinId = new Map();
+
+  function colorForWin(winId) {
+    const included = inclusionByWinId.has(winId) ? inclusionByWinId.get(winId) : true;
+    return included ? cfg.colorIncluded : cfg.colorExcluded;
+  }
+
+  function overlayHTML(thickness, radius, color) {
+    return {
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-        .border { position: absolute; inset: 1px; border: 2px solid #7c8cff;
-                  border-radius: ${radius}px; pointer-events: none; }
+        .border {
+          position: absolute;
+          inset: ${thickness / 2}px;
+          border: ${thickness}px solid ${color};
+          border-radius: ${radius}px;
+          pointer-events: none;
+          transition: border-color 0.15s ease-out;
+          box-sizing: border-box;
+        }
       `,
       html: `<div class="border"></div>`
+    };
+  }
+
+  function radiusFromHints(h) {
+    if (!h) return 16;
+    if (h.subrole === "AXSystemDialog" || h.role === "AXScrollArea") return 0;
+    return h.toolbarPresent ? 26 : 16;
+  }
+
+  async function hideOverlay() {
+    if (!current) { currentWid = null; return; }
+    const handle = current;
+    current = null;
+    currentWid = null;
+    try { await handle.detach(); } catch (_) { /* daemon may have cleaned up */ }
+  }
+
+  async function attachForWin(winId) {
+    if (attachInFlight) return;
+    if (!winId || typeof winId !== "number") { await hideOverlay(); return; }
+
+    const color = colorForWin(winId);
+
+    // Same window, same color → fast no-op. Color-drift guard mirrors the
+    // legacy outline.js so an inclusion-bang for the *focused* window can
+    // re-enter this path and detect "needs new color".
+    if (currentWid === winId && current && current.__lastColor === color) return;
+
+    attachInFlight = true;
+    try {
+      // Skip non-standard windows (palettes, dialogs that aren't AXSystemDialog
+      // -tagged, etc.). cornerHints already returns radius 0 for the standard
+      // dialog cases, but isStandard saves us from attaching to ephemeral AX
+      // junk in the first place.
+      let standard = true;
+      try { standard = await sd.windows.isStandard(winId); } catch (_) { standard = true; }
+      if (!standard) { await hideOverlay(); return; }
+
+      const hints = await sd.windows.cornerHints(winId).catch(() => null);
+      const radius = radiusFromHints(hints);
+
+      // Replace any existing overlay (different window or color drift).
+      if (current) {
+        const old = current;
+        current = null;
+        try { await old.detach(); } catch (_) {}
+      }
+
+      const handle = await sd.overlay.attach(winId, overlayHTML(cfg.thickness, radius, color));
+      if (handle) {
+        handle.__lastColor = color;
+        current = handle;
+        currentWid = winId;
+      } else {
+        currentWid = null;
+      }
+    } finally {
+      attachInFlight = false;
+    }
+  }
+
+  async function reattachWithColor() {
+    if (currentWid == null) return;
+    // Force the color-drift branch by clearing the cached color stamp.
+    if (current) current.__lastColor = null;
+    await attachForWin(currentWid);
+  }
+
+  // --- bang: external inclusion verdict ----------------------------------
+  // Other stacks (windowscape) push `{ winId, included }` so we know which
+  // palette to draw. We cache for every window we hear about; if the verdict
+  // is for the currently-focused window we re-skin immediately.
+  window.onBang_overlay_border_inclusion = (detail) => {
+    if (!detail || typeof detail.winId !== "number") return;
+    inclusionByWinId.set(detail.winId, !!detail.included);
+    if (detail.winId === currentWid) reattachWithColor();
+  };
+
+  // --- main subscription -------------------------------------------------
+  (async () => {
+    await loadConfig();
+    sd.windows.focusedChanged.subscribe(async (win) => {
+      if (!win || typeof win.id !== "number") { await hideOverlay(); return; }
+      await attachForWin(win.id);
     });
-  });
+  })();
 </script>
 </body>
 </html>

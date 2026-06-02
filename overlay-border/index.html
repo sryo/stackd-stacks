@@ -65,9 +65,13 @@
     return {
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+        /* inset: 0 + box-sizing: border-box draws the border at the panel
+           edge — no inner padding before the border starts. The previous
+           inset: thickness/2 left a visible gap between the window edge
+           and the border, especially noticeable at thickness 8. */
         .border {
           position: absolute;
-          inset: ${thickness / 2}px;
+          inset: 0;
           border: ${thickness}px solid ${color};
           border-radius: ${radius}px;
           pointer-events: none;

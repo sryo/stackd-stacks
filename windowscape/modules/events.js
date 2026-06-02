@@ -158,15 +158,29 @@ export function start() {
     tileWindows();
   });
 
+  // Display geometry changes. macOS posts NSApplication.didChangeScreen­Parameters­
+  // (which sd.display.all rides) BEFORE NSScreen metrics settle — reading
+  // visibleFrame inside this callback often returns the OLD frame. Lua
+  // events.lua line 705 debounces 250ms before re-tiling for this exact reason,
+  // and resets tilingCount + clears any in-flight cooldowns so the post-debounce
+  // tile pass isn't blocked. Port the same shape.
+  let displayDebounce = null;
   sd.display.all && sd.display.all.subscribe && sd.display.all.subscribe((d) => {
     if (!Array.isArray(d)) return;
-    // Arrangement / connect / disconnect — retile against the new geometry,
-    // not the stale one we had before. (Previously this only updated the
-    // snapshot, so tiler.js would size windows against a vanished display
-    // until the next windowsAll tick.)
     state.displays = d;
-    updateWindowOrder();
-    tileWindows();
+    if (displayDebounce) clearTimeout(displayDebounce);
+    displayDebounce = setTimeout(() => {
+      displayDebounce = null;
+      // Pull a fresh displays snapshot after the settle delay so screenFrame
+      // math uses the now-current visibleFrame instead of the stale value
+      // that fired this callback.
+      const settled = sd.display.all.peek?.();
+      if (Array.isArray(settled)) state.displays = settled;
+      // Clear stale tile cooldown so the retile actually runs.
+      state.tilingCount = 0;
+      updateWindowOrder();
+      tileWindows();
+    }, 250);
   });
 
   // Lifecycle bangs — invalidate space cache for destroyed windows.

@@ -296,12 +296,22 @@ export async function getStats() {
 
 export async function deleteOlderThan(timestamp) {
   const ids = await db.query("SELECT id FROM frames WHERE timestamp < ?", [timestamp]);
-  for (const row of ids.rows) {
-    await db.query("INSERT INTO frame_trigram(frame_trigram, rowid, full_text) VALUES('delete', ?, ?)",
-                   [row.id, ""]);
-  }
+  if (!ids || !ids.rows || ids.rows.length === 0) return 0;
+
+  // frame_text first (FK-style cleanup), then frames. frame_fts_ad trigger
+  // mops up FTS5 contentless entries automatically.
   await db.query("DELETE FROM frame_text WHERE frame_id IN (SELECT id FROM frames WHERE timestamp < ?)",
                  [timestamp]);
   await db.query("DELETE FROM frames WHERE timestamp < ?", [timestamp]);
+
+  // frame_trigram has no triggers (FTS5-trigger failures used to block the
+  // parent INSERT — see comment on init). Per-row 'delete' commands need the
+  // original indexed text to remove the right tokens; we don't have it here.
+  // Mirror cleanup.lua and rebuild the whole trigram index instead.
+  try {
+    await db.exec("INSERT INTO frame_trigram(frame_trigram) VALUES('rebuild')");
+  } catch (e) {
+    console.warn("digup: trigram rebuild after prune failed:", e);
+  }
   return ids.rows.length;
 }

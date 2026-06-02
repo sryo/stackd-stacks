@@ -143,7 +143,7 @@ async function tick() {
   if (caff && (caff.locked || caff.sleeping)) return;
 
   const focused = sd.windows.focused.peek();
-  if (!focused || !focused.frame) return;
+  if (!focused || !focused.id) return;
   const winTitle = focused.title || "";
 
   const titleLower = winTitle.toLowerCase();
@@ -151,17 +151,14 @@ async function tick() {
     if (titleLower.indexOf(pat) >= 0) return;
   }
 
-  const region = focusedWindowRegion(focused.frame);
-  if (!region) return;
-
+  // Capture the focused WINDOW (mirrors HS `win:snapshot()`), not a display
+  // region. sd.display.snapshot with a window-bounding rect would also pick
+  // up anything overlapping that rect (other apps' windows, the menubar,
+  // overlay stacks) and bake it into the OCR index. sd.windows.snapshot
+  // uses CGSHWCaptureWindowList against the specific window id.
   let snap = null;
   try {
-    snap = await sd.display.snapshot({
-      display: region.displayID,
-      region: region.local,
-      format: "jpeg",
-      quality: 0.75
-    });
+    snap = await sd.windows.snapshot(focused.id, { format: "jpeg", quality: 0.75 });
   } catch (e) {
     console.error("digup capture: snapshot error", e);
     return;
@@ -220,31 +217,3 @@ async function tick() {
   });
 }
 
-// AX window frames are global top-left; sd.display.snapshot crops in
-// display-local point coordinates. Find the NSScreen whose frame contains
-// the window center and convert.
-function focusedWindowRegion(frame) {
-  const displays = sd.display.all.peek() || [];
-  const cx = frame.x + frame.w / 2;
-  const cy = frame.y + frame.h / 2;
-  for (const d of displays) {
-    const df = d.frame;
-    if (!df) continue;
-    if (cx >= df.x && cx < df.x + df.w && cy >= df.y && cy < df.y + df.h) {
-      return {
-        displayID: d.displayID,
-        local: {
-          x: Math.max(0, frame.x - df.x),
-          y: Math.max(0, frame.y - df.y),
-          w: Math.min(frame.w, df.w),
-          h: Math.min(frame.h, df.h)
-        }
-      };
-    }
-  }
-  if (displays.length > 0) {
-    const d = displays[0];
-    return { displayID: d.displayID, local: { x: 0, y: 0, w: d.frame.w, h: d.frame.h } };
-  }
-  return { displayID: undefined, local: undefined };
-}

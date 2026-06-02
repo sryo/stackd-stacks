@@ -116,6 +116,14 @@ export function updateWindowOrder() {
       const w = state.windowsById[id];
       if (!w) continue;
       if (!isAppIncluded(w)) continue;
+      // Filter hidden / minimized / off-screen windows. CGWindowIsOnscreen
+      // false === "not currently drawn on any display" — minimized, cmd+H
+      // hidden, and other-space windows all share this signal. Without
+      // this, hidden windows took tile slots and the visible windows ended
+      // up at 1/N width with phantom gaps where the hidden ones lived
+      // (e.g. user has 3 visible terminals + 1 hidden, layout split into
+      // 4 columns, hidden one's column showed the desktop behind).
+      if (w.onscreen === false) continue;
       const wd = displayForWindow(w);
       if (!wd || wd.displayID !== d.displayID) continue;
       const wspaces = state.windowSpacesCache[w.id] || [];

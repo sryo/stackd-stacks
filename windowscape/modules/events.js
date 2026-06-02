@@ -108,7 +108,16 @@ async function handleWindowEvent() {
   if (tabSwitch) return;
   if (newIds.length === 0 && removedIds.length === 0) return;
 
-  await refreshSpacesCache(newIds);
+  // Refresh cache for newcomers AND for any currently-eligible window
+  // whose cache entry is missing. The strict "only newIds" approach
+  // lost cache entries permanently whenever a window briefly dropped
+  // out of currentIds (e.g. transient displayForWindow=null while
+  // state.displays was still empty during boot, or a toggleExcluded
+  // round-trip): the removed-path purged the cache, but the rejoin-
+  // path only refreshes IDs that are "new since last tick" — windows
+  // present on both ticks but cache-missing fell through forever.
+  const cacheMissing = [...currentIds].filter((id) => !state.windowSpacesCache[id]);
+  await refreshSpacesCache(cacheMissing);
   for (const id of removedIds) delete state.windowSpacesCache[id];
 
   log(`event: +${newIds.length} -${removedIds.length}`);

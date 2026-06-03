@@ -69,20 +69,38 @@ async function tileWindowsInternal() {
     //   onscreen:    CGWindowList visibility flag — false when AX-minimized
     // Per-pass AX probing in JS is gone — the daemon does it once per push
     // with a cache, so 50-window setups don't fan out 100 AX RPCs per tile.
+    // Sticky tile membership: once a window has been tiled, it stays in
+    // rotation until it's explicitly removed (sd.window.destroyed) or
+    // explicitly minimized. Daemon-provided AX flags filter on FIRST
+    // appearance only — they decide whether a window enters the rotation,
+    // not whether to keep it.
+    //
+    // Why: AX's 100ms messaging timeout makes addressable/isStandard
+    // flicker false for legitimate windows under load. Dropping them
+    // mid-session leaves their previous setFrame position stuck on screen
+    // (the tiler doesn't reset frames of dropped windows), causing visual
+    // overlap with whatever takes their old slot. Sticky-once-tiled
+    // eliminates the overlap; the cost is keeping an actually-gone window
+    // in the rotation for an extra tile pass, which the next destroy
+    // bang clears.
+    if (!state.stickyTileSet) state.stickyTileSet = new Set();
     const screenWindows = [];
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w) continue;
       const f = w.frame;
       if (!f) continue;
-      // Daemon-provided AX-derived filters. Old daemons (pre-WindowAddressabilityCache)
-      // won't have these fields; default to permissive (true) so we don't break.
-      if (w.addressable === false) continue;
-      if (w.isStandard === false) continue;
+      const isAlreadyTiled = state.stickyTileSet.has(+id);
+      // First-time gates only — once tiled, the window is sticky.
+      if (!isAlreadyTiled) {
+        if (w.addressable === false) continue;
+        if (w.isStandard === false) continue;
+      }
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const df = d.frame;
       if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) continue;
       screenWindows.push(id);
+      state.stickyTileSet.add(+id);
       state.windowLastScreen[id] = d.displayID;
     }
     if (screenWindows.length === 0) continue;
@@ -132,18 +150,14 @@ async function tileWindowsInternal() {
     const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
     const horizontal = screenFrame.w > screenFrame.h;
 
-    // Inline user-resize detection. Tile passes fire faster than the
-    // TahoeSynthPoll's 250ms tick — by the time the synth poll emits a
-    // .moved bang for a user-driven resize, a tile pass has often already
-    // snapped the window back to the old target. The drag-handler debounce
-    // (300ms) then catches an echo of the snap-back, not the user's intent.
-    //
-    // Side-step it: at the start of each tile pass, compare each window's
-    // LIVE AX frame to lastTileTarget. If they diverge significantly AND
-    // the last setFrame was recent (< 5s), assume the user moved it and
-    // transfer weight to/from the adjacent tile so the next tile pass
-    // honors the new size. Skipping this would mean every tile pass
-    // overwrites the user's drag-in-progress.
+    // Inline user-resize detection — REMOVED. Was relying on a per-pass
+    // AX probe that the daemon-side WindowAddressabilityCache replaced.
+    // The drag-handler's debounced applyResizeIfNeeded path (events.js)
+    // already handles user-driven resizes correctly via the sd.window.moved
+    // / resized bangs and lastTileTarget comparison — keeping a duplicate
+    // path here would race with that one.
+    /* removed block referenced `probes` which no longer exists; the
+       drag-handler post-debounce retile is the canonical path:
     let weightsAdjusted = false;
     if (nonCollapsed.length >= 2) {
       const liveById = Object.create(null);
@@ -181,6 +195,7 @@ async function tileWindowsInternal() {
         weightsAdjusted = true;
       }
     }
+    */
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight);
 
     log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);

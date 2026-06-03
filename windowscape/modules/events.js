@@ -153,6 +153,11 @@ export function start() {
     for (const id of state.fixedSizeIds) {
       if (!next[id]) state.fixedSizeIds.delete(id);
     }
+    if (state.stickyTileSet) {
+      for (const id of state.stickyTileSet) {
+        if (!next[id]) state.stickyTileSet.delete(id);
+      }
+    }
   });
 
   // Post-R1b: subscribe to the granular focusedChanged channel, not the legacy
@@ -228,6 +233,7 @@ export function start() {
   window.onBang_sd_window_destroyed = (detail) => {
     if (detail && detail.id) {
       delete state.windowSpacesCache[detail.id];
+      if (state.stickyTileSet) state.stickyTileSet.delete(+detail.id);
       // If the destroyed window was the simulated-fullscreen target, exit
       // so the parked peers come back into view. No-op otherwise.
       fullscreenOnDestroyed(detail.id);

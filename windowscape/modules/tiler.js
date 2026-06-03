@@ -59,62 +59,31 @@ async function tileWindowsInternal() {
 
     // Per-pass eligibility — port of hs.window.visibleWindows() (window.lua:131
     // and isVisible() at window.lua:255: `not parentApp:isHidden() and not
-    // self:isMinimized()`). Lua re-queries AX state every pass; mirror that.
-    // All N×2 AX queries fire in parallel so the per-pass latency is one
-    // AX round-trip (~100ms cap via AXUIElementSetMessagingTimeout in
-    // Windows.swift:334), not N×100ms — important for tile passes that
-    // run inside focus-change debounce.
-    const candidates = [];
+    // Trust daemon-enriched flags on state.windowsById entries:
+    //   addressable: AX has confirmed this id is reachable (cached 60s in
+    //                WindowAddressabilityCache, so the daemon doesn't
+    //                re-probe every push)
+    //   isStandard:  AXSubrole == AXStandardWindow — filters Inspector,
+    //                preferences, helper-id flickers (Terminal sometimes
+    //                spawns ephemeral helper windows during tab switches)
+    //   onscreen:    CGWindowList visibility flag — false when AX-minimized
+    // Per-pass AX probing in JS is gone — the daemon does it once per push
+    // with a cache, so 50-window setups don't fan out 100 AX RPCs per tile.
+    const screenWindows = [];
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w) continue;
       const f = w.frame;
       if (!f) continue;
+      // Daemon-provided AX-derived filters. Old daemons (pre-WindowAddressabilityCache)
+      // won't have these fields; default to permissive (true) so we don't break.
+      if (w.addressable === false) continue;
+      if (w.isStandard === false) continue;
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const df = d.frame;
       if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) continue;
-      candidates.push(id);
-    }
-    const probes = await Promise.all(candidates.map(async (id) => ({
-      id,
-      live: await sd.windows.frame(id).catch(() => null),
-      minimized: await sd.windows.isMinimized(id).catch(() => false)
-    })));
-    const screenWindows = [];
-    // AX miss handling. Two distinct cases:
-    //   A) Genuinely unaddressable (Spotify dock-collapsed, Activity Monitor
-    //      menubar-mini, etc.): AX has NEVER returned a frame for this id.
-    //      Drop — keeping it holds a ghost slot.
-    //   B) Transient flicker (spotlight indexing, brightness poll racing
-    //      the tile pass): AX has succeeded recently but failed this
-    //      pass. Keep — dropping causes Terminal-style flicker bugs.
-    // lastAxOkAt[id] is the wall-clock ms of the most recent successful
-    // probe. Defaults to 0 (never), so case A bails immediately.
-    const AX_RECENT_MS         = 30000; // trust a window for 30s after any successful probe
-    const AX_INITIAL_TOLERANCE = 20;    // never-seen window: forgive 20 misses before deciding "unaddressable"
-    const now = Date.now();
-    for (const p of probes) {
-      if (p.live) {
-        state.lastAxOkAt[p.id] = now;
-        state.axMissCount[p.id] = 0;
-      } else {
-        const lastOk = state.lastAxOkAt[p.id] || 0;
-        // Was-addressable recently → keep (transient flicker — spotlight,
-        // brightness poll racing).
-        if (lastOk > 0 && (now - lastOk) <= AX_RECENT_MS) {
-          // pass-through; keep in rotation
-        } else {
-          // Never-addressable yet → give a few attempts before deciding
-          // "genuinely unaddressable." Some apps need a beat after window
-          // creation before AX answers.
-          const n = (state.axMissCount[p.id] || 0) + 1;
-          state.axMissCount[p.id] = n;
-          if (n > AX_INITIAL_TOLERANCE) continue;
-        }
-      }
-      if (p.minimized) continue;
-      screenWindows.push(p.id);
-      state.windowLastScreen[p.id] = d.displayID;
+      screenWindows.push(id);
+      state.windowLastScreen[id] = d.displayID;
     }
     if (screenWindows.length === 0) continue;
 

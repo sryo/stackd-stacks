@@ -90,8 +90,23 @@ async function tileWindowsInternal() {
       if (!w) continue;
       const f = w.frame;
       if (!f) continue;
+      // First-time entry filter: only daemon-provided isStandard. The
+      // addressable flag turned out to be too unreliable — AX's 100ms
+      // timeout returns false-negatives on perfectly valid windows under
+      // load (Terminal repeatedly missed across daemon restarts because
+      // each restart cleared the cache and the first probe race lost).
+      // CGWindowList is the source of truth: if a window is in the list
+      // with valid bounds, we tile it. The setFrame call may silently
+      // no-op on truly AX-unreachable windows (Spotify dock-collapsed,
+      // AM compact) but they reappear as a slot — that's a smaller bug
+      // than dropping the real Terminal and causing visual overlap.
+      // First-time entry gates: daemon flags. addressable=false means the
+      // daemon's WindowAddressabilityCache returned ≥N consecutive AX
+      // misses (not a single transient miss — see Windows.swift
+      // WindowAddressabilityCache.probe). isStandard filters helper
+      // windows. Once an id is sticky, neither gate applies — flicker
+      // can't drop it.
       const isAlreadyTiled = state.stickyTileSet.has(+id);
-      // First-time gates only — once tiled, the window is sticky.
       if (!isAlreadyTiled) {
         if (w.addressable === false) continue;
         if (w.isStandard === false) continue;

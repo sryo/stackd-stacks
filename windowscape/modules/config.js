@@ -9,7 +9,7 @@ export const cfg = {
   enableAnimations:      false,
   animationDuration:     0.15,
   animationFPS:          60,
-  debugLogging:          false,
+  debugLogging:          true,
   widthStep:             0.25,
   widthMin:              0.25,
   widthMax:              8.0,

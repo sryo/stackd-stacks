@@ -60,6 +60,11 @@ export const state = {
   // the rotation immediately → flicker. Now we tolerate up to N consecutive
   // misses before excluding. Reset to 0 on any successful probe.
   axMissCount:        Object.create(null),
+  // Wall-clock ms of the most recent successful sd.windows.frame(id) probe.
+  // Pairs with axMissCount: a window is considered "really gone" only when
+  // it's missed N consecutive probes AND no success has landed within the
+  // recent-window. Survives multi-second bursts of AX-timeout flickers.
+  lastAxOkAt:         Object.create(null),
   // Source label for the next tileWindows() call — set by the caller
   // (focusedChanged subscribe, handleWindowEvent, onBang_sd_window_minimized,
   // etc.) so the event log can show WHY a tile pass fired.

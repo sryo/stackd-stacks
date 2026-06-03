@@ -81,19 +81,36 @@ async function tileWindowsInternal() {
       minimized: await sd.windows.isMinimized(id).catch(() => false)
     })));
     const screenWindows = [];
-    const AX_MISS_TOLERANCE = 2; // drop only after N+1 consecutive misses
+    // AX miss handling. Two distinct cases:
+    //   A) Genuinely unaddressable (Spotify dock-collapsed, Activity Monitor
+    //      menubar-mini, etc.): AX has NEVER returned a frame for this id.
+    //      Drop — keeping it holds a ghost slot.
+    //   B) Transient flicker (spotlight indexing, brightness poll racing
+    //      the tile pass): AX has succeeded recently but failed this
+    //      pass. Keep — dropping causes Terminal-style flicker bugs.
+    // lastAxOkAt[id] is the wall-clock ms of the most recent successful
+    // probe. Defaults to 0 (never), so case A bails immediately.
+    const AX_RECENT_MS         = 30000; // trust a window for 30s after any successful probe
+    const AX_INITIAL_TOLERANCE = 20;    // never-seen window: forgive 20 misses before deciding "unaddressable"
+    const now = Date.now();
     for (const p of probes) {
       if (p.live) {
-        // Probe succeeded → reset miss counter.
+        state.lastAxOkAt[p.id] = now;
         state.axMissCount[p.id] = 0;
       } else {
-        // Probe failed → bump miss counter. Tolerate a brief AX flicker
-        // (the 100ms messaging timeout drops under load — spotlight
-        // indexing, brightness poll racing the tile pass).
-        const n = (state.axMissCount[p.id] || 0) + 1;
-        state.axMissCount[p.id] = n;
-        if (n > AX_MISS_TOLERANCE) continue;
-        // Otherwise keep the id in the rotation using the cached frame.
+        const lastOk = state.lastAxOkAt[p.id] || 0;
+        // Was-addressable recently → keep (transient flicker — spotlight,
+        // brightness poll racing).
+        if (lastOk > 0 && (now - lastOk) <= AX_RECENT_MS) {
+          // pass-through; keep in rotation
+        } else {
+          // Never-addressable yet → give a few attempts before deciding
+          // "genuinely unaddressable." Some apps need a beat after window
+          // creation before AX answers.
+          const n = (state.axMissCount[p.id] || 0) + 1;
+          state.axMissCount[p.id] = n;
+          if (n > AX_INITIAL_TOLERANCE) continue;
+        }
       }
       if (p.minimized) continue;
       screenWindows.push(p.id);

@@ -113,25 +113,25 @@ async function tileWindowsInternal() {
       // Either signal removes the window from rotation — checked EVERY
       // pass (not gated by stickyTileSet) because a user can minimize
       // mid-session and the tile must release the slot immediately.
-      if (w.onscreen === false) continue;
-      if (w.isMinimized === true) continue;
-      // First-time entry gates: daemon flags. addressable=false means the
-      // daemon's WindowAddressabilityCache returned ≥N consecutive AX
-      // misses (not a single transient miss — see Windows.swift
-      // WindowAddressabilityCache.probe). isStandard filters helper
-      // windows. Once an id is sticky, neither gate applies — flicker
-      // can't drop it.
+      if (w.onscreen === false) { if (state.tileReason === "stray-overlap-recovery") evt(`FILTER-DROP id=${id} reason=onscreen=false app=${w.app}`); continue; }
+      if (w.isMinimized === true) { if (state.tileReason === "stray-overlap-recovery") evt(`FILTER-DROP id=${id} reason=isMinimized=true app=${w.app}`); continue; }
       const isAlreadyTiled = state.stickyTileSet.has(+id);
       if (!isAlreadyTiled) {
-        if (w.addressable === false) continue;
-        if (w.isStandard === false) continue;
+        if (w.addressable === false) { if (state.tileReason === "stray-overlap-recovery") evt(`FILTER-DROP id=${id} reason=addressable=false app=${w.app}`); continue; }
+        if (w.isStandard === false) { if (state.tileReason === "stray-overlap-recovery") evt(`FILTER-DROP id=${id} reason=isStandard=false app=${w.app}`); continue; }
       }
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const df = d.frame;
-      if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) continue;
+      if (cx < df.x || cx >= df.x + df.w || cy < df.y || cy >= df.y + df.h) {
+        if (state.tileReason === "stray-overlap-recovery") evt(`FILTER-DROP id=${id} reason=off-display d=${d.displayID} frame=${JSON.stringify(f)}`);
+        continue;
+      }
       screenWindows.push(id);
       state.stickyTileSet.add(+id);
       state.windowLastScreen[id] = d.displayID;
+    }
+    if (state.tileReason === "stray-overlap-recovery") {
+      evt(`RECOVERY-PASS d=${d.displayID} screenWindows=${JSON.stringify(screenWindows)} ordered=${JSON.stringify(ordered)}`);
     }
     if (screenWindows.length === 0) continue;
 
@@ -284,6 +284,70 @@ async function tileWindowsInternal() {
           }
         }
       }
+    }
+
+    // Post-tile audit: find STRAY windows — visible windows on this
+    // display that aren't in the tile rotation. These are the windows
+    // that produce the user-visible overlap bug (window was dropped from
+    // rotation, its previous setFrame frame stayed put, new tile reflowed
+    // around it as if it didn't exist). Always-on emission to [ws-evt]
+    // so user can grep for OVERLAP / STRAY.
+    const tiledSet = new Set(screenWindows.map(id => +id));
+    const visibleOnDisplay = [];
+    for (const id of Object.keys(state.windowsById)) {
+      const idNum = +id;
+      if (tiledSet.has(idNum)) continue;          // in rotation — fine
+      const w = state.windowsById[id];
+      if (!w || !w.frame) continue;
+      if (w.isMinimized || w.onscreen === false) continue;  // hidden — fine
+      const cx = w.frame.x + w.frame.w / 2;
+      const cy = w.frame.y + w.frame.h / 2;
+      if (cx < d.frame.x || cx >= d.frame.x + d.frame.w) continue;
+      if (cy < d.frame.y || cy >= d.frame.y + d.frame.h) continue;
+      visibleOnDisplay.push({ id: idNum, app: w.app, frame: w.frame });
+    }
+    let strayOverlapNeedsRetile = false;
+    for (const stray of visibleOnDisplay) {
+      // Check overlap with each tiled target.
+      const overlaps = targets.filter(t => {
+        const a = stray.frame, b = t.frame;
+        return !(a.x + a.w <= b.x || b.x + b.w <= a.x ||
+                 a.y + a.h <= b.y || b.y + b.h <= a.y);
+      }).map(t => ({ id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,12) }));
+      if (overlaps.length > 0) {
+        evt(`STRAY-OVERLAP id=${stray.id} (${stray.app?.slice(0,12)}) frame=${JSON.stringify(stray.frame)} overlaps=${JSON.stringify(overlaps)}  → recovering`);
+        // Auto-recovery: force this stray id back into the rotation by
+        // adding to stickyTileSet (the filter at the top of this pass
+        // checks isAlreadyTiled BEFORE addressable/isStandard gates).
+        // Then queue a fresh tile pass after this one completes so the
+        // window gets a proper slot allocation.
+        state.stickyTileSet.add(+stray.id);
+        strayOverlapNeedsRetile = true;
+      } else {
+        evt(`STRAY id=${stray.id} (${stray.app?.slice(0,12)}) frame=${JSON.stringify(stray.frame)} on-display=${d.displayID} no-overlap`);
+      }
+    }
+    if (strayOverlapNeedsRetile) {
+      // Force the stray id(s) into windowOrderBySpace directly — without
+      // this they'd never reach the candidates loop on the recovery pass
+      // (updateWindowOrder requires a valid windowSpacesCache entry which
+      // is often what got stale and caused the drop in the first place).
+      // After this manual splice, the next tile pass sees them, the
+      // stickyTileSet bypass skips the AX gates, and the layout reflows
+      // to include them.
+      const sp = activeSpaceOnDisplay(d.uuid);
+      if (sp != null) {
+        const order = state.windowOrderBySpace[sp] || [];
+        for (const stray of visibleOnDisplay) {
+          if (!order.includes(stray.id)) order.push(stray.id);
+        }
+        state.windowOrderBySpace[sp] = order;
+      }
+      // Defer the recovery tile so the current pass finishes its setFrames
+      // first. The recovery pass picks up the strays via stickyTileSet
+      // and reflows everyone.
+      state.tileReason = "stray-overlap-recovery";
+      setTimeout(() => { tileWindows(); }, 50);
     }
   }
 }

@@ -179,21 +179,27 @@ export function updateWindowOrder() {
 
     const eligible = [];
     const eligibleIds = new Set();
+    const isRecovery = state.tileReason === "stray-overlap-recovery";
     for (const id in state.windowsById) {
       const w = state.windowsById[id];
-      if (!w) continue;
-      if (!isAppIncluded(w)) continue;
-      // Drop minimized windows. We track minimize state explicitly via the
-      // sd.window.minimized / deminimized bangs (see events.js) rather than
-      // CGWindowIsOnscreen — that flag flickers false when a window is
-      // momentarily occluded by a tooltip / notification / another window
-      // briefly above, which would drop the visible window from the tile
-      // rotation. Explicit bang-driven state survives the flicker.
-      if (state.minimizedIds && state.minimizedIds.has(+w.id)) continue;
+      if (!w) { if (isRecovery) evt(`UWO-DROP id=${id} reason=no-w`); continue; }
+      if (!isAppIncluded(w)) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=excluded`); continue; }
+      if (state.minimizedIds && state.minimizedIds.has(+w.id)) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=minimizedIds`); continue; }
       const wd = displayForWindow(w);
-      if (!wd || wd.displayID !== d.displayID) continue;
-      const wspaces = state.windowSpacesCache[w.id] || [];
-      if (!wspaces.includes(space)) continue;
+      if (!wd) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=no-display frame=${JSON.stringify(w.frame)}`); continue; }
+      if (wd.displayID !== d.displayID) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=other-display d=${wd.displayID}≠${d.displayID}`); continue; }
+      // wspaces==undefined → never queried (refreshSpacesCache async-pending)
+      // wspaces==[]        → query returned empty (often: window not yet
+      //                       enumerable by sd.spaces.windowSpaces during a
+      //                       transition). Treat both as "no info yet,
+      //                       include optimistically." Only EXCLUDE when
+      //                       we have a definite non-empty list that lacks
+      //                       this space.
+      const wspaces = state.windowSpacesCache[w.id];
+      if (wspaces && wspaces.length > 0 && !wspaces.includes(space)) {
+        if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=other-space spaces=${JSON.stringify(wspaces)} active=${space}`);
+        continue;
+      }
       eligible.push(w);
       eligibleIds.add(w.id);
     }

@@ -48,6 +48,22 @@ export const state = {
   // handler doesn't misread the size mismatch as a user drag and rebalance
   // weights against them. Cleared when the window disappears.
   fixedSizeIds:       new Set(),
+  // Previous tile-pass membership per display (Set<id>). Used by the
+  // event-log diff in tiler.js to detect TILE-IN / TILE-OUT transitions.
+  // Fires only when membership actually changes, so logging is near-free
+  // even with debugLogging off.
+  prevTileMembership: Object.create(null),
+  // Per-window consecutive AX-probe miss counter. AX's 100ms messaging
+  // timeout can drop a query under load (e.g. spotlight indexing, brightness
+  // poll racing), causing sd.windows.frame(id) to return null for an id
+  // that's perfectly fine. The tiler previously dropped such windows from
+  // the rotation immediately → flicker. Now we tolerate up to N consecutive
+  // misses before excluding. Reset to 0 on any successful probe.
+  axMissCount:        Object.create(null),
+  // Source label for the next tileWindows() call — set by the caller
+  // (focusedChanged subscribe, handleWindowEvent, onBang_sd_window_minimized,
+  // etc.) so the event log can show WHY a tile pass fired.
+  tileReason:         "",
   // True while the user is mid-drag — set by handleDragEnd on the first
   // non-echo bang, cleared after the debounce resolves or after a safety
   // timeout (~1.5s of no further bangs). tileWindows() bails when set so
@@ -87,6 +103,16 @@ export const state = {
 
 export function log(msg) {
   if (cfg.debugLogging) console.log("[WindowScape]", msg);
+}
+
+/// Always-on event log for tile membership transitions. Unlike `log()`
+/// (which floods on every tile pass when debugLogging is true), `evt()`
+/// fires only on actual state changes — window enters/leaves tile
+/// rotation, fixed-size detected, minimize bang received — and so is
+/// safe to leave on in production. Performance: ~1 line per real event,
+/// effectively zero at rest.
+export function evt(msg) {
+  console.log("[ws-evt]", msg);
 }
 
 export function warn(msg) {

@@ -4,7 +4,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, updateWindowOrder, activeSpaceOnDisplay, log } from "./core.js";
+import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt } from "./core.js";
 import { tileWeighted } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -81,8 +81,20 @@ async function tileWindowsInternal() {
       minimized: await sd.windows.isMinimized(id).catch(() => false)
     })));
     const screenWindows = [];
+    const AX_MISS_TOLERANCE = 2; // drop only after N+1 consecutive misses
     for (const p of probes) {
-      if (!p.live) continue;
+      if (p.live) {
+        // Probe succeeded → reset miss counter.
+        state.axMissCount[p.id] = 0;
+      } else {
+        // Probe failed → bump miss counter. Tolerate a brief AX flicker
+        // (the 100ms messaging timeout drops under load — spotlight
+        // indexing, brightness poll racing the tile pass).
+        const n = (state.axMissCount[p.id] || 0) + 1;
+        state.axMissCount[p.id] = n;
+        if (n > AX_MISS_TOLERANCE) continue;
+        // Otherwise keep the id in the rotation using the cached frame.
+      }
       if (p.minimized) continue;
       screenWindows.push(p.id);
       state.windowLastScreen[p.id] = d.displayID;
@@ -96,6 +108,33 @@ async function tileWindowsInternal() {
     // windows the tiler skipped), totalWeight diverges, and the
     // expected-vs-actual math fires false "user resized!" transitions.
     state.lastTiledByDisplay[d.displayID] = [...screenWindows];
+
+    // Event log: membership diff vs previous tile pass on this display.
+    // Fires only on transitions so log volume is tied to real changes,
+    // not tile-pass rate. Includes WHY a tile pass fired (state.tileReason)
+    // so we can correlate "what user action caused this retile".
+    const prev = state.prevTileMembership[d.displayID] || new Set();
+    const curSet = new Set(screenWindows);
+    const added = [...curSet].filter(id => !prev.has(id));
+    const removed = [...prev].filter(id => !curSet.has(id));
+    if (added.length || removed.length) {
+      const reason = state.tileReason || "?";
+      for (const id of added) {
+        const a = state.windowsById[id]?.app || "?";
+        evt(`TILE-IN  d${d.displayID} ${id} (${a.slice(0,18)})  via=${reason}`);
+      }
+      for (const id of removed) {
+        const a = state.windowsById[id]?.app || "?";
+        // Reason: figure out why it's gone now.
+        let why = "gone";
+        if (state.minimizedIds.has(+id)) why = "minimized";
+        else if (state.fixedSizeIds.has(+id) && !state.windowsById[id]) why = "fixed-size+gone";
+        else if (!state.windowsById[id]) why = "no-windowsById";
+        else why = "unaddressable";
+        evt(`TILE-OUT d${d.displayID} ${id} (${a.slice(0,18)})  why=${why}  via=${reason}`);
+      }
+    }
+    state.prevTileMembership[d.displayID] = curSet;
 
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));

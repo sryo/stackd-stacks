@@ -122,6 +122,7 @@ async function handleWindowEvent() {
 
   log(`event: +${newIds.length} -${removedIds.length}`);
   updateWindowOrder();
+  state.tileReason = `lifecycle +${newIds.length}-${removedIds.length}`;
   await tileWindows();
   // Refresh the focused window's inclusion verdict — overlay-border owns
   // the border render now, we just push the policy.
@@ -179,6 +180,7 @@ export function start() {
     state.spacesByDisplay = info;
     // Active space changed — rebuild order + retile.
     updateWindowOrder();
+    state.tileReason = "spaces";
     tileWindows();
   });
 
@@ -189,9 +191,22 @@ export function start() {
   // and resets tilingCount + clears any in-flight cooldowns so the post-debounce
   // tile pass isn't blocked. Port the same shape.
   let displayDebounce = null;
+  // Cache the geometry signature so we can skip retiles when the only
+  // thing that changed was brightness (sd.display.all re-pushes on every
+  // 2s brightness poll). Without this, every brightness sample triggers
+  // a tile pass — which races with the per-pass AX probe and produces
+  // spurious "Terminal dropped from rotation" events when AX is briefly
+  // slow under load.
+  let lastDisplayGeoSig = "";
   sd.display.all && sd.display.all.subscribe && sd.display.all.subscribe((d) => {
     if (!Array.isArray(d)) return;
     state.displays = d;
+    const sig = d.map(s => {
+      const f = s.frame || {}, vf = s.visibleFrame || {};
+      return `${s.displayID}|${f.x},${f.y},${f.w},${f.h}|${vf.x},${vf.y},${vf.w},${vf.h}`;
+    }).join("/");
+    if (sig === lastDisplayGeoSig) return; // brightness-only push, ignore
+    lastDisplayGeoSig = sig;
     if (displayDebounce) clearTimeout(displayDebounce);
     displayDebounce = setTimeout(() => {
       displayDebounce = null;
@@ -203,6 +218,7 @@ export function start() {
       // Clear stale tile cooldown so the retile actually runs.
       state.tilingCount = 0;
       updateWindowOrder();
+      state.tileReason = "display-change";
       tileWindows();
     }, 250);
   });
@@ -234,12 +250,14 @@ export function start() {
     // eligibility flag). Tile directly so the freed slot collapses and
     // remaining tiles absorb the space.
     updateWindowOrder();
+    state.tileReason = `minimize(${detail.id})`;
     tileWindows();
   };
   window.onBang_sd_window_deminimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.delete(+detail.id);
     updateWindowOrder();
+    state.tileReason = `deminimize(${detail.id})`;
     tileWindows();
   };
 

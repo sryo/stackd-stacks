@@ -8,7 +8,6 @@ import { cfg } from "./config.js";
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
   windowWeights:      Object.create(null), // winId -> weight
-  windowLastScreen:   Object.create(null), // winId -> displayID
   focusHistory:       [],
   focusHistoryMax:    10,
   listedApps:         Object.create(null), // bundleId/name -> true
@@ -41,30 +40,12 @@ export const state = {
   // and totalWeight diverges → false "user resized!" detections that
   // transfer weight to windows the user didn't touch.
   lastTiledByDisplay: Object.create(null),
-  // CGWindowIDs that refused the tiler's setFrame size change (Calculator,
-  // System Settings, certain panel-style apps). Detected post-setFrame
-  // when live frame's size differs from the request by >50px. We still
-  // honor their position but treat them as non-resizable so the drag-
-  // handler doesn't misread the size mismatch as a user drag and rebalance
-  // weights against them. Cleared when the window disappears.
-  fixedSizeIds:       new Set(),
-  // Previous tile-pass membership per display (Set<id>). Used by the
-  // event-log diff in tiler.js to detect TILE-IN / TILE-OUT transitions.
-  // Fires only when membership actually changes, so logging is near-free
-  // even with debugLogging off.
-  prevTileMembership: Object.create(null),
-  // Per-window consecutive AX-probe miss counter. AX's 100ms messaging
-  // timeout can drop a query under load (e.g. spotlight indexing, brightness
-  // poll racing), causing sd.windows.frame(id) to return null for an id
-  // that's perfectly fine. The tiler previously dropped such windows from
-  // the rotation immediately → flicker. Now we tolerate up to N consecutive
-  // misses before excluding. Reset to 0 on any successful probe.
-  axMissCount:        Object.create(null),
-  // Wall-clock ms of the most recent successful sd.windows.frame(id) probe.
-  // Pairs with axMissCount: a window is considered "really gone" only when
-  // it's missed N consecutive probes AND no success has landed within the
-  // recent-window. Survives multi-second bursts of AX-timeout flickers.
-  lastAxOkAt:         Object.create(null),
+  // (No persistent caches: stickyTileSet, prevTileMembership, axMissCount,
+  // lastAxOkAt, windowLastScreen, windowConstraints, fixedSizeIds all
+  // deleted. AX min/max are layout-pressure-dependent and the daemon
+  // owns AX addressability caching. Per BELIEFS #1, live AX is the source
+  // of truth; the tile pass observes actuals each pass via setFrameProbed
+  // and converges via PASS-2 weight sync.)
   // Source label for the next tileWindows() call — set by the caller
   // (focusedChanged subscribe, handleWindowEvent, onBang_sd_window_minimized,
   // etc.) so the event log can show WHY a tile pass fired.
@@ -75,6 +56,12 @@ export const state = {
   // focusedChanged / windowsAll / spaces.all subscriptions don't yank the
   // window out from under the cursor mid-drag.
   dragInFlight:       false,
+  // The id of the window the user is currently dragging — captured from the
+  // first moved/resized bang inside a leftMouseDown→leftMouseUp bracket
+  // (events.js startDragBracket / endDragBracket). Mid-drag bangs overwrite
+  // this with the latest id so the trailing bang wins; the bracket's close
+  // handler reads it to decide resize-redistribute vs reorder.
+  dragCandidateId:    null,
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.
@@ -123,6 +110,13 @@ export function evt(msg) {
 export function warn(msg) {
   console.warn("[WindowScape]", msg);
 }
+
+// (No constraint cache. AX min/max are layout-pressure-dependent — apps
+// can refuse a tile-driven shrink while accepting a user drag to the same
+// size. Per BELIEFS #1: data is live, or it isn't data. The tiler observes
+// actuals via setFrameProbed each pass and redistributes leftover space
+// on a second sub-pass within the same tile event; the drag handler reads
+// live frames as truth when computing expected-vs-actual.)
 
 // Active space on a given display, or null if Spaces info isn't yet populated.
 export function activeSpaceOnDisplay(uuid) {

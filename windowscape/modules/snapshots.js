@@ -1055,40 +1055,44 @@ async function loadPersistedSnapshots() {
 export async function init() {
   myScreenInfo = (typeof window !== "undefined" && window.__sd_screen) || null;
   ensureStripsRoot();
-  // sd.window.minimized fires when the OS minimizes a window from outside
-  // our control (user clicked the yellow dot, etc.). Track those so the
-  // tiler doesn't see a phantom collapsed window.
+  // sd.window.{minimized,deminimized,destroyed} fire when the OS changes a
+  // window from outside our control (user clicked the yellow dot, Alt-Tab
+  // restore, Dock click, etc.). Track those so the tiler doesn't see a
+  // phantom collapsed window.
+  //
+  // CHAIN, do not overwrite — events.js installs the canonical handlers
+  // (state.minimizedIds bookkeeping + retile). Plain assignment here would
+  // silently win the load-order race and break tiling for any OS-driven
+  // change that doesn't involve a snapshot.
   if (typeof window !== "undefined") {
-    window.onBang_sd_window_minimized = (detail) => {
-      if (!detail || !detail.id) return;
-      // If this is one of ours (we drove the minimize via captureAndMinimize),
-      // ignore — our capture flow already populated the snapshot entry.
-      if (isMinimized(detail.id)) return;
-      // Otherwise, log; we don't auto-capture OS-minimized windows because
-      // the user expected the native genie animation. Stack reload picks
-      // up native minimized windows via isMinimized AX read in
-      // loadPersistedSnapshots.
-    };
-    window.onBang_sd_window_deminimized = (detail) => {
-      if (!detail || !detail.id) return;
-      if (!isMinimized(detail.id)) return;
-      // If WE drove this deminimize via restoreFromSnapshot, let its fade
-      // animation play to completion; that path handles the cleanup itself.
-      if (isRestoringInternally(detail.id)) return;
-      // OS-driven deminimize (Alt-Tab restore, Dock click, etc.) — drop
-      // our shadow snapshot so the strip stays in sync.
-      cleanupResources(detail.id);
-      updateLayout();
-    };
-    window.onBang_sd_window_destroyed = chain(
-      window.onBang_sd_window_destroyed,
-      (detail) => {
+    function chainBang(name, fn) {
+      window[name] = chain(window[name], (detail) => {
         if (!detail || !detail.id) return;
-        if (!isMinimized(detail.id)) return;
-        cleanupResources(detail.id);
-        updateLayout();
-      }
-    );
+        fn(detail.id);
+      });
+    }
+    // Minimized: if WE drove it via captureAndMinimize, the snapshot entry
+    // already exists — nothing to do. OS-minimized windows aren't auto-
+    // captured; the user expected the native genie animation. Stack reload
+    // picks them up via the AX read in loadPersistedSnapshots.
+    chainBang("onBang_sd_window_minimized", (id) => {
+      if (isMinimized(id)) return;
+    });
+    // Deminimized: if WE drove this via restoreFromSnapshot, let its fade
+    // animation play to completion; that path handles the cleanup itself.
+    // OS-driven deminimize → drop our shadow snapshot so the strip stays
+    // in sync.
+    chainBang("onBang_sd_window_deminimized", (id) => {
+      if (!isMinimized(id)) return;
+      if (isRestoringInternally(id)) return;
+      cleanupResources(id);
+      updateLayout();
+    });
+    chainBang("onBang_sd_window_destroyed", (id) => {
+      if (!isMinimized(id)) return;
+      cleanupResources(id);
+      updateLayout();
+    });
   }
 
   await loadPersistedSnapshots();

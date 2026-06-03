@@ -10,7 +10,8 @@
   "eventtap": [
     { "event": "scrollWheel",      "callback": "snapshotsScroll" },
     { "event": "rightMouseDown",   "callback": "snapshotsRightClick" },
-    { "event": "leftMouseDown",    "callback": "snapshotsLeftClick" }
+    { "event": "leftMouseDown",    "callback": "snapshotsLeftClick" },
+    { "event": "leftMouseUp",      "callback": "dragMouseUp" }
   ],
   "hotkeys": [
     { "key": "ctrl+cmd+,",            "callback": "toggleExcluded" },

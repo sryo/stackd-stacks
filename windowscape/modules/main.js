@@ -2,9 +2,9 @@
 
 import { sd } from "sd://runtime/api.js";
 import { state, loadList, updateWindowOrder, isAppIncluded } from "./core.js";
-import { start as startEvents } from "./events.js";
+import { start as startEvents, startDragBracket, endDragBracket } from "./events.js";
 import { bind as bindKeybinds } from "./keybinds.js";
-import { tileWindows } from "./tiler.js";
+import { tileWindows, startDriftWatcher } from "./tiler.js";
 import { scheduleSave, loadLayout } from "./restore.js";
 import {
   init as initSnapshots,
@@ -17,6 +17,7 @@ import {
 async function init() {
   await loadList();
   startEvents();
+  startDriftWatcher();
   bindKeybinds();
 
   // Hook the manifest-declared eventtap callbacks (see stack.json's
@@ -26,7 +27,16 @@ async function init() {
   // events natively.
   window.onTap_snapshotsScroll     = onScrollWheelEvent;
   window.onTap_snapshotsRightClick = onRightClickEvent;
-  window.onTap_snapshotsLeftClick  = onLeftClickEvent;
+  // leftMouseDown does TWO things: (1) snapshots strip click-handling, and
+  // (2) opens the drag bracket so the next leftMouseUp can close it and
+  // we decide resize-vs-reorder ONCE per drag instead of once per intra-
+  // drag synth-poll bang. Sharing the eventtap callback so the daemon
+  // doesn't install two taps for the same event.
+  window.onTap_snapshotsLeftClick  = (payload) => {
+    startDragBracket();
+    onLeftClickEvent(payload);
+  };
+  window.onTap_dragMouseUp         = (_payload) => { endDragBracket(); };
   // mouseMoved eventtap was firing the hover handler at ~120Hz, blocking
   // every other stack's sd.mouse / sd.windows.all push. The 30Hz sd.mouse
   // signal that timetrail / focus / etc. depend on was getting starved.

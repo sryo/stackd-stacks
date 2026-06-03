@@ -144,19 +144,11 @@ export function start() {
     const next = Object.create(null);
     for (const w of list) next[w.id] = w;
     state.windowsById = next;
-    // Prune minimizedIds + fixedSizeIds of IDs that are gone — keeps the
-    // sets bounded and lets a re-created window (same app, new CGWindowID)
-    // get a fresh tile slot AND a fresh fixed-size verdict.
+    // Prune minimizedIds of IDs that are gone — keeps the set bounded
+    // and lets a re-created window (same app, new CGWindowID) get a
+    // fresh tile slot.
     for (const id of state.minimizedIds) {
       if (!next[id]) state.minimizedIds.delete(id);
-    }
-    for (const id of state.fixedSizeIds) {
-      if (!next[id]) state.fixedSizeIds.delete(id);
-    }
-    if (state.stickyTileSet) {
-      for (const id of state.stickyTileSet) {
-        if (!next[id]) state.stickyTileSet.delete(id);
-      }
     }
   });
 
@@ -233,7 +225,6 @@ export function start() {
   window.onBang_sd_window_destroyed = (detail) => {
     if (detail && detail.id) {
       delete state.windowSpacesCache[detail.id];
-      if (state.stickyTileSet) state.stickyTileSet.delete(+detail.id);
       // If the destroyed window was the simulated-fullscreen target, exit
       // so the parked peers come back into view. No-op otherwise.
       fullscreenOnDestroyed(detail.id);
@@ -276,11 +267,32 @@ export function start() {
   //
   // Debounced 300ms (matches lua's pendingReposition timer) so the final
   // event after a drag-drop wins, not every intra-drag tick.
-  let moveDebounceTimer = null;
-  let lastMovedId = null;
-  let dragSafetyTimer = null;
+  // Drag-bracket model: leftMouseDown opens the bracket (sets dragInFlight),
+  // leftMouseUp closes it (after a 100ms grace for trailing synth-poll bangs).
+  // Mid-bracket bangs hydrate state and record the candidate moved id; the
+  // decision (resize-redistribute vs reorder vs no-op) fires ONCE at bracket
+  // close. Without the bracket the drag-train would fire reorder on each
+  // intermediate bang and the window would jump back under the cursor.
+  // Bangs OUTSIDE any bracket (AX-driven changes from scripts/shortcuts) are
+  // handled by the drift watcher in tiler.js.
   const handleDragEnd = (detail) => {
     if (!detail || !detail.id) return;
+    // ALWAYS hydrate state.windowsById from the bang. sd.windows.all is
+    // throttled (fires on focus/title change only), so peer frames otherwise
+    // drift stale.
+    if (detail.frame && state.windowsById[+detail.id]) {
+      state.windowsById[+detail.id].frame = detail.frame;
+    }
+    // Collapsed-window heuristic: a moved/resized bang for a collapsed
+    // widget is usually the APP shuffling itself in the rail (Sticky Notes'
+    // internal x-arrangement), NOT a user drag. Short-circuit those — but
+    // still hydrated above so the strip math sees current x.
+    const cw = state.windowsById[+detail.id];
+    if (cw && cw.frame && cw.frame.h <= cfg.collapsedWindowHeight) {
+      const tgt = state.lastTileTarget?.[+detail.id]?.frame;
+      const yDrift = tgt ? Math.abs(cw.frame.y - tgt.y) : 0;
+      if (yDrift <= cfg.collapsedWindowHeight) return;
+    }
     // Filter to windows windowscape actually tiles. The synth poll fires
     // moved/resized bangs for every CGWindowList entry — including AppKit
     // service windows like CursorUIViewService autocomplete renderers,
@@ -309,199 +321,166 @@ export function start() {
     if (tgt && tgt.frame && tgt.ts != null && detail.frame) {
       const f = detail.frame;
       const ageMs = Date.now() - tgt.ts;
-      // Echo only if BOTH within 600ms of the setFrame AND frame matches
-      // closely (5px tolerance covers Terminal column rounding without
-      // swallowing legitimate small user drags). Past 600ms the bang
-      // can't be an echo — even worst-case CGS-poll latency is ~300ms.
       if (ageMs <= 600 &&
           Math.abs(f.x - tgt.frame.x) <= 5 && Math.abs(f.y - tgt.frame.y) <= 5 &&
           Math.abs(f.w - tgt.frame.w) <= 5 && Math.abs(f.h - tgt.frame.h) <= 5) {
-        log(`DRAG-IGNORED echo id=${detail.id} (${app}) age=${ageMs}ms f=${JSON.stringify(f)} tgt=${JSON.stringify(tgt.frame)}`);
+        log(`DRAG-IGNORED echo id=${detail.id} (${app}) age=${ageMs}ms`);
         return;
       }
     }
-    log(`DRAG-ACCEPTED id=${detail.id} (${app}) f=${JSON.stringify(detail.frame)} tgt=${JSON.stringify(tgt || null)}`);
 
-    // Mark drag in flight so unrelated triggers (focusedChanged push,
-    // sd.windows.all push, sd.spaces.all push) don't run tileWindows()
-    // mid-drag and yank the window out from under the cursor. Cleared
-    // after the debounce resolves or by the safety timeout below.
-    state.dragInFlight = true;
-    if (dragSafetyTimer) clearTimeout(dragSafetyTimer);
-    dragSafetyTimer = setTimeout(() => {
-      // Belt: if the debounce never fires (e.g. handler crashed), drop
-      // the gate after 1.5s of silence so tile passes can resume.
-      state.dragInFlight = false;
-      dragSafetyTimer = null;
-    }, 1500);
-
-    // Hydrate state.windowsById with the live frame from the bang. The
-    // sd.windows.all channel is throttled (fires on focus/title change only),
-    // so by the time the debounce resolves, state.windowsById[id].frame is
-    // pre-drag — applyResizeIfNeeded's actualSize/actualPos math then compares
-    // pre-drag geometry against expected and returns "no change" → no weight
-    // transfer. Lua reads win:frame() live every pass; we splice the live
-    // frame in here so the rest of the code path stays unchanged.
-    if (detail.frame && state.windowsById[detail.id]) {
-      state.windowsById[detail.id].frame = detail.frame;
+    // If a drag bracket is open (between leftMouseDown and leftMouseUp), record
+    // the moved id as the candidate and bail. The decision runs at bracket
+    // close — see endDragBracket below. The LATEST mid-bracket bang wins as
+    // the candidate (drag-train's final position is what matters).
+    if (state.dragInFlight) {
+      state.dragCandidateId = +detail.id;
+      log(`DRAG-MID id=${detail.id} (${app}) bracket-open, recording candidate`);
+      return;
     }
-    lastMovedId = detail.id;
-    if (moveDebounceTimer) clearTimeout(moveDebounceTimer);
-    moveDebounceTimer = setTimeout(async () => {
-      moveDebounceTimer = null;
-      const movedId = lastMovedId;
-      lastMovedId = null;
-      // Belt-and-suspenders live read — the synth poll can lose intermediate
-      // frames if the user drags faster than 4Hz; query AX one more time so
-      // the final values are guaranteed-fresh (mirrors lua's win:frame()).
-      const live = await sd.windows.frame(movedId).catch(() => null);
-      if (live && state.windowsById[movedId]) {
-        state.windowsById[movedId].frame = live;
-      }
-      // Lua handleWindowMoved checks size FIRST (lines 456-516): if the
-      // drag was a resize (a tile-edge drag), redistribute weight between
-      // the window and its adjacent tile and bail before reorder. Only
-      // pure moves fall through to spatial reorder.
-      // Drop the drag gate BEFORE applyResizeIfNeeded/reorderOnDrop so
-      // their tileWindows() call can actually run (those are the legitimate
-      // post-drop retile). Safety timer is no longer needed.
-      state.dragInFlight = false;
-      if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
-      const resized = await applyResizeIfNeeded(movedId);
-      log(`DRAG-DEBOUNCED id=${movedId} resize=${resized}`);
-      if (resized) return;
-      reorderOnDrop(movedId);
-    }, 300);
+    // Outside any bracket → AX-driven change (script/shortcut). Drift watcher
+    // (tiler.js, 500ms) catches it and re-weights. Don't react here.
+    log(`DRAG-ACCEPTED-OUTSIDE-BRACKET id=${detail.id} (${app}) — leaving to drift watcher`);
   };
   window.onBang_sd_window_moved = handleDragEnd;
   window.onBang_sd_window_resized = handleDragEnd;
 }
 
-// Port of events.lua handleWindowMoved lines 456-516. Detect the case
-// where a tile-edge drag changed a window's size: compare the actual
-// dimension on the screen's primary axis to the expected dimension from
-// its weight share. If the size diverges by > 20px we treat it as a
-// resize; pick the adjacent tile that gave up the space (left/up neighbor
-// if the window's edge moved, right/down neighbor otherwise), then split
-// the combined weight between the two so the next tile preserves the
-// user's new size ratio.
-async function applyResizeIfNeeded(movedId) {
-  const moved = state.windowsById[movedId];
-  if (!moved || !moved.frame) return false;
-  if (!isAppIncluded(moved)) return false;
-  // Skip fixed-size apps (Calculator, System Settings, etc.). The tiler
-  // marks them in state.fixedSizeIds when their post-setFrame frame
-  // refuses the requested resize. Without this, every tile pass would
-  // see "actual ≠ target" and steal weight from a neighbor → cascading
-  // layout corruption (`weights flipped from [1,1,1] to [0.2,1.8,1]`
-  // observed in a prior reproduction).
-  if (state.fixedSizeIds && state.fixedSizeIds.has(+movedId)) return false;
-  const d = displayForWindow(moved);
-  if (!d) return false;
-  const space = state.spacesByDisplay[d.uuid]?.active;
-  if (space == null) return false;
-  const order = state.windowOrderBySpace[space] || [];
+// Drag-bracket — opened on leftMouseDown, closed on leftMouseUp. While open,
+// tile passes are blocked (state.dragInFlight) and bang-triggered actions are
+// deferred to bracket close. The candidate moved id is captured from mid-drag
+// bangs; at close, we run ONE decision based on the final frame.
+let dragSafetyTimer = null;
+let dragCloseTimer = null;
+export function startDragBracket() {
+  // Reset bracket state. If a previous bracket is still pending close (e.g.
+  // user click-drag-click in rapid succession), cancel the pending close so
+  // we don't run the prior decision on the new mouse-down.
+  if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
+  if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
+  state.dragInFlight = true;
+  state.dragCandidateId = null;
+  // Safety: drop the gate after 5s of no mouseUp. Shouldn't happen (every
+  // mouseDown gets a mouseUp), but if the eventtap drops one we don't want
+  // tile passes blocked forever.
+  dragSafetyTimer = setTimeout(() => {
+    log("DRAG-BRACKET safety timeout — clearing dragInFlight");
+    state.dragInFlight = false;
+    state.dragCandidateId = null;
+    dragSafetyTimer = null;
+  }, 5000);
+}
 
-  // Mirror the tiler's actual membership for this display. Using the
-  // unfiltered order list here would include phantom/unaddressable windows
-  // the tiler skipped, inflating totalWeight and making expected sizes
-  // tiny → every tile-echo bang looks like "user resized by 400px" and
-  // weight transfers cascade across windows the user never touched.
+export function endDragBracket() {
+  if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
+  if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
+  // 100ms grace for the trailing synth-poll bang to land — the OS posts
+  // the final moved/resized bang after mouseUp (CGS-side observation), so
+  // we wait so dragCandidateId reflects the FINAL position, not the
+  // mid-drag one.
+  dragCloseTimer = setTimeout(async () => {
+    dragCloseTimer = null;
+    const movedId = state.dragCandidateId;
+    state.dragCandidateId = null;
+    state.dragInFlight = false;
+    if (movedId == null) {
+      // No bang fired between mouseDown and mouseUp+100ms → just a click,
+      // not a drag. Nothing to do.
+      return;
+    }
+    const tgt = state.lastTileTarget?.[movedId]?.frame;
+    const liveFrame = state.windowsById[movedId]?.frame;
+    if (tgt && liveFrame) {
+      const dW = Math.abs(liveFrame.w - tgt.w);
+      const dH = Math.abs(liveFrame.h - tgt.h);
+      if (dW > 20 || dH > 20) {
+        log(`DRAG-CLOSE id=${movedId} resize dW=${Math.round(dW)} dH=${Math.round(dH)}`);
+        setWeightFromActualSize(movedId);
+        await tileWindows();
+        return;
+      }
+    }
+    log(`DRAG-CLOSE id=${movedId} position-only → reorder`);
+    reorderOnDrop(movedId);
+  }, 100);
+}
+
+// User-drag resize. Whichever window's bang fired (the OS routes drag
+// gestures to whichever side is frontmost or owns the click pixel), we
+// detect WHICH EDGE moved by comparing the post-drag frame to the tile
+// target: if the leading edge moved, the LEFT neighbor absorbs; else
+// the RIGHT neighbor. Only those TWO windows' weights change. Others
+// stay put. This way "drag boundary between Finder and Arc" produces
+// the same visual outcome regardless of which side's bang the OS fired
+// (focused-Finder bang vs unfocused-Arc bang both shift the boundary).
+export function setWeightFromActualSize(movedId) {
+  const w = state.windowsById[movedId];
+  if (!w || !w.frame) return;
+  const d = displayForWindow(w);
+  if (!d) return;
   const tiled = state.lastTiledByDisplay[d.displayID];
-  if (!tiled || tiled.length === 0) return false;
-  const tiledSet = new Set(tiled.map(id => +id));
-  const screenWindows = [];
-  for (const id of order) {
-    if (!tiledSet.has(+id)) continue;
-    const w = state.windowsById[id];
-    if (!w || !w.frame) continue;
-    if (w.frame.h <= cfg.collapsedWindowHeight) continue;
-    screenWindows.push(w);
+  if (!tiled || tiled.length === 0) return;
+  const ids = [];
+  for (const id of tiled) {
+    const ww = state.windowsById[id];
+    if (!ww || !ww.frame) continue;
+    if (ww.frame.h <= cfg.collapsedWindowHeight) continue;
+    ids.push(+id);
   }
-  if (screenWindows.length < 2) return false;
+  const myIdx = ids.indexOf(+movedId);
+  if (myIdx < 0 || ids.length < 2) return;
 
-  const winIndex = screenWindows.findIndex(w => w.id === movedId);
-  if (winIndex < 0) return false;
-
-  // tileWeighted dispatches by display orientation. Match it: horizontal
-  // displays distribute width, vertical distribute height. Collapsed-row
-  // height is subtracted from availableSpace on vertical displays only
-  // (matches tiler.lua's mainH calculation).
   const horizontal = d.frame.w > d.frame.h;
-  const screenFrame = { ...d.visibleFrame };
+  const tgt = state.lastTileTarget?.[+movedId]?.frame;
+  if (!tgt) return;
 
-  let totalWeight = 0;
-  for (const w of screenWindows) {
-    totalWeight += (state.windowWeights[w.id] ?? 1.0);
+  const actualSize = horizontal ? w.frame.w : w.frame.h;
+  const tgtSize    = horizontal ? tgt.w     : tgt.h;
+  const sizeDelta  = actualSize - tgtSize;
+  if (Math.abs(sizeDelta) < 20) return;
+
+  // Which edge moved? If the leading (left/top) edge changed position,
+  // the boundary to the LEFT of moved was dragged → left neighbor pairs.
+  // Else the trailing (right/bottom) edge changed → right neighbor pairs.
+  // The canonical pair-of-windows is the same regardless of WHICH side
+  // fired the bang (focused-Finder vs unfocused-Arc both shift the same
+  // boundary), so unfocused-edge drags converge to the same outcome.
+  const actualPos = horizontal ? w.frame.x : w.frame.y;
+  const tgtPos    = horizontal ? tgt.x     : tgt.y;
+  const leadingEdgeMoved = Math.abs(actualPos - tgtPos) > 10;
+  const direction = leadingEdgeMoved ? -1 : +1;
+  const neighborIdx = myIdx + direction;
+  // No-neighbor edge case: dragging the leftmost tile's left edge or
+  // the rightmost's right edge — nothing to give pixels to / take from.
+  // Return without mutating weights. The next tile pass setFrames moved
+  // back to its weight-implied target → window snaps back. Matches the
+  // Lua original; the user-asked behavior of "outer edge: snap back".
+  if (neighborIdx < 0 || neighborIdx >= ids.length) {
+    log(`USER-RESIZE id=${movedId} outer-edge no-neighbor (dir=${direction}) → snap-back`);
+    return;
   }
-  if (totalWeight <= 0) return false;
+  const neighborId = ids[neighborIdx];
 
-  const totalGaps = Math.max(screenWindows.length - 1, 0) * cfg.tileGap;
-  let collapsedAreaSize = 0;
-  if (!horizontal) {
-    let numCollapsed = 0;
-    for (const id of order) {
-      const w = state.windowsById[id];
-      if (!w || !w.frame) continue;
-      if (w.frame.h > cfg.collapsedWindowHeight) continue;
-      const wd = displayForWindow(w);
-      if (!wd || wd.displayID !== d.displayID) continue;
-      numCollapsed++;
-    }
-    if (numCollapsed > 0) {
-      collapsedAreaSize = (cfg.collapsedWindowHeight + cfg.tileGap) * numCollapsed - cfg.tileGap;
-    }
-  }
-  const availableSpace = horizontal
-    ? screenFrame.w - totalGaps
-    : screenFrame.h - totalGaps - collapsedAreaSize;
-  if (availableSpace <= 0) return false;
+  // Pairwise pixel transfer: the moved window's new size IS the user's
+  // drag; the neighbor swallows the inverse delta. Compute their NEW
+  // weights to preserve the (moved+neighbor) weight sum so other tiles
+  // are untouched.
+  const totalAxis  = horizontal ? d.visibleFrame.w : d.visibleFrame.h;
+  const avail      = totalAxis - cfg.tileGap * (ids.length - 1);
+  const totalWeight = ids.reduce((s, id) => s + (state.windowWeights[id] ?? 1.0), 0);
+  const pxPerWeight = avail / totalWeight;
+  const movedW    = state.windowWeights[+movedId]  ?? 1.0;
+  const neighborW = state.windowWeights[neighborId] ?? 1.0;
+  const pairW     = movedW + neighborW;
+  const pairPx    = pairW * pxPerWeight;
+  const newMovedPx = Math.max(50, Math.min(pairPx - 50, actualSize));
+  const newNeighborPx = pairPx - newMovedPx;
+  const newMovedW    = pairW * (newMovedPx    / pairPx);
+  const newNeighborW = pairW * (newNeighborPx / pairPx);
+  state.windowWeights[+movedId]   = newMovedW;
+  state.windowWeights[+neighborId] = newNeighborW;
 
-  const myWeight = state.windowWeights[movedId] ?? 1.0;
-  const expectedSize = availableSpace * myWeight / totalWeight;
-  const actualSize = horizontal ? moved.frame.w : moved.frame.h;
-  const sizeDelta = actualSize - expectedSize;
-  if (Math.abs(sizeDelta) <= 20) {
-    log(`RESIZE-CHECK id=${movedId} no-change actual=${Math.round(actualSize)} expected=${Math.round(expectedSize)} delta=${Math.round(sizeDelta)}`);
-    return false;
-  }
-  log(`RESIZE-DETECTED id=${movedId} actual=${Math.round(actualSize)} expected=${Math.round(expectedSize)} delta=${Math.round(sizeDelta)} myWeight=${myWeight.toFixed(2)} total=${totalWeight.toFixed(2)}`);
-
-  // Position-vs-expected-position: did the window's leading edge move?
-  // If yes, the LEFT/UP neighbor gave up space. If no, the RIGHT/DOWN
-  // neighbor did.
-  let expectedPos = horizontal ? screenFrame.x : screenFrame.y;
-  for (let i = 0; i < winIndex; i++) {
-    const w = screenWindows[i];
-    const wWeight = state.windowWeights[w.id] ?? 1.0;
-    const wSize = Math.floor(availableSpace * wWeight / totalWeight);
-    expectedPos += wSize + cfg.tileGap;
-  }
-  const actualPos = horizontal ? moved.frame.x : moved.frame.y;
-  const positionMoved = Math.abs(actualPos - expectedPos) > 10;
-
-  let adjacent = null;
-  if (positionMoved) {
-    if (winIndex > 0) adjacent = screenWindows[winIndex - 1];
-  } else {
-    if (winIndex < screenWindows.length - 1) adjacent = screenWindows[winIndex + 1];
-  }
-  if (!adjacent) return false;
-
-  const adjWeight = state.windowWeights[adjacent.id] ?? 1.0;
-  const combined = myWeight + adjWeight;
-  // Clamp to [0.2, combined-0.2] so neither side can collapse the other
-  // to nothing in a single resize (the lua uses the same floor).
-  let newWeight = (actualSize / availableSpace) * totalWeight;
-  newWeight = Math.max(0.2, Math.min(newWeight, combined - 0.2));
-  const adjNewWeight = Math.max(0.2, combined - newWeight);
-
-  log(`RESIZE-APPLY id=${movedId} ${myWeight.toFixed(2)}→${newWeight.toFixed(2)} adj=${adjacent.id} ${adjWeight.toFixed(2)}→${adjNewWeight.toFixed(2)} positionMoved=${positionMoved}`);
-  state.windowWeights[movedId]    = newWeight;
-  state.windowWeights[adjacent.id] = adjNewWeight;
-  if (state.onLayoutChange) state.onLayoutChange();
-  await tileWindows();
-  return true;
+  log(`USER-RESIZE id=${movedId} ${horizontal ? "→" : "↓"}${Math.round(sizeDelta)}px neighbor=${neighborId} (${direction > 0 ? "right" : "left"}) ${movedW.toFixed(2)}→${newMovedW.toFixed(2)} | ${neighborW.toFixed(2)}→${newNeighborW.toFixed(2)}`);
 }
 
 async function reorderOnDrop(movedId) {

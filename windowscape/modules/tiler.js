@@ -100,6 +100,21 @@ async function tileWindowsInternal() {
       // no-op on truly AX-unreachable windows (Spotify dock-collapsed,
       // AM compact) but they reappear as a slot — that's a smaller bug
       // than dropping the real Terminal and causing visual overlap.
+      // Mirror Hammerspoon's hs.window:isVisible() == !parentApp:isHidden()
+      // && !self:isMinimized(). Two signals from the daemon payload:
+      //   onscreen=false → CG reports the window's framebuffer is not
+      //                    on-screen (minimized to dock, or Cmd+H'd app).
+      //                    This works EVEN when AX can't resolve the
+      //                    window (e.g. Activity Monitor when minimized
+      //                    has elementFor==nil so isMinimized is unread).
+      //   isMinimized=true → AX-confirmed AXMinimized. More specific
+      //                      but only available when the window is
+      //                      addressable.
+      // Either signal removes the window from rotation — checked EVERY
+      // pass (not gated by stickyTileSet) because a user can minimize
+      // mid-session and the tile must release the slot immediately.
+      if (w.onscreen === false) continue;
+      if (w.isMinimized === true) continue;
       // First-time entry gates: daemon flags. addressable=false means the
       // daemon's WindowAddressabilityCache returned ≥N consecutive AX
       // misses (not a single transient miss — see Windows.swift

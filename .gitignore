@@ -1,6 +1,5 @@
+.DS_Store
 # Runtime state — stacks write here from sd.sqlite / sd.settings / sd.fs.
-# Should not pollute the repo.
-*/data/
 **/data/
 **/*.db
 **/*.db-wal
@@ -8,4 +7,3 @@
 **/*.pid
 **/*.lock
 **/*.log
-.DS_Store

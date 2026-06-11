@@ -1,0 +1,457 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+
+    const PRESSURE_THRESHOLD    = 300;
+    const PRESSURE_TIMEOUT_MS   = 1000;
+    const MAX_PRESSURE_PER_EVENT = 15;
+    const CORNER_EXCLUSION      = 10;
+    const WRAP_OFFSET           = 25;
+    const BUFFER_ZONE           = 20;
+    const DWELL_TIMEOUT_MS      = 500;
+    const EDGE_THRESHOLD        = 3;
+
+    const ENABLED_EDGES = { left: true, right: true, top: true, bottom: true };
+    const WRAP_MODE = "current";
+    const ALLOW_DRAG_THROUGH = true;
+
+    const FLAG_SHIFT = 0x020000;
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+
+    const localScreen = window.__sd_screen || null;
+    let topLeftFrames = [];
+    let myTopLeftFrame = null;
+
+    function syncCanvasSize() {
+      const dpr = window.devicePixelRatio || 1;
+      const w = window.innerWidth, h = window.innerHeight;
+      canvas.width  = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    syncCanvasSize();
+    window.addEventListener("resize", syncCanvasSize);
+
+    function rebuildFrames(displays) {
+      if (!displays || !displays.length) return;
+      topLeftFrames = displays.map(d => ({
+        displayID: d.displayID,
+        x: d.frame.x,
+        y: d.frame.y,
+        w: d.frame.w,
+        h: d.frame.h
+      }));
+      if (localScreen) {
+        myTopLeftFrame = topLeftFrames.find(f => f.displayID === localScreen.displayID) || null;
+      } else {
+        myTopLeftFrame = topLeftFrames[0] || null;
+      }
+    }
+    sd.display.all.subscribe(rebuildFrames);
+
+    function frameAt(x, y) {
+      for (const f of topLeftFrames) {
+        if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return f;
+      }
+      return null;
+    }
+    function isOnMyScreen(x, y) {
+      if (!myTopLeftFrame) return false;
+      const f = myTopLeftFrame;
+      return x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h;
+    }
+    function localXY(x, y) {
+      const f = myTopLeftFrame || { x: 0, y: 0 };
+      return { lx: x - f.x, ly: y - f.y };
+    }
+
+    function inCorner(x, y, f) {
+      const nearLeft   = x <= f.x + CORNER_EXCLUSION;
+      const nearRight  = x >= f.x + f.w - CORNER_EXCLUSION;
+      const nearTop    = y <= f.y + CORNER_EXCLUSION;
+      const nearBottom = y >= f.y + f.h - CORNER_EXCLUSION;
+      return (nearLeft || nearRight) && (nearTop || nearBottom);
+    }
+    function getEdgeAt(x, y, f) {
+      if (x <= f.x + EDGE_THRESHOLD)             return "left";
+      if (x >= f.x + f.w - EDGE_THRESHOLD)       return "right";
+      if (y <= f.y + EDGE_THRESHOLD)             return "top";
+      if (y >= f.y + f.h - EDGE_THRESHOLD)       return "bottom";
+      return null;
+    }
+    function inBufferZone(x, y, f) {
+      return x <= f.x + BUFFER_ZONE
+          || x >= f.x + f.w - BUFFER_ZONE
+          || y <= f.y + BUFFER_ZONE
+          || y >= f.y + f.h - BUFFER_ZONE;
+    }
+    function hasAdjacentScreenAt(edge, x, y, curFrame) {
+      const tol = 10;
+      for (const f of topLeftFrames) {
+        if (f === curFrame) continue;
+        if (edge === "left"   && Math.abs((f.x + f.w) - curFrame.x) < tol && y >= f.y && y <= f.y + f.h) return true;
+        if (edge === "right"  && Math.abs(f.x - (curFrame.x + curFrame.w)) < tol && y >= f.y && y <= f.y + f.h) return true;
+        if (edge === "top"    && Math.abs((f.y + f.h) - curFrame.y) < tol && x >= f.x && x <= f.x + f.w) return true;
+        if (edge === "bottom" && Math.abs(f.y - (curFrame.y + curFrame.h)) < tol && x >= f.x && x <= f.x + f.w) return true;
+      }
+      return false;
+    }
+    function getDistanceAcross(edge, dx, dy) {
+      if (edge === "left")   return Math.max(0, -dx);
+      if (edge === "right")  return Math.max(0,  dx);
+      if (edge === "top")    return Math.max(0, -dy);
+      if (edge === "bottom") return Math.max(0,  dy);
+      return 0;
+    }
+    function getDistanceAlong(edge, dx, dy) {
+      return (edge === "left" || edge === "right") ? Math.abs(dy) : Math.abs(dx);
+    }
+
+    function getWrapPosition(edge, x, y, curFrame) {
+      if (WRAP_MODE === "current") {
+        if (edge === "left")   return { x: curFrame.x + curFrame.w - WRAP_OFFSET, y };
+        if (edge === "right")  return { x: curFrame.x + WRAP_OFFSET,              y };
+        if (edge === "top")    return { x, y: curFrame.y + curFrame.h - WRAP_OFFSET };
+        if (edge === "bottom") return { x, y: curFrame.y + WRAP_OFFSET };
+        return { x, y };
+      }
+      let target = null;
+      if (edge === "left") {
+        let max = -Infinity;
+        for (const f of topLeftFrames) { if (f.x + f.w > max) { max = f.x + f.w; target = f; } }
+        if (target) return { x: target.x + target.w - WRAP_OFFSET, y };
+      } else if (edge === "right") {
+        let min = Infinity;
+        for (const f of topLeftFrames) { if (f.x < min) { min = f.x; target = f; } }
+        if (target) return { x: target.x + WRAP_OFFSET, y };
+      } else if (edge === "top") {
+        let max = -Infinity;
+        for (const f of topLeftFrames) { if (f.y + f.h > max) { max = f.y + f.h; target = f; } }
+        if (target) return { x, y: target.y + target.h - WRAP_OFFSET };
+      } else if (edge === "bottom") {
+        let min = Infinity;
+        for (const f of topLeftFrames) { if (f.y < min) { min = f.y; target = f; } }
+        if (target) return { x, y: target.y + WRAP_OFFSET };
+      }
+      if (edge === "left")   return { x: curFrame.x + curFrame.w - WRAP_OFFSET, y };
+      if (edge === "right")  return { x: curFrame.x + WRAP_OFFSET,              y };
+      if (edge === "top")    return { x, y: curFrame.y + curFrame.h - WRAP_OFFSET };
+      if (edge === "bottom") return { x, y: curFrame.y + WRAP_OFFSET };
+      return { x, y };
+    }
+    function getOppositeEdgePoint(edge, x, y, curFrame) {
+      const wrap = getWrapPosition(edge, x, y, curFrame);
+      const tf = frameAt(wrap.x, wrap.y) || curFrame;
+      if (edge === "left")   return { x: tf.x + tf.w, y };
+      if (edge === "right")  return { x: tf.x,        y };
+      if (edge === "top")    return { x, y: tf.y + tf.h };
+      if (edge === "bottom") return { x, y: tf.y };
+      return { x, y };
+    }
+
+    let pressureEvents = [];
+    let currentPressure = 0;
+    let isTriggered = false;
+    let currentEdge = null;
+    let isDwelling = false;
+    let dwellTimer = null;
+    let isLeftDown = false;
+    let shiftHeld = false;
+
+    let membrane = null;
+    let ghost = null;
+    let ripples = [];
+
+    function reset() {
+      pressureEvents = [];
+      currentPressure = 0;
+    }
+    function resetDwell() {
+      stopDwellTimer();
+      isDwelling = false;
+    }
+    function startDwellTimer() {
+      if (dwellTimer) clearTimeout(dwellTimer);
+      dwellTimer = setTimeout(() => {
+        isDwelling = true;
+        membrane = null;
+        ghost = null;
+        reset();
+        dwellTimer = null;
+      }, DWELL_TIMEOUT_MS);
+    }
+    function stopDwellTimer() {
+      if (dwellTimer) { clearTimeout(dwellTimer); dwellTimer = null; }
+    }
+    function trimOldEvents(now) {
+      const threshold = now - PRESSURE_TIMEOUT_MS;
+      let i = 0;
+      while (i < pressureEvents.length && pressureEvents[i].time < threshold) {
+        currentPressure -= pressureEvents[i].distance;
+        i++;
+      }
+      if (i > 0) pressureEvents = pressureEvents.slice(i);
+      if (currentPressure < 0) currentPressure = 0;
+    }
+
+    function setMembrane(edge, gx, gy, f, progress) {
+      const segments = 16;
+      const length = 100;
+      const bulge = progress * 20;
+      const coords = [];
+      if (edge === "left" || edge === "right") {
+        const baseX = (edge === "left") ? f.x : (f.x + f.w);
+        const startY = gy - length / 2;
+        for (let i = 0; i <= segments; i++) {
+          const t = i / segments;
+          const py = startY + t * length;
+          const k = (1 - (2 * t - 1) ** 2);
+          const px = baseX + ((edge === "left") ? bulge * k : -bulge * k);
+          coords.push({ x: px, y: py });
+        }
+      } else {
+        const baseY = (edge === "top") ? f.y : (f.y + f.h);
+        const startX = gx - length / 2;
+        for (let i = 0; i <= segments; i++) {
+          const t = i / segments;
+          const px = startX + t * length;
+          const k = (1 - (2 * t - 1) ** 2);
+          const py = baseY + ((edge === "top") ? bulge * k : -bulge * k);
+          coords.push({ x: px, y: py });
+        }
+      }
+      membrane = { coords, progress };
+    }
+    function setGhost(edge, gx, gy, f, progress) {
+      const segments = 16;
+      const length = 100;
+      const bulge = progress * 20;
+      const coords = [];
+      if (edge === "left" || edge === "right") {
+        const baseX = (edge === "left") ? (f.x + f.w) : f.x;
+        const startY = gy - length / 2;
+        for (let i = 0; i <= segments; i++) {
+          const t = i / segments;
+          const py = startY + t * length;
+          const k = (1 - (2 * t - 1) ** 2);
+          const px = baseX + ((edge === "left") ? -bulge * k : bulge * k);
+          coords.push({ x: px, y: py });
+        }
+      } else {
+        const baseY = (edge === "top") ? (f.y + f.h) : f.y;
+        const startX = gx - length / 2;
+        for (let i = 0; i <= segments; i++) {
+          const t = i / segments;
+          const px = startX + t * length;
+          const k = (1 - (2 * t - 1) ** 2);
+          const py = baseY + ((edge === "top") ? -bulge * k : bulge * k);
+          coords.push({ x: px, y: py });
+        }
+      }
+      ghost = { coords, progress };
+    }
+
+    function spawnRipples(gx, gy) {
+      const now = performance.now();
+      ripples.push({ x: gx, y: gy, start: now + 0,   duration: 500, startScale: 0.5,  startOpacity: 0.9, finalScale: 4.0 });
+      ripples.push({ x: gx, y: gy, start: now + 50,  duration: 600, startScale: 0.25, startOpacity: 0.6, finalScale: 3.0 });
+      ripples.push({ x: gx, y: gy, start: now + 150, duration: 600, startScale: 0.0,  startOpacity: 0.3, finalScale: 2.0 });
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const f = myTopLeftFrame;
+      if (!f) { requestAnimationFrame(render); return; }
+
+      if (membrane) {
+        ctx.beginPath();
+        for (let i = 0; i < membrane.coords.length; i++) {
+          const c = membrane.coords[i];
+          const lx = c.x - f.x, ly = c.y - f.y;
+          if (i === 0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly);
+        }
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = `rgba(255,255,255,${membrane.progress * 0.35})`;
+        ctx.stroke();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = `rgba(255,255,255,${membrane.progress * 0.9})`;
+        ctx.stroke();
+      }
+      if (ghost) {
+        ctx.beginPath();
+        for (let i = 0; i < ghost.coords.length; i++) {
+          const c = ghost.coords[i];
+          const lx = c.x - f.x, ly = c.y - f.y;
+          if (i === 0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly);
+        }
+        ctx.closePath();
+        ctx.fillStyle = `rgba(0,0,0,${ghost.progress * 1})`;
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = `rgba(255,255,255,${ghost.progress * 0.5})`;
+        ctx.stroke();
+      }
+
+      const now = performance.now();
+      const alive = [];
+      for (const r of ripples) {
+        const elapsed = now - r.start;
+        if (elapsed < 0) { alive.push(r); continue; }
+        const progress = elapsed / r.duration;
+        if (progress >= 1) continue;
+        alive.push(r);
+        const scaleProgress = 1 - (1 - progress) ** 2;
+        const scale = r.startScale + (r.finalScale - r.startScale) * scaleProgress;
+        const opacityProgress = progress ** 2;
+        const opacity = r.startOpacity * (1 - opacityProgress);
+        const size = 60 * scale;
+        const lx = r.x - f.x, ly = r.y - f.y;
+        ctx.beginPath();
+        ctx.arc(lx, ly, Math.max(0, size / 2 - 2), 0, Math.PI * 2);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = `rgba(255,255,255,${opacity})`;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(lx, ly, Math.max(0, size / 2 - 6), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${opacity * 0.3})`;
+        ctx.fill();
+      }
+      ripples = alive;
+
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    async function trigger(edge, gx, gy, f) {
+      isTriggered = true;
+      const wrap = getWrapPosition(edge, gx, gy, f);
+      membrane = null;
+      ghost = null;
+      const entry = getOppositeEdgePoint(edge, gx, gy, f);
+      spawnRipples(entry.x, entry.y);
+      sd.cursor.setPosition({ x: wrap.x, y: wrap.y });
+      sd.sound.system("Pop");
+      reset();
+    }
+
+    function clearAt() {
+      currentEdge = null;
+      isTriggered = false;
+      reset();
+      membrane = null;
+      ghost = null;
+    }
+
+    window.onTap_onFlags = (e) => {
+      shiftHeld = !!(e.flags & FLAG_SHIFT);
+      if (shiftHeld) {
+        membrane = null;
+        ghost = null;
+        reset();
+        resetDwell();
+      }
+    };
+
+    window.onTap_onMove = (e) => {
+      if (e.type === "leftMouseDragged") isLeftDown = true;
+      else isLeftDown = false;
+
+      const gx = e.x, gy = e.y;
+      const dx = e.deltaX || 0;
+      const dy = e.deltaY || 0;
+
+      if (!topLeftFrames.length) return;
+
+      if (shiftHeld || (e.flags && (e.flags & FLAG_SHIFT))) {
+        shiftHeld = true;
+        membrane = null;
+        ghost = null;
+        reset();
+        resetDwell();
+        return;
+      }
+
+      const f = frameAt(gx, gy);
+      if (!f) return;
+
+      if (myTopLeftFrame && f.displayID !== myTopLeftFrame.displayID) {
+        clearAt();
+        resetDwell();
+        return;
+      }
+
+      if (inCorner(gx, gy, f) || (isLeftDown && !ALLOW_DRAG_THROUGH)) {
+        clearAt();
+        resetDwell();
+        return;
+      }
+
+      if (!inBufferZone(gx, gy, f)) {
+        resetDwell();
+        if (currentEdge) clearAt();
+        return;
+      }
+
+      const edge = getEdgeAt(gx, gy, f);
+
+      if (!edge) {
+        if (currentEdge) clearAt();
+        if (!isDwelling && !dwellTimer) startDwellTimer();
+        return;
+      }
+
+      if (!ENABLED_EDGES[edge]) return;
+
+      if (WRAP_MODE === "all" && hasAdjacentScreenAt(edge, gx, gy, f)) return;
+
+      currentEdge = edge;
+
+      if (isDwelling) return;
+      if (isTriggered) return;
+
+      const across = getDistanceAcross(edge, dx, dy);
+      const along  = getDistanceAlong(edge, dx, dy);
+
+      if (across >= PRESSURE_THRESHOLD) {
+        trigger(edge, gx, gy, f);
+        return;
+      }
+      if (along > across) return;
+
+      const now = performance.now();
+      trimOldEvents(now);
+
+      const distance = Math.min(MAX_PRESSURE_PER_EVENT, across);
+      if (distance > 0) {
+        pressureEvents.push({ time: now, distance });
+        currentPressure += distance;
+        stopDwellTimer();
+      } else if (!dwellTimer && !isDwelling) {
+        startDwellTimer();
+      }
+
+      const progress = Math.min(1, currentPressure / PRESSURE_THRESHOLD);
+      if (progress > 0.05) {
+        setMembrane(edge, gx, gy, f, progress);
+        setGhost(edge, gx, gy, f, progress);
+      } else {
+        membrane = null;
+        ghost = null;
+      }
+
+      if (currentPressure >= PRESSURE_THRESHOLD) {
+        trigger(edge, gx, gy, f);
+      }
+    };
+  </script>
+</body>
+</html>

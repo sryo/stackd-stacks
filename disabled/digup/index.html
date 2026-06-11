@@ -1,0 +1,166 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>DigUp</title>
+</head>
+<body>
+  <div class="root">
+    <div class="card" id="search-card">
+      <input id="q" type="text" placeholder="Type what you remember…" autocomplete="off" spellcheck="false">
+      <div class="results" id="results"></div>
+      <div class="empty" id="empty">
+        <div>Search your past screen.</div>
+        <div class="hint">Type to query the OCR index. Press <kbd>Esc</kbd> to dismiss.</div>
+      </div>
+      <div class="footer">
+        <span class="hint"><kbd>↑↓</kbd> navigate</span>
+        <span class="hint"><kbd>↵</kbd> open</span>
+        <span class="hint"><kbd>← →</kbd> scrub</span>
+        <span class="hint"><kbd>esc</kbd> close</span>
+      </div>
+    </div>
+
+    <div class="viewer" id="viewer">
+      <div class="viewer-meta" id="viewer-meta"></div>
+      <div class="stage" id="shot-wrap">
+        <img id="shot" alt="">
+        <div class="overlays" id="overlays"></div>
+      </div>
+      <div class="scrubber" id="scrubber"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+    import * as db from "./db.js";
+    import * as capture from "./capture.js";
+    import * as search  from "./search.js";
+
+    const CFG = {
+      captureInterval:  30,
+      ocrConfidence:    0.35,
+      minBatteryPct:    20,
+      captureClipboard: true,
+      eventMergeGap:    10,
+      retentionDays:    30,
+      blacklist:        []
+    };
+
+    async function ensureCaptureRunning() {
+      if (!capture.isRecording()) capture.start();
+    }
+
+    async function setupMenubar() {
+      const item = await sd.menubar.addItem({
+        title: "DigUp",
+        tooltip: "DigUp — screen rewind",
+        menu: buildMenu()
+      });
+      if (!item) return null;
+
+      item.onMenuPick = async (id) => {
+        if (id === "toggle") {
+          if (capture.isRecording()) capture.pause();
+          else                       capture.resume();
+          item.setMenu(buildMenu());
+          updateStatusTitle(item);
+        } else if (id === "search") {
+          await invokeSearch();
+        } else if (id === "skip-current" || id === "record-current") {
+          const a = sd.app.frontmost.peek();
+          if (a && a.bundleId) {
+            if (capture.isBlacklisted(a.bundleId)) capture.removeBlacklist(a.bundleId);
+            else                                   capture.addBlacklist(a.bundleId);
+            item.setMenu(buildMenu());
+          }
+        }
+      };
+
+      updateStatusTitle(item);
+      return item;
+    }
+
+    function buildMenu() {
+      const recording = capture.isRecording();
+      const front = sd.app.frontmost.peek();
+      const items = [
+        { id: "toggle", title: recording ? "Pause recording" : "Resume recording" },
+        { separator: true }
+      ];
+      if (front && front.bundleId) {
+        const skipping = capture.isBlacklisted(front.bundleId);
+        items.push({
+          id: skipping ? "record-current" : "skip-current",
+          title: (skipping ? "Record " : "Skip ") + (front.name || front.bundleId)
+        });
+        items.push({ separator: true });
+      }
+      items.push({ id: "search", title: "Search…" });
+      return items;
+    }
+
+    function updateStatusTitle(item) {
+      if (!item) return;
+      item.setTitle(capture.isRecording() ? "⏺" : capture.isPaused() ? "⏸" : "⏹");
+    }
+
+    // ──────────────────────────── invocable wiring ─────────────────────────────
+    let menubarItem = null;
+
+    async function invokeSearch() {
+      await search.open(async () => {
+        await sd.window.dismiss();
+        await ensureCaptureRunning();
+        capture.resume();
+      });
+      capture.pause();
+      await sd.window.invoke();
+      // Re-focus the input after invoke (focus can race with the WKWebView grab).
+      setTimeout(() => document.getElementById("q").focus(), 80);
+    }
+
+    window.onHotkey_openSearch = invokeSearch;
+
+    // Caffeinate signal → pause / resume capture in lockstep.
+    sd.caffeinate.subscribe((c) => {
+      if (!c) return;
+      if (c.locked || c.sleeping) capture.pause();
+      else                        capture.resume();
+      updateStatusTitle(menubarItem);
+      if (menubarItem) menubarItem.setMenu(buildMenu());
+    });
+
+    // ──────────────────────────────── boot ─────────────────────────────────────
+    (async () => {
+      try {
+        const init = await db.init();
+        console.log("digup: db ready at", init.path);
+
+        capture.setConfig(CFG);
+        await capture.loadBlacklist();
+
+        search.bindKeys();
+        menubarItem = await setupMenubar();
+        capture.start();
+
+        // Periodic retention sweep — every 12h, mirror cleanup.lua.
+        const sweep = async () => {
+          try {
+            const cutoff = Date.now() / 1000 - CFG.retentionDays * 86400;
+            const n = await db.deleteOlderThan(cutoff);
+            if (n > 0) console.log("digup: pruned", n, "frames older than", CFG.retentionDays, "days");
+          } catch (e) { console.error("digup sweep:", e); }
+        };
+        setTimeout(sweep, 15_000);
+        setInterval(sweep, 12 * 3600 * 1000);
+
+        console.log("digup: capturing every", CFG.captureInterval, "s");
+      } catch (e) {
+        console.error("digup boot failed:", e);
+      }
+    })();
+  </script>
+</body>
+</html>

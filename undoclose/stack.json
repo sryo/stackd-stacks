@@ -5,7 +5,7 @@
   "size": { "h": 0 },
   "level": "high",
   "clickThrough": true,
-  "permissions": ["apps", "windows", "proc"],
+  "permissions": [],
   "handles": ["sd.window.destroyed", "sd.window.focused"],
   "hotkeys": [
     { "key": "cmd+alt+z", "callback": "undo" }

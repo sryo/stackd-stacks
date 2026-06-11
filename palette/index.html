@@ -5,19 +5,13 @@
   <link rel="stylesheet" href="index.css">
   <title>Palette</title>
 </head>
-<body>
-  <div class="card" id="card">
-    <div class="crumbs" id="crumbs"></div>
-    <input id="q" type="text" placeholder="Search…" autocomplete="off" spellcheck="false">
-    <div id="results" class="results"></div>
-    <div class="footer" id="footer">
-      <span class="hint">↑↓ navigate</span>
-      <span class="hint">↵ default</span>
-      <span class="hint">tab → verbs</span>
-      <span class="hint">⌥1-9 quickpick</span>
-      <span class="hint">esc close</span>
-    </div>
-  </div>
+<body data-theme="dark">
+  <!-- Body IS the palette. Daemon owns size, glass material, corner radius
+       via manifest. Visibility is controlled by sd.window.invoke / dismiss. -->
+  <div class="crumbs" id="crumbs"></div>
+  <input id="q" type="text" placeholder="Search…" autocomplete="off" spellcheck="false">
+  <div id="results" class="results"></div>
+  <div class="footer" id="footer"></div>
   <script type="module">
     // Palette — faithful port of the user's Hammerspoon Palette.
     // Two-stage noun→verb command palette with subsequence matcher + frecency
@@ -98,6 +92,18 @@
       if (pos >= 0) return Math.max(0, 100 - pos);
       return null;
     }
+    // Source priority. Menu items rank ahead of every other source on ties
+    // (user's mental map: the menubar is the primary surface). Order mirrors
+    // Palette.config.sources in init.lua:46.
+    const SOURCE_PRIORITY = {
+      menuitems:     0,
+      apps:          1,
+      installedapps: 2,
+      calc:          3,
+      shellrunner:   4,
+      files:         5,
+      verbs:         6
+    };
     function rank(items, q) {
       const empty = q === "";
       const matches = [];
@@ -132,20 +138,17 @@
           item.matchPositions = [];
         }
       }
-      // Empty-query ordering: menu items must keep their native order (File
-      // → Edit → View — the user's mental map of the menubar). Recently-used
-      // items still bubble to the top via frecency. Other sources (apps,
-      // installedapps, calc, shellrunner) keep score-based ordering since
-      // they have no meaningful "native" order to preserve.
-      // Non-empty query: rank by fuzzy score for everyone — the user is
-      // searching, native order no longer matters.
+      // Sort: score desc, then source-priority asc (menubar wins ties), then
+      // native order (preserves File → Edit → View menu sequence on empty
+      // query). Source priority is what makes menu items rank above apps when
+      // both score equal — critical when the user types something that
+      // matches a menu and an app title the same way.
       matches.sort((a, b) => {
-        if (empty && a.item.source === "menuitems" && b.item.source === "menuitems") {
-          // Recents win first (boost > 0 = recently used), then native order.
-          if (a.score !== b.score) return b.score - a.score;
-          return a.nativeIdx - b.nativeIdx;
-        }
-        return b.score - a.score;
+        if (a.score !== b.score) return b.score - a.score;
+        const pa = SOURCE_PRIORITY[a.item.source] ?? 99;
+        const pb = SOURCE_PRIORITY[b.item.source] ?? 99;
+        if (pa !== pb) return pa - pb;
+        return a.nativeIdx - b.nativeIdx;
       });
       return matches.map(m => m.item);
     }
@@ -153,11 +156,13 @@
     // ───────────────────── recents (port of recents.lua) ─────────────────────
     const recents = (() => {
       let data = null;
+      // Settings key matches the HS spoon (recents.lua:7) so the user's
+      // Hammerspoon frecency carries over on first run.
       async function load() {
         if (data) return;
-        data = (await sd.settings.get("paletteUsage")) || {};
+        data = (await sd.settings.get("paletteUsageData")) || {};
       }
-      async function save() { await sd.settings.set("paletteUsage", data); }
+      async function save() { await sd.settings.set("paletteUsageData", data); }
       return {
         async init() {
           await load();
@@ -235,7 +240,7 @@
             source:      "apps",
             payload:     { bundleId: a.bundleId, pid: a.pid, appName: a.name },
             defaultVerb: "activate",
-            verbs:       ["activate", "hide", "quit"]
+            verbs:       ["activate", "hide", "quit", "askmuse"]
           });
         }
         return out;
@@ -281,17 +286,15 @@
       if (!tree) return [];
       const tops = Array.isArray(tree.children) ? tree.children : [];
       const items = [];
-      // The first top-level menu is the system Apple menu (About / Sleep /
-      // Restart / Shut Down / System Settings / …). It IS exposed via the
-      // frontmost app's AXMenuBar, but it belongs to the system, not the
-      // app — so its items shouldn't be tagged with the frontmost app's
-      // icon. Mark them here so iconFor can branch.
+      // Skip the system Apple menu (always the first top-level child of the
+      // AX menubar tree). HS's app:getMenuItems() never returns it — the
+      // Apple menu is owned by SystemUIServer, not the frontmost app — so
+      // matching HS's surface means walking from topIdx 1 onwards. Without
+      // this, "About This Mac" / "Sleep" / "Shut Down" outrank the app's
+      // own File / Edit / View entries on shared-letter queries.
       tops.forEach((top, topIdx) => {
-        const before = items.length;
+        if (topIdx === 0) return;
         collectMenuLeaves(top, null, [], items);
-        if (topIdx === 0) {
-          for (let i = before; i < items.length; i++) items[i].appleMenu = true;
-        }
       });
       for (const it of items) {
         it.payload.appPid = pid;
@@ -351,7 +354,7 @@
             source:           "installedapps",
             payload:          { path: e.path, appName: e.name },
             defaultVerb:      "launch",
-            verbs:            ["launch"],
+            verbs:            ["launch", "askmuse"],
             hideOnEmptyQuery: true
           }));
       }
@@ -401,7 +404,7 @@
           source:           "calc",
           payload:          { expression: q, value: v, formatted },
           defaultVerb:      "copynumber",
-          verbs:            ["copynumber"],
+          verbs:            ["copynumber", "askmuse"],
           hideOnEmptyQuery: true,
           bypassMatcher:    true
         }];
@@ -439,7 +442,7 @@
           source:           "shellrunner",
           payload:          { command: q },
           defaultVerb:      "runshell",
-          verbs:            ["runshell"],
+          verbs:            ["runshell", "askmuse"],
           hideOnEmptyQuery: true,
           bypassMatcher:    true
         }];
@@ -522,8 +525,8 @@
           payload:          { path: full, isDir },
           defaultVerb:      isDir ? "enter" : "open",
           verbs:            isDir
-                              ? ["enter", "open", "reveal", "copypath"]
-                              : ["open", "reveal", "copypath"],
+                              ? ["enter", "open", "reveal", "copypath", "askmuse"]
+                              : ["open", "reveal", "copypath", "askmuse"],
           hideOnEmptyQuery: true,
           bypassMatcher:    true,
           matchPositions:   c.positions
@@ -546,7 +549,7 @@
             source:           "files",
             payload:          { path: absPath, isDir: true },
             defaultVerb:      "enter",
-            verbs:            ["enter", "open", "reveal", "copypath"],
+            verbs:            ["enter", "open", "reveal", "copypath", "askmuse"],
             hideOnEmptyQuery: true
           });
           if (out.length >= MAX_VISITED_RESULTS) break;
@@ -691,10 +694,19 @@
       focused: 0,
       selectedItem: null,
       history: [],
+      // Index of the first row currently scrolled into view. Mirrors HS
+      // canvas.lua's `scroll = state.scrollOffset`. Bare-digit 1..9 hotkeys
+      // pick the Nth row STARTING FROM here, not from absolute index 0 — so
+      // as you arrow-scroll past row 9, the numbers shown next to the
+      // currently-visible rows still go 1..9 and the hotkeys follow.
+      visibleStart: 0,
       // App that owned focus at the moment open() ran. Used by the
       // frontmost-change watcher below to detect "user switched away" and
       // auto-dismiss — the equivalent of init.lua's click-outside dismissTap.
-      openOwnerApp: null
+      openOwnerApp: null,
+      // Set true one tick after invoke() so the blur listener doesn't
+      // dismiss during the panel's own focus handover.
+      armedForDismiss: false
     };
 
     // ────────────────────────────── render ───────────────────────────────────
@@ -702,6 +714,20 @@
     const $results = document.getElementById("results");
     const $crumbs = document.getElementById("crumbs");
     const $footer = document.getElementById("footer");
+
+    // Wheel / trackpad scroll: keep the 1..9 badges (and the row-pick
+    // hotkey's target window) in sync with what's visible. Arrow-key nav
+    // calls updateVisibleNumbers from inside render(), so no double-fire.
+    $results.addEventListener("scroll", () => updateVisibleNumbers(), { passive: true });
+    // Clicks anywhere on the panel chrome (footer, crumbs, gaps between
+    // rows) must not steal focus from the input — otherwise the window-
+    // blur dismiss-guard fires while the user thought they were clicking
+    // dead space inside the palette. Rows themselves preventDefault their
+    // own mousedown (see render() loop).
+    document.body.addEventListener("mousedown", (e) => {
+      if (e.target === $q) return;
+      e.preventDefault();
+    });
     const iconCache = new Map();
 
     function highlightTitle(title, positions) {
@@ -719,15 +745,11 @@
       const key = item.id;
       if (iconCache.has(key)) return iconCache.get(key);
       let url = null;
-      if (item.source === "menuitems" && item.payload && item.payload.appPid) {
-        // Apple-menu items are system-level — don't decorate them with the
-        // frontmost app's icon. Leave the slot empty so the system origin
-        // reads visually distinct from per-app menu rows.
-        if (!item.appleMenu) {
-          const running = sd.apps.running.peek() || [];
-          const a = running.find(x => x.pid === item.payload.appPid);
-          if (a && a.bundleId) url = await sd.icons.app(a.bundleId, { size: 32 });
-        }
+      // Menu items: no icon, matching HS canvas.lua (menuitems.lua sets
+      // icon=nil; canvas skips the image element when nil). The result-row
+      // slot stays empty so the row's visual weight is the title + path.
+      if (item.source === "menuitems") {
+        // leave url null
       } else if (item.payload && item.payload.bundleId) {
         url = await sd.icons.app(item.payload.bundleId, { size: 32 });
       } else if (item.payload && item.payload.path) {
@@ -739,40 +761,61 @@
 
     function renderCrumbs() {
       $crumbs.innerHTML = "";
-      if (state.stage === "verb" && state.selectedItem) {
+      // Mirrors canvas.lua:359-369 — "Title › Verb-label ›" with a trailing
+      // chevron when past noun. Verb-label is only present at the (deferred)
+      // prep stage, but the trailing chevron always shows.
+      if (state.stage !== "noun" && state.selectedItem) {
         const a = document.createElement("span");
         a.className = "crumb";
         a.textContent = state.selectedItem.title;
         const arrow = document.createElement("span");
         arrow.className = "arrow"; arrow.textContent = "›";
-        const verb = document.createElement("span"); verb.className = "stage"; verb.textContent = "verb";
-        $crumbs.append(a, arrow, verb);
+        $crumbs.append(a, arrow);
       }
+    }
+    // Mirrors canvas.lua:307-315 placeholderFor(state).
+    function updatePlaceholder() {
+      let p = "Search…";
+      if (state.stage === "noun") {
+        const appName = (state.openOwnerApp || "").trim();
+        if (appName) p = "Search " + appName;
+      } else if (state.stage === "verb") {
+        p = "Verb…";
+      } else {
+        p = "Choose…";
+      }
+      $q.placeholder = p;
     }
 
     function renderFooter() {
+      // Mirrors canvas.lua:317-325 footerFor(state). Short, stage-dependent.
+      // Per-verb hotkeys (⌘1..⌘9, ⌘⌫ Forget) live in canvas.lua's right
+      // pane; stackd surfaces them in the same footer because we don't have
+      // a preview pane, but keeps the count low so the footer doesn't wrap.
       $footer.innerHTML = "";
       const hints = [];
       const item = state.items[state.focused];
-      if (state.stage === "noun" && item) {
-        const default_ = item.defaultVerb || "activate";
-        if (VERBS[default_]) hints.push(["↵", VERBS[default_].label]);
+      if (state.items.length === 0) {
+        if (state.query !== "") hints.push(["↵", "Ask Muse"]);
+      } else if (state.stage === "noun") {
+        const default_ = (item && item.defaultVerb) || "activate";
+        if (item && VERBS[default_]) hints.push(["↵", VERBS[default_].label]);
         let n = 0;
-        for (const vid of (item.verbs || [])) {
+        for (const vid of ((item && item.verbs) || [])) {
           if (vid === default_) continue;
           const v = VERBS[vid];
           if (!v) continue;
           n += 1;
-          if (n > 9) break;
+          if (n > 3) break;
           hints.push(["⌘" + n, v.label]);
         }
-        if (item.fromHistory) hints.push(["⌘⌫", "Forget"]);
-        hints.push(["tab", "verbs"]);
+        if (item && item.fromHistory) hints.push(["⌘⌫", "Forget"]);
+        hints.push(["⇥", "verbs"]);
       } else if (state.stage === "verb") {
         hints.push(["↵", "run"]);
         hints.push(["⇧⇥", "back"]);
       }
-      hints.push(["esc", "close"]);
+      hints.push(["esc", state.stage === "noun" ? "close" : "back"]);
       for (const [k, l] of hints) {
         const w = document.createElement("span"); w.className = "hint";
         const kk = document.createElement("kbd"); kk.textContent = k;
@@ -783,6 +826,7 @@
 
     function render() {
       renderCrumbs();
+      updatePlaceholder();
       $results.innerHTML = "";
       let focusedRow = null;
       // Render every match, not just the first 9. The original cap dropped
@@ -793,18 +837,30 @@
       state.items.forEach((item, i) => {
         const row = document.createElement("div");
         row.className = "row" + (i === state.focused ? " selected" : "");
+        if (item.enabled === false) row.classList.add("disabled");
         const ic = document.createElement("img"); ic.className = "icon";
         iconFor(item).then(u => { if (u) ic.src = u; });
-        const num = document.createElement("span"); num.className = "num"; num.textContent = (i + 1).toString();
+        // Left blank by default; updateVisibleNumbers() fills 1..9 for the
+        // rows currently scrolled into view (see HS canvas.lua:491-499).
+        const num = document.createElement("span"); num.className = "num"; num.textContent = "";
+        // Menu state mark (✓ on, • current) — canvas.lua:519-527.
+        const mark = document.createElement("span"); mark.className = "mark";
+        if (item.markChar) mark.textContent = item.markChar;
         const name = document.createElement("span"); name.className = "name";
         name.innerHTML = highlightTitle(item.title, item.matchPositions);
+        // Subtitle = menu path (menuitems) / window count (apps) / parent
+        // dir (files). Always shown, never replaced by the accessory.
         const sub = document.createElement("span"); sub.className = "sub";
-        // Menuitems lean on accessory (keyboard shortcut) over subtitle so
-        // long menu paths don't crowd the right edge of the row.
-        sub.textContent = item.accessory || item.subtitle || "";
+        sub.textContent = item.subtitle || "";
+        // History mark — HS canvas.lua:531-538 ("↺" on trailing edge).
+        const hist = document.createElement("span"); hist.className = "hist";
+        if (item.fromHistory) hist.textContent = "↺";
+        // Accessory = menu keyboard shortcut (⌘S etc.) — HS keeps this in
+        // the right pane; we don't have one, so trailing-edge text suits.
         const accessory = document.createElement("span"); accessory.className = "accessory";
-        if (item.fromHistory) accessory.textContent = "•";
-        row.append(num, ic, name, sub, accessory);
+        if (item.accessory) accessory.textContent = item.accessory;
+        row.append(num, ic, mark, name, sub, hist, accessory);
+        row.addEventListener("mousedown", (e) => { e.preventDefault(); });
         row.addEventListener("click", () => { state.focused = i; activateFocused(); });
         $results.append(row);
         if (i === state.focused) focusedRow = row;
@@ -814,7 +870,34 @@
       // results list overflows. `nearest` avoids the jarring center-on-every-keystroke
       // that `smooth`/`center` would cause.
       if (focusedRow) focusedRow.scrollIntoView({ block: "nearest" });
+      // scrollIntoView may have changed scrollTop synchronously; update the
+      // 1..9 badges + visibleStart pointer now so the row-pick hotkey lines
+      // up with what the user actually sees.
+      updateVisibleNumbers();
       renderFooter();
+    }
+
+    // Mirrors HS canvas.lua's row-number badge: 1..9 reset to the visible
+    // window every time the scroll position changes. The .num span on every
+    // row is initialized blank (line ~798); this function fills in 1..9 for
+    // the nine rows currently scrolled into view and clears the rest.
+    // Also latches `state.visibleStart` so bare-digit hotkey N picks the
+    // Nth visible row (not the Nth absolute item).
+    function updateVisibleNumbers() {
+      const rows = $results.querySelectorAll(".row");
+      if (rows.length === 0) { state.visibleStart = 0; return; }
+      // Row height is fixed at 40px (see .row in index.css). Floor against
+      // scrollTop; the first fully-or-partially-visible row at the top of
+      // the viewport becomes badge 1.
+      const ROW_H = 40;
+      const start = Math.max(0, Math.floor($results.scrollTop / ROW_H));
+      state.visibleStart = start;
+      rows.forEach((row, i) => {
+        const num = row.querySelector(".num");
+        if (!num) return;
+        const visIdx = i - start;
+        num.textContent = (visIdx >= 0 && visIdx < 9) ? String(visIdx + 1) : "";
+      });
     }
 
     // ───────────────────────────── stage ops ─────────────────────────────────
@@ -847,6 +930,7 @@
       state.focused = 0;
       if (opts && opts.selectedItem) state.selectedItem = opts.selectedItem;
       $q.value = "";
+      $q.setSelectionRange(0, 0);
       refresh();
     }
     function popStage() {
@@ -854,6 +938,8 @@
       if (!prev) return false;
       Object.assign(state, prev);
       $q.value = state.query;
+      const n = state.query.length;
+      $q.setSelectionRange(n, n);
       render();
       return true;
     }
@@ -891,6 +977,10 @@
           state.query = directive.rewriteQuery;
           state.focused = 0;
           $q.value = state.query;
+          // Park the caret at end of the rewritten query so the next
+          // keystroke continues typing forward (HS: textbuf.charLen).
+          const n = state.query.length;
+          $q.setSelectionRange(n, n);
           await refresh();
         }
         return;
@@ -901,8 +991,19 @@
       dismiss();
     }
 
+    // Fallback when Enter lands on an empty result list (typed something the
+    // matcher rejected). Mirrors init.lua:270-272 / askMuseWithQuery — ship
+    // the raw query off to Muse as a free-form question so the user never
+    // hits a "nothing to do" dead end.
+    async function askMuseWithQuery(query) {
+      await runVerb(VERBS.askmuse, { title: query, payload: {}, source: "ask" });
+    }
     async function activateFocused() {
       if (state.stage === "noun") {
+        if (state.items.length === 0 && state.query !== "") {
+          await askMuseWithQuery(state.query);
+          return;
+        }
         const item = state.items[state.focused];
         if (!item) return;
         const verb = VERBS[item.defaultVerb || "activate"];
@@ -914,12 +1015,66 @@
       }
     }
 
-    async function open() {
+    // ──────────────────── mouse-anchored placement ───────────────────────────
+    // Mirrors canvas.lua mouseAnchorFrame(). HS cfg: width=500, height=330,
+    // leftBoxW=320, pad=16, inputHCompact=36, rowH=48. y-offset = 16+4+36+10+24 = 90.
+    // Lands the cursor on row 1's center so scroll / click work without
+    // moving the mouse. Clamps inside the cursor's screen with 8px margin.
+    const PANEL_W = 800, PANEL_H = 330, LEFT_BOX_W = 520, Y_OFFSET = 90, MARGIN = 8;
+    async function placePanel() {
+      const m = await sd.mouse.first();
+      const scr = m.display || (sd.display.all.peek() || [])[0] || null;
+      const sf = scr ? scr.frame : null;
+      let x = m.x - LEFT_BOX_W / 2;
+      let y = m.y - Y_OFFSET;
+      if (sf) {
+        if (x < sf.x + MARGIN) x = sf.x + MARGIN;
+        if (x + PANEL_W > sf.x + sf.w - MARGIN) x = sf.x + sf.w - PANEL_W - MARGIN;
+        if (y + PANEL_H > sf.y + sf.h - MARGIN) y = sf.y + sf.h - PANEL_H - MARGIN;
+        if (y < sf.y + MARGIN) y = sf.y + MARGIN;
+      }
+      await sd.window.setFrame({ x, y, w: PANEL_W, h: PANEL_H });
+    }
+
+    // Bar-anchored placement. Used by `sd.bang('palette.open', { under: 'bar' })`
+    // — typically a click on the Rebar frontmost-app item. Drops the palette
+    // one bar-height below the menubar at the click's x. The gap scales with
+    // the bar (vf.y - sf.y), so notched displays (~38px bar) get more
+    // breathing room than regular ones (~24px), and the panel never collides
+    // with the bar regardless of display.
+    async function placePanelUnderBar() {
+      const m = await sd.mouse.first();
+      const scr = m.display || (sd.display.all.peek() || [])[0] || null;
+      const sf = scr ? scr.frame : null;
+      const vf = scr ? scr.visibleFrame : null;
+      const barH = (sf && vf) ? Math.max(0, vf.y - sf.y) : 24;
+      let x = m.x - LEFT_BOX_W / 2;
+      let y = (vf ? vf.y : (sf ? sf.y + barH : 0)) + barH;
+      if (sf) {
+        if (x < sf.x + MARGIN) x = sf.x + MARGIN;
+        if (x + PANEL_W > sf.x + sf.w - MARGIN) x = sf.x + sf.w - PANEL_W - MARGIN;
+        if (y + PANEL_H > sf.y + sf.h - MARGIN) y = sf.y + sf.h - PANEL_H - MARGIN;
+      }
+      await sd.window.setFrame({ x, y, w: PANEL_W, h: PANEL_H });
+    }
+
+    async function open(opts) {
       // Rebuild the menu tree every open (matches menuitems.lua, which
       // re-walks the AX menu bar each time). Caching across opens would
       // surface stale enabled/marked state when the user toggles "View >
       // Show X" outside the palette and re-opens.
       menuCache = { pid: null, items: null };
+      // Snapshot the owner app BEFORE walking the menu (so menuitemsSource
+      // and the dismiss watcher agree on which app this session belongs to).
+      // Anything else becoming frontmost is a switch-away → dismiss. Fall
+      // back to a fresh peek() in case the priorFront subscriber hasn't
+      // fired yet (palette opened on launch).
+      let owner = (priorFront && priorFront.name) || null;
+      if (!owner) {
+        const peeked = sd.app.frontmost.peek();
+        if (peeked && peeked.name && peeked.name !== SELF) owner = peeked.name;
+      }
+      state.openOwnerApp = owner;
       // Static sources fan out concurrently.
       const [menuItems, apps, installed] = await Promise.all([
         menuItemsSource.list().catch(() => []),
@@ -929,23 +1084,23 @@
       const raw = menuItems.concat(apps).concat(installed);
       state.open = true; state.stage = "noun"; state.query = ""; state.raw = raw;
       state.focused = 0; state.history = []; state.selectedItem = null;
-      // Snapshot the owner app BEFORE invoke so the frontmost watcher knows
-      // which app "owns" this palette session. Anything else becoming frontmost
-      // is a switch-away → dismiss. Fall back to a fresh peek() in case the
-      // priorFront subscriber hasn't fired yet (palette opened on launch).
-      let owner = (priorFront && priorFront.name) || null;
-      if (!owner) {
-        const peeked = sd.app.frontmost.peek();
-        if (peeked && peeked.name && peeked.name !== SELF) owner = peeked.name;
-      }
-      state.openOwnerApp = owner;
       $q.value = "";
       await refresh();
+      // Placement BEFORE invoke so the panel materializes at its final spot
+      // — no flash-then-jump. Mirrors canvas.lua's mouseAnchorFrame() called
+      // in M.show(). `opts.under === 'bar'` (fired by Rebar's frontmost-app
+      // item) snaps below the menubar instead of centering on the cursor.
+      if (opts && opts.under === "bar") await placePanelUnderBar();
+      else await placePanel();
       await sd.window.invoke();
       $q.focus();
+      // Arm the focus-loss dismiss guard one tick AFTER focus lands. Earlier
+      // blur transitions during invoke would otherwise dismiss the panel
+      // before the user has a chance to type.
+      requestAnimationFrame(() => { state.armedForDismiss = true; });
     }
     async function dismiss() {
-      state.open = false; state.history = [];
+      state.open = false; state.armedForDismiss = false; state.history = [];
       await sd.window.dismiss();
     }
 
@@ -977,6 +1132,7 @@
             state.query = nq;
             state.focused = 0;
             $q.value = nq;
+            $q.setSelectionRange(nq.length, nq.length);
             await refresh();
             return;
           }
@@ -1014,13 +1170,22 @@
         }
         return;
       }
-      // Alt+1..9 — pick Nth visible row and run its default verb.
-      if (e.altKey && /^[1-9]$/.test(e.key)) {
+      // Bare 1..9 — pick the Nth visible row and run its default verb.
+      // Mirrors keys.lua's itemQuickPick: NO modifier required, and digits
+      // are NEVER typed into the query. The HS palette is a global eventtap
+      // that owns its own text buffer; this is the closest we can get with
+      // an <input>. Trade-off: you can't type "1" into the query — but the
+      // user signed off on the HS behavior and this matches it 1:1.
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+          && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         const n = parseInt(e.key, 10);
-        const row = state.items[n - 1];
+        // Pick the Nth currently-visible row (relative to scroll), not the
+        // Nth absolute item — matches the 1..9 badge user sees on screen.
+        const idx = (state.visibleStart || 0) + (n - 1);
+        const row = state.items[idx];
         if (!row) return;
-        state.focused = n - 1;
+        state.focused = idx;
         if (state.stage === "noun") {
           const verb = VERBS[row.defaultVerb || "activate"];
           if (verb) await runVerb(verb, row);
@@ -1031,21 +1196,42 @@
     });
 
     // ───────────────────────────── lifecycle ──────────────────────────────────
-    window.onHotkey_open = () => open();
+    // Theme: imperative subscription instead of a body-attribute placeholder.
+    // The `{{ sd.appearance.dark ? 'dark' : 'light' }}` template eval at mount
+    // resolves to 'light' when the appearance channel hasn't pushed yet —
+    // which on a dark-mode system left the palette with dark text on dark
+    // glass until the first push (sometimes never, racing the WKWebView's
+    // initial channel replay). Subscribe explicitly so the body flips as
+    // soon as the daemon hands us a value, and again on every system change.
+    sd.appearance.subscribe((a) => {
+      document.body.dataset.theme = (a && a.dark) ? "dark" : "light";
+    });
 
-    // Close on focus-loss — equivalent to init.lua's dismissTap closing the
-    // palette when a click lands outside its frame. Stacks have no global
-    // mouse eventtap, so we approximate via the frontmost-app channel: while
-    // the palette is open, any frontmost change to an app other than the one
-    // that owned focus at open-time (and other than stackd itself) means the
-    // user Cmd+Tabbed, clicked another app's window, or otherwise switched
-    // away. The openOwnerApp filter is what prevents an open-time race —
-    // the channel callback is invoked once on subscribe with the *current*
-    // frontmost (sd's signal does fn(value) immediately), and that initial
-    // fire happens before open() ever runs, so state.open is false and we
-    // no-op. Subsequent same-app fires during the palette session
-    // (e.g. AX activated re-notifications) are ignored because a.name still
-    // matches openOwnerApp.
+    sd.hotkey.on("open", () => open());
+
+    // External entry: any stack can fire `sd.bang('palette.open', { under: 'bar' })`
+    // — Rebar's frontmost-app item does this on click so the palette drops
+    // directly below the menubar instead of jumping to the cursor.
+    window.onBang_palette_open = (detail) => open(detail || {});
+
+    // Close on focus-loss — two paths, both equivalent to init.lua's
+    // dismissTap closing the palette when a click lands outside its frame:
+    //
+    //   1. Window blur (catches same-app click-outside). The palette runs in
+    //      a .nonactivatingPanel, so the prior frontmost app stays frontmost
+    //      throughout — clicking into THAT app's window doesn't fire any
+    //      app-change notification. But the panel loses key status, and
+    //      `window` (the WKWebView's owning NSWindow) fires the JS `blur`
+    //      event. We defer the dismiss one tick so a row-click handler can
+    //      run first (mousedown → blur → click order means blur races click
+    //      otherwise).
+    //   2. Frontmost change (catches Cmd+Tab and clicking another app). When
+    //      the frontmost app becomes something OTHER than the open-owner and
+    //      OTHER than stackd, the user switched away.
+    window.addEventListener("blur", () => {
+      if (!state.open || !state.armedForDismiss) return;
+      setTimeout(() => { if (state.open) dismiss(); }, 0);
+    });
     sd.app.frontmost.subscribe((a) => {
       if (!a || !a.name) return;
       if (a.name === SELF) return;

@@ -1,27 +1,55 @@
 html, body {
-  margin: 0; padding: 0; width: 100%; height: 100%;
-  background: transparent;
+  width: 100%; height: 100%;
   overflow: hidden;
   pointer-events: none;
 }
 .hour {
   position: fixed; top: 0; left: 0;
-  font: 16px -apple-system, system-ui;
-  color: white;
-  /* Match the Lua shadow exactly: offset h=-1, blurRadius=2, color alpha=1.
-     CSS text-shadow is (offset-x, offset-y, blur, color). Lua's h is
-     vertical offset; offset-y = -h = 1 to push the shadow DOWN. */
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 1);
-  /* Fade matches Lua: 0.0125 step over 0.25s = ease over ~250ms.
-     NO transition on `transform` — mouse pushes arrive faster than the
-     CSS animation can complete, so every new event interrupts the prior
-     animation mid-flight. Net effect: the trail lags behind the cursor
-     by progressively more during sustained motion and visibly jerks on
-     direction changes. Raw transform writes track the cursor stream
-     directly; the stream itself is the source of smoothness. */
-  transition: opacity 250ms ease;
+  /* Cursor-tracking translate stream is written every mouse event. No
+     transition on `transform` — mouse pushes arrive faster than any
+     animation can complete; raw writes track the cursor stream directly
+     and the stream itself is the source of smoothness. */
   opacity: 0;
+  transition: opacity 250ms ease;
   will-change: transform, opacity;
   pointer-events: none;
   user-select: none;
+}
+.hour .text {
+  /* Native rasterization at every size — glyph and shadow stay crisp at
+     both rest and peak. Shake animates font-size, which re-rasterizes
+     per frame (slight integer-px stepping is the visible tradeoff). The
+     box reflows with the font, but `translate(-50%, -50%)` adapts
+     because % is computed against the current box, so the visual center
+     pins to the parent's (0,0) through the whole transition. */
+  display: inline-block;
+  font: 600 18px -apple-system, system-ui;
+  color: white;
+  /* ChronoMouse AppDelegate.createTextShadow: blur 1, y-offset 1.
+     NSTextView is a flipped view so positive-Y in shadowOffset
+     renders DOWN, matching CSS sign. */
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 1);
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+  transition: font-size 200ms cubic-bezier(.2, .8, .2, 1);
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.hour.shaking .text { font-size: 45px; }
+.bar {
+  position: fixed; top: 0; left: 0;
+  width: 18px; height: 6px;
+  border: 1px solid white;
+  border-radius: 2px;
+  box-sizing: border-box;
+  opacity: 0;
+  transition: opacity 250ms ease;
+  pointer-events: none;
+}
+.bar .fill {
+  height: 100%;
+  background: white;
+  border-radius: 1px;
+  transition: width 200ms ease, background-color 200ms ease;
 }

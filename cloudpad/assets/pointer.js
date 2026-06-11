@@ -49,9 +49,9 @@
     stopMomentum();
   }
 
-  // Screenshot poll. stackd's httpserver responses are string-bodied, so the
-  // host serves a JSON envelope { dataURL, cursorX, cursorY } and we drop
-  // the dataURL straight into background-image.
+  // Screenshot poll. Host serves raw JPEG bytes with cursor fraction in
+  // X-Cursor-Pct-X / X-Cursor-Pct-Y — same contract as the HS routes.lua
+  // implementation, so this client is identical across both backends.
   let pollState = { busy: false, timer: null };
   function startScreenshotLoop() {
     if (pollState.timer) return;
@@ -63,13 +63,17 @@
       }
       pollState.busy = true;
       fetch("/screenshot", { cache: "no-store" })
-        .then((r) => r.json())
-        .then((j) => {
-          if (!j || !j.dataURL) return;
+        .then((r) => Promise.all([
+          r.blob(),
+          parseFloat(r.headers.get("X-Cursor-Pct-X")),
+          parseFloat(r.headers.get("X-Cursor-Pct-Y")),
+        ]))
+        .then(([blob, px, py]) => {
           const el = screenshotEl();
-          el.style.backgroundImage = `url(${j.dataURL})`;
-          const px = parseFloat(j.cursorX);
-          const py = parseFloat(j.cursorY);
+          const url = URL.createObjectURL(blob);
+          el.style.backgroundImage = `url(${url})`;
+          if (el.dataset.lastUrl) URL.revokeObjectURL(el.dataset.lastUrl);
+          el.dataset.lastUrl = url;
           if (!isNaN(px) && !isNaN(py)) {
             const cur = serverCursor();
             cur.style.left = (px * 100) + "%";

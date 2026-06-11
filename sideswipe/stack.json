@@ -1,8 +1,11 @@
 {
   "id": "sideswipe",
   "name": "SideSwipe",
-  "region": "fullscreen",
-  "size": { "h": 0 },
+  "anchor": { "edge": "bottom-center", "inset": [40] },
+  "size": { "w": 80, "h": 80 },
+  "material": "glass",
+  "cornerRadius": 40,
+  "padding": 0,
   "clickThrough": true,
-  "permissions": ["touchdevice", "audio", "display"]
+  "permissions": []
 }

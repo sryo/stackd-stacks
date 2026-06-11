@@ -8,7 +8,9 @@ import {
   state, log, updateWindowOrder, isAppIncluded, displayForWindow
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
+import { isAnimating } from "./animation.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
+import { refresh as refreshButtons } from "./buttons.js";
 
 // Push an inclusion verdict to the overlay-border stack so it can paint the
 // focused window's border in the included vs excluded palette. The bang is
@@ -16,7 +18,7 @@ import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 // re-focus is free.
 function emitInclusionBang(w) {
   if (!w || !w.id) return;
-  sd.bang('overlay-border.inclusion', { winId: w.id, included: isAppIncluded(w) });
+  sd.bang.declare('overlay-border.inclusion').emit({ winId: w.id, included: isAppIncluded(w) });
 }
 
 // Spatial drop-position calculator — port of operations.lua calculateDropPosition.
@@ -42,6 +44,17 @@ function calculateDropPosition(dropFrame, screenWindows, horizontal) {
 let eventDebounceTimer = null;
 let lastKnownIds = new Set();
 let lastKnownFrames = Object.create(null); // id -> { app, frame }
+
+// CGS-lag suppression. The daemon fires sd.window.destroyed off the AX
+// observer, then immediately rebuilds sd.windows.all from CGWindowList —
+// which can lag the AX destroy by ~50–500ms, so the all-push that lands
+// right after the destroy bang STILL includes the just-closed id. Without
+// suppression, the all-subscriber overwrites our eager delete in
+// windowsById and handleWindowEvent's 30ms debounce sees no change vs
+// lastKnownIds → early returns → no retile until something else wakes
+// the system (the "few seconds" the user reported on 2→1 closes).
+const destroyedRecently = new Map(); // id -> timestamp ms
+const DESTROYED_GRACE_MS = 2000;
 
 // Refresh windowSpaces cache for ids we haven't seen before, so the tiler
 // has a current spaces list when it next runs.
@@ -130,6 +143,69 @@ async function handleWindowEvent() {
   if (fid != null) emitInclusionBang(state.windowsById[fid]);
 }
 
+// Out-of-bracket resize debounce — replaces the removed 500ms drift-watch
+// poll. The daemon's per-window AX observers bang on every app/script-
+// driven resize now; we debounce 300ms (same shape as lua's
+// pendingReposition timer) so the last bang of a resize train wins, then
+// run the SAME pairwise pin + retile as a bracket-close resize.
+//
+// Echo safety: our own tile-pass setFrames bounce back as resized bangs,
+// and AX notifications trail the actual setFrame by up to several hundred
+// ms — long after tilingCount cooled down — carrying frames that differ
+// wildly from the pass's NEW targets. Trusting the bang payload here
+// produced a pin-from-echo feedback storm (junk pins at 100-ish px,
+// retile, more bangs, more pins). So the bang is only a WAKE-UP: at fire
+// time we do ONE live AX read and compare against the CURRENT tile
+// target. A settled echo matches its target → no-op; a real external
+// resize persists at the foreign size → pin. Same comparison the old
+// 500ms drift poller did, but event-driven.
+// PER-WINDOW debounce map — a single shared candidate slot let one
+// window's trailing echo train stomp another window's REAL resize (B's
+// post-pass echoes overwrote A's candidacy and A's resize was silently
+// swallowed; same bug class as the service-window lastMovedId stomp
+// documented at the drag bracket).
+const oobResize = new Map(); // id -> { timer, retries }
+function scheduleOutOfBracketResize(id) {
+  const prev = oobResize.get(id);
+  if (prev && prev.timer) clearTimeout(prev.timer);
+  const entry = { timer: null, retries: 0 };
+  oobResize.set(id, entry);
+  armOobResizeTimer(id, entry);
+}
+function armOobResizeTimer(id, entry) {
+  entry.timer = setTimeout(async () => {
+    // A real user drag opened meanwhile — bracket close owns the decision.
+    if (state.dragInFlight) { oobResize.delete(id); return; }
+    // isAnimating: with cfg.enableAnimations the window can still be in
+    // transit AFTER tilingCount cools down (under load the final animation
+    // tick lands late). A live read mid-flight is >20px off its target by
+    // construction — without this gate every animated pass risked phantom
+    // PIN-PAIRs on windows nobody resized (the S4 "non-adjacent-changed"
+    // storm, 2026-06-10).
+    if ((state.tilingCount > 0 || isAnimating(id)) && entry.retries < 5) {
+      entry.retries++;
+      armOobResizeTimer(id, entry);
+      return;
+    }
+    oobResize.delete(id);
+    const live = await sd.windows.frame(id).catch(() => null);
+    if (!live) return;
+    if (state.windowsById[id]) state.windowsById[id].frame = live;
+    const tgt = state.lastTileTarget?.[id]?.frame;
+    const w = state.windowsById[id];
+    const d = w && displayForWindow(w);
+    if (!tgt || !d) return;
+    const horizontal = d.frame.w > d.frame.h;
+    const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
+    if (dMajor <= 20) return; // settled echo — pass moved it back already
+    log(`RESIZE-OUTSIDE-BRACKET id=${id} live-dMajor=${Math.round(dMajor)} → pairwise pin + tile`);
+    pinFromActualSize(id);
+    state.tileReason = `ax-resize(${id})`;
+    state.snapNextTile = true; // resize containment settles instantly
+    await tileWindows();
+  }, 300);
+}
+
 export function start() {
   // Snapshot of all windows → state.windowsById rebuilt each tick. We use
   // this channel ONLY to keep windowsById fresh (frame/title/app props for
@@ -141,8 +217,17 @@ export function start() {
   // deminimized) which only fire on actual layout-relevant transitions.
   sd.windows.all.subscribe(async (list) => {
     if (!Array.isArray(list)) return;
+    const now = Date.now();
+    for (const [id, ts] of destroyedRecently) {
+      if (now - ts > DESTROYED_GRACE_MS) destroyedRecently.delete(id);
+    }
     const next = Object.create(null);
-    for (const w of list) next[w.id] = w;
+    for (const w of list) {
+      // Skip ids the destroyed bang already told us are gone — CGWindowList
+      // can keep reporting them for a beat after AX fires destroy.
+      if (destroyedRecently.has(w.id)) continue;
+      next[w.id] = w;
+    }
     state.windowsById = next;
     // Prune minimizedIds of IDs that are gone — keeps the set bounded
     // and lets a re-created window (same app, new CGWindowID) get a
@@ -224,15 +309,39 @@ export function start() {
   // retile (closed window leaves a gap the remaining tiles should fill).
   window.onBang_sd_window_destroyed = (detail) => {
     if (detail && detail.id) {
-      delete state.windowSpacesCache[detail.id];
+      const id = +detail.id;
+      destroyedRecently.set(id, Date.now());
+      delete state.windowSpacesCache[id];
+      // Eagerly drop from the live index so handleWindowEvent's currentIds
+      // reflects the close. Without this, CGWindowList's lag (~50–500ms)
+      // means the all-push that lands between the destroy bang and the
+      // 30ms debounce can keep id in windowsById → no diff vs lastKnownIds
+      // → silent early return → no retile.
+      delete state.windowsById[id];
+      delete state.lastTileTarget[id];
+      state.minimizedIds.delete(id);
       // If the destroyed window was the simulated-fullscreen target, exit
       // so the parked peers come back into view. No-op otherwise.
-      fullscreenOnDestroyed(detail.id);
+      fullscreenOnDestroyed(id);
     }
     pruneStaleWeights();
     debouncedHandleWindowEvent();
   };
   window.onBang_sd_window_created = (detail) => {
+    // Seed the live index from the bang payload (daemon rework 2026-06:
+    // created bangs carry {id, pid, app, title, frame}). The daemon tries
+    // to land the sd.windows.all push BEFORE this bang, but on retry
+    // exhaustion the bang can still win the race — seeding here makes
+    // handleWindowEvent's diff see the window either way.
+    if (detail && detail.id != null && detail.frame) {
+      const id = +detail.id;
+      destroyedRecently.delete(id);
+      const w = state.windowsById[id] || (state.windowsById[id] = { id });
+      w.pid   = detail.pid;
+      w.app   = detail.app;
+      w.title = detail.title;
+      w.frame = detail.frame;
+    }
     debouncedHandleWindowEvent();
   };
   // Explicit minimize tracking — drives the tile-eligibility filter in
@@ -242,6 +351,9 @@ export function start() {
   window.onBang_sd_window_minimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.add(+detail.id);
+    // Eager hydration — the bang can beat the pumped sd.windows.all push,
+    // and the immediate tile pass below reads windowsById's enrichment.
+    if (state.windowsById[+detail.id]) state.windowsById[+detail.id].isMinimized = true;
     // Skip handleWindowEvent — it bails when newIds/removedIds are empty
     // (a minimize doesn't add/remove from windowsById, it just flips an
     // eligibility flag). Tile directly so the freed slot collapses and
@@ -253,6 +365,10 @@ export function start() {
   window.onBang_sd_window_deminimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.delete(+detail.id);
+    // Eager hydration — without this the immediate tile pass still sees the
+    // minimize-era isMinimized:true (the refreshed all-push races the bang)
+    // and skips the restored window; nothing retiles when the push lands.
+    if (state.windowsById[+detail.id]) state.windowsById[+detail.id].isMinimized = false;
     updateWindowOrder();
     state.tileReason = `deminimize(${detail.id})`;
     tileWindows();
@@ -260,22 +376,21 @@ export function start() {
 
   // Spatial reorder on window-moved — port of events.lua handleWindowMoved.
   // The daemon fires sd.window.moved for origin changes AND sd.window.resized
-  // for size changes as SEPARATE bangs (Windows.swift:1199+). A pure
+  // for size changes as SEPARATE bangs from per-window AX observers. A pure
   // right/bottom-edge resize changes size only → only `resized` fires; a
   // top/left-edge resize changes both. Hammerspoon's window_filter coalesces
   // these into one `windowMoved`; we have to subscribe to both and dedupe.
   //
-  // Debounced 300ms (matches lua's pendingReposition timer) so the final
-  // event after a drag-drop wins, not every intra-drag tick.
   // Drag-bracket model: leftMouseDown opens the bracket (sets dragInFlight),
-  // leftMouseUp closes it (after a 100ms grace for trailing synth-poll bangs).
+  // leftMouseUp closes it (after a 100ms grace for trailing bangs).
   // Mid-bracket bangs hydrate state and record the candidate moved id; the
-  // decision (resize-redistribute vs reorder vs no-op) fires ONCE at bracket
+  // decision (resize-pairwise-pin vs reorder vs no-op) fires ONCE at bracket
   // close. Without the bracket the drag-train would fire reorder on each
   // intermediate bang and the window would jump back under the cursor.
-  // Bangs OUTSIDE any bracket (AX-driven changes from scripts/shortcuts) are
-  // handled by the drift watcher in tiler.js.
-  const handleDragEnd = (detail) => {
+  // Bangs OUTSIDE any bracket: resized → 300ms-debounced pairwise pin +
+  // retile (scheduleOutOfBracketResize); moved-only → ignored (next tile
+  // pass snaps positions).
+  const handleDragBang = (detail, kind) => {
     if (!detail || !detail.id) return;
     // ALWAYS hydrate state.windowsById from the bang. sd.windows.all is
     // throttled (fires on focus/title change only), so peer frames otherwise
@@ -338,12 +453,25 @@ export function start() {
       log(`DRAG-MID id=${detail.id} (${app}) bracket-open, recording candidate`);
       return;
     }
-    // Outside any bracket → AX-driven change (script/shortcut). Drift watcher
-    // (tiler.js, 500ms) catches it and re-weights. Don't react here.
-    log(`DRAG-ACCEPTED-OUTSIDE-BRACKET id=${detail.id} (${app}) — leaving to drift watcher`);
+    // Outside any bracket → app/script/AX-driven change.
+    if (kind !== "resized") {
+      // moved-only: ignore. The next tile pass snaps positions back, and
+      // reacting to every AX move would fight app-internal moves.
+      log(`MOVE-IGNORED-OUTSIDE-BRACKET id=${detail.id} (${app})`);
+      return;
+    }
+    const wd = displayForWindow(w);
+    if (!wd || !tgt || !tgt.frame || !detail.frame) return;
+    const horizontal = wd.frame.w > wd.frame.h;
+    const dMajor = Math.abs(horizontal
+      ? detail.frame.w - tgt.frame.w
+      : detail.frame.h - tgt.frame.h);
+    if (dMajor <= 20) return;
+    log(`RESIZE-OOB-BANG id=${detail.id} (${app}) dMajor=${Math.round(dMajor)} → debounce`);
+    scheduleOutOfBracketResize(+detail.id);
   };
-  window.onBang_sd_window_moved = handleDragEnd;
-  window.onBang_sd_window_resized = handleDragEnd;
+  window.onBang_sd_window_moved   = (detail) => handleDragBang(detail, "moved");
+  window.onBang_sd_window_resized = (detail) => handleDragBang(detail, "resized");
 }
 
 // Drag-bracket — opened on leftMouseDown, closed on leftMouseUp. While open,
@@ -368,6 +496,11 @@ export function startDragBracket() {
     state.dragInFlight = false;
     state.dragCandidateId = null;
     dragSafetyTimer = null;
+    if (state.tileDeferred) {
+      updateWindowOrder();
+      state.tileReason = "bracket-safety-deferred";
+      tileWindows();
+    }
   }, 5000);
 }
 
@@ -385,7 +518,13 @@ export function endDragBracket() {
     state.dragInFlight = false;
     if (movedId == null) {
       // No bang fired between mouseDown and mouseUp+100ms → just a click,
-      // not a drag. Nothing to do.
+      // not a drag. Still run any tile pass that got skipped while the
+      // bracket was open (lifecycle events land mid-click constantly).
+      if (state.tileDeferred) {
+        updateWindowOrder();
+        state.tileReason = "bracket-deferred";
+        await tileWindows();
+      }
       return;
     }
     const tgt = state.lastTileTarget?.[movedId]?.frame;
@@ -395,7 +534,8 @@ export function endDragBracket() {
       const dH = Math.abs(liveFrame.h - tgt.h);
       if (dW > 20 || dH > 20) {
         log(`DRAG-CLOSE id=${movedId} resize dW=${Math.round(dW)} dH=${Math.round(dH)}`);
-        setWeightFromActualSize(movedId);
+        pinFromActualSize(movedId);
+        state.snapNextTile = true; // resize containment settles instantly
         await tileWindows();
         return;
       }
@@ -405,82 +545,71 @@ export function endDragBracket() {
   }, 100);
 }
 
-// User-drag resize. Whichever window's bang fired (the OS routes drag
-// gestures to whichever side is frontmost or owns the click pixel), we
-// detect WHICH EDGE moved by comparing the post-drag frame to the tile
-// target: if the leading edge moved, the LEFT neighbor absorbs; else
-// the RIGHT neighbor. Only those TWO windows' weights change. Others
-// stay put. This way "drag boundary between Finder and Arc" produces
-// the same visual outcome regardless of which side's bang the OS fired
-// (focused-Finder bang vs unfocused-Arc bang both shift the boundary).
-export function setWeightFromActualSize(movedId) {
+// User resize → edge-aware PAIRWISE transfer: pin BOTH sides of the
+// dragged edge. The resized window A keeps its actual major-axis size; the
+// neighbor across the dragged edge (B) gives/takes exactly the delta. A+B's
+// combined px nets to zero change, so the flex remainder — and every other
+// tile's share — stays exactly where it was. (The previous model pinned
+// only A and let ALL flex siblings absorb the delta proportionally.)
+//
+// Edge picking: if A's major-axis origin moved >5px off its tile target,
+// the LEADING edge was dragged → B is the previous non-collapsed tile in
+// display order; otherwise the TRAILING edge → next tile. A missing
+// neighbor (A at the row end) falls back to the other side; a solo tile
+// stays unpinned.
+export function pinFromActualSize(movedId) {
   const w = state.windowsById[movedId];
   if (!w || !w.frame) return;
   const d = displayForWindow(w);
   if (!d) return;
   const tiled = state.lastTiledByDisplay[d.displayID];
   if (!tiled || tiled.length === 0) return;
-  const ids = [];
-  for (const id of tiled) {
+  const onScreen = tiled.filter((id) => {
     const ww = state.windowsById[id];
-    if (!ww || !ww.frame) continue;
-    if (ww.frame.h <= cfg.collapsedWindowHeight) continue;
-    ids.push(+id);
-  }
-  const myIdx = ids.indexOf(+movedId);
-  if (myIdx < 0 || ids.length < 2) return;
+    return ww && ww.frame && ww.frame.h > cfg.collapsedWindowHeight;
+  });
+  if (onScreen.length < 2) return; // single tile: pin meaningless
+  const idx = onScreen.indexOf(+movedId);
+  if (idx < 0) return;
 
   const horizontal = d.frame.w > d.frame.h;
   const tgt = state.lastTileTarget?.[+movedId]?.frame;
   if (!tgt) return;
-
   const actualSize = horizontal ? w.frame.w : w.frame.h;
-  const tgtSize    = horizontal ? tgt.w     : tgt.h;
-  const sizeDelta  = actualSize - tgtSize;
-  if (Math.abs(sizeDelta) < 20) return;
+  // A's baseline: its pin when already pinned (the pin IS its target),
+  // else its last tile target.
+  const aBase = state.pinnedSizes[+movedId] ?? (horizontal ? tgt.w : tgt.h);
+  const delta = actualSize - aBase;
+  if (Math.abs(delta) < 20) return;
 
-  // Which edge moved? If the leading (left/top) edge changed position,
-  // the boundary to the LEFT of moved was dragged → left neighbor pairs.
-  // Else the trailing (right/bottom) edge changed → right neighbor pairs.
-  // The canonical pair-of-windows is the same regardless of WHICH side
-  // fired the bang (focused-Finder vs unfocused-Arc both shift the same
-  // boundary), so unfocused-edge drags converge to the same outcome.
-  const actualPos = horizontal ? w.frame.x : w.frame.y;
-  const tgtPos    = horizontal ? tgt.x     : tgt.y;
-  const leadingEdgeMoved = Math.abs(actualPos - tgtPos) > 10;
-  const direction = leadingEdgeMoved ? -1 : +1;
-  const neighborIdx = myIdx + direction;
-  // No-neighbor edge case: dragging the leftmost tile's left edge or
-  // the rightmost's right edge — nothing to give pixels to / take from.
-  // Return without mutating weights. The next tile pass setFrames moved
-  // back to its weight-implied target → window snaps back. Matches the
-  // Lua original; the user-asked behavior of "outer edge: snap back".
-  if (neighborIdx < 0 || neighborIdx >= ids.length) {
-    log(`USER-RESIZE id=${movedId} outer-edge no-neighbor (dir=${direction}) → snap-back`);
+  // Which edge moved? Origin drift on the major axis = leading-edge drag.
+  const originDrift = Math.abs(horizontal ? w.frame.x - tgt.x : w.frame.y - tgt.y);
+  const leading = originDrift > 5;
+  let bIdx = leading ? idx - 1 : idx + 1;
+  if (bIdx < 0 || bIdx >= onScreen.length) bIdx = leading ? idx + 1 : idx - 1;
+  const bId = onScreen[bIdx]; // exists: onScreen.length >= 2
+
+  state.pinnedSizes[+movedId] = Math.max(50, Math.floor(actualSize));
+
+  // B's baseline: its pin if pinned, else its last tile target, else live frame.
+  const bTgt = state.lastTileTarget?.[+bId]?.frame;
+  const bLive = state.windowsById[bId]?.frame;
+  const bBase = state.pinnedSizes[+bId]
+    ?? (bTgt ? (horizontal ? bTgt.w : bTgt.h) : null)
+    ?? (bLive ? (horizontal ? bLive.w : bLive.h) : null);
+  if (bBase == null) {
+    log(`PIN-PAIR id=${movedId} neighbor ${bId} has no target/frame — pinned A only`);
+    if (state.onLayoutChange) state.onLayoutChange();
     return;
   }
-  const neighborId = ids[neighborIdx];
-
-  // Pairwise pixel transfer: the moved window's new size IS the user's
-  // drag; the neighbor swallows the inverse delta. Compute their NEW
-  // weights to preserve the (moved+neighbor) weight sum so other tiles
-  // are untouched.
-  const totalAxis  = horizontal ? d.visibleFrame.w : d.visibleFrame.h;
-  const avail      = totalAxis - cfg.tileGap * (ids.length - 1);
-  const totalWeight = ids.reduce((s, id) => s + (state.windowWeights[id] ?? 1.0), 0);
-  const pxPerWeight = avail / totalWeight;
-  const movedW    = state.windowWeights[+movedId]  ?? 1.0;
-  const neighborW = state.windowWeights[neighborId] ?? 1.0;
-  const pairW     = movedW + neighborW;
-  const pairPx    = pairW * pxPerWeight;
-  const newMovedPx = Math.max(50, Math.min(pairPx - 50, actualSize));
-  const newNeighborPx = pairPx - newMovedPx;
-  const newMovedW    = pairW * (newMovedPx    / pairPx);
-  const newNeighborW = pairW * (newNeighborPx / pairPx);
-  state.windowWeights[+movedId]   = newMovedW;
-  state.windowWeights[+neighborId] = newNeighborW;
-
-  log(`USER-RESIZE id=${movedId} ${horizontal ? "→" : "↓"}${Math.round(sizeDelta)}px neighbor=${neighborId} (${direction > 0 ? "right" : "left"}) ${movedW.toFixed(2)}→${newMovedW.toFixed(2)} | ${neighborW.toFixed(2)}→${newNeighborW.toFixed(2)}`);
+  const bWant = Math.floor(bBase - delta);
+  if (bWant < 50) {
+    // Clamp; do NOT push the overflow to a third tile — accepted imperfection.
+    log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → 50px (overflow not redistributed)`);
+  }
+  state.pinnedSizes[+bId] = Math.max(50, bWant);
+  if (state.onLayoutChange) state.onLayoutChange();
+  log(`PIN-PAIR ${horizontal ? "w" : "h"} edge=${leading ? "leading" : "trailing"} A=${movedId}→${state.pinnedSizes[+movedId]}px B=${bId}→${state.pinnedSizes[+bId]}px delta=${Math.round(delta)}`);
 }
 
 async function reorderOnDrop(movedId) {

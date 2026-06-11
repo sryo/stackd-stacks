@@ -5,49 +5,87 @@
   <link rel="stylesheet" href="index.css">
 </head>
 <body>
-  <div id="hour" class="hour">00</div>
+  <div id="hour" class="hour"><span id="hourtext" class="text">00</span></div>
+  <div id="bar" class="bar"><div id="fill" class="fill"></div></div>
   <script type="module">
-    // TimeTrail — accurate port of TimeTrail.lua (sryo).
-    // Shows the current hour orbiting the cursor at radius 30, like a clock
-    // hand pointed at the current minute. Red when battery ≤ 30% & not
-    // charging. Fades out 2s after the cursor stops. Hidden on keyDown
-    // or while dragging.
+    // TimeTrail — port of TimeTrail.lua (sryo), aligned to ChronoMouse
+    // (the AppKit reference). Shows the current hour orbiting the cursor
+    // at radius 30, like a clock hand pointing at the current minute.
+    // Hold Option to swap the hour for the current minute. A small
+    // battery bar floats above the hour when battery is low and the
+    // text turns red. Fades out 2s after the cursor stops, hides on
+    // keyDown / drag. Shake the cursor (jiggle-style) and the hour
+    // scales up briefly so it's easy to spot.
+    //
+    // Glyph rasterizes natively at every size — shake animates font-size
+    // 18→45px, re-rasterizing per frame so both endpoints stay crisp.
+    // HOUR_HALF below (25 = ~half of 45px shake-peak box) is the
+    // boundary-clamp budget.
     import { sd } from "sd://runtime/api.js";
 
     const IS_24H            = true;
-    const FONT_SIZE         = 16;
     const RADIUS            = 30;
     const HIDE_DELAY_MS     = 2000;
     const LOW_BATTERY_PCT   = 30;
-    const CANVAS_W          = FONT_SIZE + 4;   // matches Lua's canvasWidth
-    const CANVAS_H          = FONT_SIZE + 2;
+    const CRITICAL_PCT      = 10;                 // turns bar red
     const EDGE_MARGIN       = 8;
+    const HOUR_HALF         = 25;                 // half-extent of the scale=1 (45px) visual box, for boundary clamp
+    const OPTION_BIT        = 0x80000;            // CGEventFlags.maskAlternate
+    // Shake-detection — adapted from jeffchannell/jiggle's history.js
+    // (500ms sliding window of points, fire when accumulated gamma >
+    // threshold AND max consecutive-segment distance > threshold). The
+    // distance threshold is much lower than jiggle's 300px default: on
+    // macOS, CGEventTap mouseMoved fires faster than jiggle's 10ms
+    // PointerWatcher tick, so per-segment distances are smaller. 60px
+    // separates shaking-the-cursor from typical scrubbing in measurement.
+    const SHAKE_WINDOW_MS   = 500;
+    const SHAKE_DEGREES_MIN = 600;
+    const SHAKE_DIST_MIN    = 60;
+    // Continued-shake hold: every mouseMoved that still tests positive
+    // resets this timer, so the glyph stays zoomed for as long as the
+    // user keeps shaking. Drops back to rest 700ms after the last
+    // positive detection. No separate rearm — continuous detection is
+    // idempotent (we just keep extending the same timer).
+    const SHAKE_HOLD_MS     = 700;
 
-    const el = document.getElementById("hour");
+    const el       = document.getElementById("hour");      // outer — translate + opacity
+    const hourtext = document.getElementById("hourtext");  // inner — textContent + color, owns the scale
+    const bar      = document.getElementById("bar");
+    const fill     = document.getElementById("fill");
 
-    let batteryLow = false;
-    let hideTimer = null;
+    let batteryLow  = false;
+    let batteryShow = false;
+    let cancelHide  = null;
+    let optionDown  = false;
+    let history     = [];
+    let cancelShakeReset = null;
 
-    function hourText() {
+    function displayText() {
       const d = new Date();
-      let h = IS_24H ? d.getHours() : (d.getHours() % 12);
-      if (!IS_24H && h === 0) h = 12;
-      return String(h).padStart(2, "0");
+      if (optionDown) return String(d.getMinutes()).padStart(2, "0");
+      if (IS_24H) return String(d.getHours()).padStart(2, "0");
+      const h = (d.getHours() % 12) || 12;
+      return String(h);                            // 12h: no zero-pad — ChronoMouse parity
     }
     function minuteAngleDeg() {
       const d = new Date();
       return (d.getMinutes() * 6) + (d.getSeconds() * 0.1);
     }
     function refreshText() {
-      el.textContent = hourText();
-      el.style.color = batteryLow ? "red" : "white";
+      hourtext.textContent = displayText();
+      hourtext.style.color = batteryLow ? "red" : "white";
     }
     refreshText();
-    setInterval(refreshText, 1000);
+    sd.timer.interval(refreshText, 1000);
 
     sd.battery.subscribe(b => {
       if (!b) return;
-      batteryLow = (b.percent <= LOW_BATTERY_PCT) && !b.charging;
+      const pct = Math.max(0, Math.min(100, b.percent));
+      batteryLow  = (pct <= LOW_BATTERY_PCT) && !b.charging;
+      batteryShow = batteryLow;
+      // BatteryBarView.swift three-color ramp: <10% red, 10–threshold yellow.
+      fill.style.width = pct + "%";
+      fill.style.backgroundColor = (pct < CRITICAL_PCT) ? "red" : "yellow";
       refreshText();
     });
 
@@ -57,6 +95,45 @@
     // translate global coords → panel-local before drawing.
     const myScreen = sd.screen.current;
     const SF = myScreen && myScreen.frame; // { x, y, w, h } in global coords
+
+    // Triangle gamma — copied verbatim from jiggle/math.js. Inner angle's
+    // complement (180°): straight-line triplets → 0°, sharp reversals → ~180°.
+    function gamma(st, nd, rd) {
+      const a = Math.hypot(st.x - nd.x, st.y - nd.y);
+      const b = Math.hypot(nd.x - rd.x, nd.y - rd.y);
+      const c = Math.hypot(rd.x - st.x, rd.y - st.y);
+      if (a * b === 0) return 0;
+      // Clamp to [-1, 1] — degenerate (near-collinear) triplets can
+      // float-round to slightly >1, producing NaN from acos otherwise.
+      const cosArg = Math.max(-1, Math.min(1, (a*a + b*b - c*c) / (2*a*b)));
+      return 180 - Math.acos(cosArg) * 180 / Math.PI;
+    }
+    function checkShake() {
+      const now = Date.now();
+      while (history.length && (now - history[0].t) > SHAKE_WINDOW_MS) history.shift();
+      if (history.length < 3) return false;
+      let degrees = 0;
+      let max = 0;
+      for (let i = 2; i < history.length; i++) {
+        degrees += gamma(history[i-2], history[i-1], history[i]);
+        const d1 = Math.hypot(history[i-1].x - history[i-2].x, history[i-1].y - history[i-2].y);
+        const d2 = Math.hypot(history[i].x   - history[i-1].x, history[i].y   - history[i-1].y);
+        if (d1 > max) max = d1;
+        if (d2 > max) max = d2;
+      }
+      return degrees > SHAKE_DEGREES_MIN && max > SHAKE_DIST_MIN;
+    }
+    function triggerShake() {
+      // Force visible — a shake fire during the fade-out window would
+      // otherwise scale-up a hidden element. Idempotent: called on
+      // every continued-shake mouseMoved to extend the hold timer.
+      el.style.opacity = "1";
+      el.classList.add("shaking");
+      if (cancelShakeReset) cancelShakeReset();
+      cancelShakeReset = sd.timer.timeout(() => {
+        el.classList.remove("shaking");
+      }, SHAKE_HOLD_MS);
+    }
 
     sd.mouse.subscribe(m => {
       if (!m) return;
@@ -68,33 +145,65 @@
       if (!SF) return;
       if (m.x < SF.x || m.x >= SF.x + SF.w || m.y < SF.y || m.y >= SF.y + SF.h) {
         el.style.opacity = "0";
-        clearTimeout(hideTimer);
+        bar.style.opacity = "0";
+        if (cancelHide) cancelHide();
         return;
       }
       const localX = m.x - SF.x;
       const localY = m.y - SF.y;
       const a = minuteAngleDeg() * Math.PI / 180;
-      // Lua does:  x = mx + R*sin(a) - 8 ;  y = my - R*cos(a) - 7
-      let x = localX + RADIUS * Math.sin(a) - 8;
-      let y = localY - RADIUS * Math.cos(a) - 7;
-      // Boundary clamp against this panel's bounds.
+      // Translate the outer .hour div TO the orbit point itself — the
+      // inner .text span's `transform: translate(-50%, -50%)` centers
+      // the glyph box on that point. Anchor stays put through scale
+      // changes because the box never reflows.
+      let x = localX + RADIUS * Math.sin(a);
+      let y = localY - RADIUS * Math.cos(a);
+      // Boundary clamp — keep the peak (scale=1, ~45px) visual box on
+      // screen by reserving HOUR_HALF padding around the orbit point.
       const W = SF.w, H = SF.h;
-      if (x < EDGE_MARGIN)                 x = EDGE_MARGIN;
-      if (x + CANVAS_W > W - EDGE_MARGIN)  x = W - EDGE_MARGIN - CANVAS_W;
-      if (y < EDGE_MARGIN)                 y = EDGE_MARGIN;
-      if (y + CANVAS_H > H - EDGE_MARGIN)  y = H - EDGE_MARGIN - CANVAS_H;
-      el.style.transform = `translate(${x}px, ${y}px)`;
-      el.style.opacity = "1";
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => { el.style.opacity = "0"; }, HIDE_DELAY_MS);
+      const M = EDGE_MARGIN + HOUR_HALF;
+      if (x < M)         x = M;
+      if (x > W - M)     x = W - M;
+      if (y < M)         y = M;
+      if (y > H - M)     y = H - M;
+      el.style.transform  = `translate(${x}px, ${y}px)`;
+      el.style.opacity    = "1";
+      // Bar (18×6) centered horizontally on the orbit point, sitting
+      // just above the rest-state hour visual (orbit point ± 9px).
+      bar.style.transform = `translate(${x - 9}px, ${y - 19}px)`;
+      bar.style.opacity   = batteryShow ? "1" : "0";
+      if (cancelHide) cancelHide();
+      cancelHide = sd.timer.timeout(() => {
+        el.style.opacity = "0";
+        bar.style.opacity = "0";
+      }, HIDE_DELAY_MS);
+
+      // Shake detector — push global coords (display-invariant; the
+      // time-window eviction inside checkShake handles display jumps).
+      history.push({ x: m.x, y: m.y, t: Date.now() });
+      if (history.length > 200) history.shift();   // safety cap on memory
+      if (checkShake()) triggerShake();
     });
 
     // keyDown + leftMouseDragged → hide immediately (no fade).
     function hideNow() {
       el.style.opacity = "0";
-      clearTimeout(hideTimer);
+      bar.style.opacity = "0";
+      if (cancelHide) cancelHide();
     }
-    window.onTap_hide = hideNow;
+    sd.events.on("hide", hideNow);
+
+    // Option-key toggle: hold ⌥ to display minutes instead of hours
+    // (ChronoMouse parity — AppDelegate.isOptionKeyDown). flagsChanged
+    // events arrive on every modifier press AND release; we filter to
+    // actual state transitions so refreshText only fires when the bit
+    // flips.
+    sd.events.on("flags", ev => {
+      const next = (ev && typeof ev.flags === "number" && (ev.flags & OPTION_BIT) !== 0);
+      if (next === optionDown) return;
+      optionDown = next;
+      refreshText();
+    });
   </script>
 </body>
 </html>

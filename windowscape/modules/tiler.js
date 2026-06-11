@@ -8,7 +8,7 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow } from "./core.js";
 import { tileWeighted } from "./layouts.js";
-import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
+import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
 export function getWindowWeight(winId) {
@@ -34,14 +34,6 @@ export function getWindowWeight(winId) {
   return 1.0;
 }
 
-export function setWindowWeight(winId, weight) {
-  if (!winId) return;
-  const clamped = Math.max(0.1, weight);
-  if (state.windowWeights[winId] === clamped) return;
-  state.windowWeights[winId] = clamped;
-  if (state.onLayoutChange) state.onLayoutChange();
-}
-
 export function getCollapsedWindows(winIds) {
   return winIds.filter((id) => {
     const w = state.windowsById[id];
@@ -54,12 +46,18 @@ export function pruneStaleWeights() {
   for (const k of Object.keys(state.windowWeights)) {
     if (!live.has(+k)) delete state.windowWeights[k];
   }
+  for (const k of Object.keys(state.pinnedSizes)) {
+    if (!live.has(+k)) delete state.pinnedSizes[k];
+  }
+  for (const k of Object.keys(state.offscreenSince)) {
+    if (!live.has(+k)) delete state.offscreenSince[k];
+  }
   for (let i = state.focusHistory.length - 1; i >= 0; i--) {
     if (!live.has(state.focusHistory[i])) state.focusHistory.splice(i, 1);
   }
 }
 
-async function tileWindowsInternal() {
+async function tileWindowsInternal(snap) {
   updateWindowOrder();
   for (const d of state.displays) {
     const space = activeSpaceOnDisplay(d.uuid);
@@ -81,7 +79,19 @@ async function tileWindowsInternal() {
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w || !w.frame) continue;
-      if (w.onscreen === false) continue;
+      // Debounced onscreen check. kCGWindowIsOnscreen flickers false when
+      // a window is momentarily OCCLUDED (e.g. a new sibling spawns on top
+      // of it) — an instant check dropped freshly-tiled windows for one
+      // pass and let the newcomer steal their slot. But ignoring the flag
+      // entirely kept HIDDEN (Cmd+H) windows in the rotation forever,
+      // reserving a phantom slot. 1.5s of persistent offscreen-ness
+      // separates the two: flicker recovers within a pass, hiding doesn't.
+      if (w.onscreen === false) {
+        if (state.offscreenSince[id] == null) state.offscreenSince[id] = Date.now();
+        if (Date.now() - state.offscreenSince[id] > 1500) continue;
+      } else {
+        delete state.offscreenSince[id];
+      }
       if (w.isMinimized === true) continue;
       if (w.addressable === false) continue;
       if (w.isStandard === false) continue;
@@ -122,10 +132,39 @@ async function tileWindowsInternal() {
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));
 
+    // Solo tile → drop its pin. A pin represents the user's preferred
+    // share when sharing space with siblings; alone, it's stale state
+    // that breaks the next 50/50 split when a second window opens.
+    // Without this, resizing window A while peers exist, then closing
+    // peers, then opening a new window B, leaves A at its pinned px and
+    // B with the leftover instead of an even split.
+    if (nonCollapsed.length === 1) {
+      delete state.pinnedSizes[nonCollapsed[0]];
+    }
+
     // Honor snapshot-strip reservation: tiles must not draw under the
     // bottom strip on displays that host snapshotted tiles.
     const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
     const horizontal = screenFrame.w > screenFrame.h;
+
+    // Pin sanity clamp. Pins restored from sd.settings (restore.js) or
+    // accumulated at runtime can oversubscribe the work area — e.g. junk
+    // pins saved while a broken tiler variant flung windows to wrong
+    // sizes (2026-06-10: persisted pins summed to 2664px on a 2560px
+    // row). Oversized pins force distributePinned's scale-down to hand
+    // flex tiles widths below app minimums (TextEdit refuses < ~116px),
+    // and sub-50px refusals are under the PASS-2 threshold — the overlap
+    // never self-corrects. A pin set can't legitimately exceed the major
+    // axis (every pin was captured from a real on-screen size), so drop
+    // ALL pins on this display and fall back to weighted flex; honest
+    // pins re-establish on the next user resize.
+    const majorAxis = horizontal ? screenFrame.w : screenFrame.h;
+    const pinIds = nonCollapsed.filter((id) => state.pinnedSizes[id] != null);
+    const pinSum = pinIds.reduce((s, id) => s + state.pinnedSizes[id], 0);
+    if (pinSum > majorAxis) {
+      log(`PIN-CLAMP display=${d.displayID} sum=${pinSum}px > workarea=${majorAxis}px — dropping pins ${JSON.stringify(pinIds.map(id => ({ id: +id, px: state.pinnedSizes[id] })))}`);
+      for (const id of pinIds) delete state.pinnedSizes[id];
+    }
 
     // Collapsed widgets get positioned at their current pixel size — the
     // tiler doesn't force a width (Sticky Notes refuses width writes;
@@ -135,14 +174,18 @@ async function tileWindowsInternal() {
       const f = state.windowsById[id]?.frame;
       return f ? { w: f.w, h: f.h } : null;
     };
-    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf);
-    log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
+    // Pinned tiles (state.pinnedSizes[id]) take their fixed px share; the
+    // rest distribute by weight. See layouts.distributePinned.
+    const pinnedSizeOf = (id) => state.pinnedSizes[id] ?? null;
+    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf);
+    log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
 
-    if (cfg.enableAnimations) {
+    if (cfg.enableAnimations && !snap) {
       for (const t of targets) {
         const cur = state.windowsById[t.winId]?.frame;
         animatedSetFrame(t.winId, cur, t.frame);
       }
+      schedulePostAnimationRefusalSweep(d.displayID, nonCollapsed, horizontal);
       continue;
     }
 
@@ -152,158 +195,183 @@ async function tileWindowsInternal() {
       return f && f.h <= cfg.collapsedWindowHeight;
     };
     // PASS-1: apply each target, observe what AX actually accepted.
+    // Live frames are read in PARALLEL up front (halves the per-pass
+    // round-trips vs the old serial read-then-apply loop).
     const actuals = Object.create(null);
+    const lives = Object.create(null);
+    await Promise.all(targets.map(async (t) => {
+      lives[+t.winId] = await sd.windows.frame(t.winId).catch(() => null);
+    }));
+    const pending = [];
     for (const t of targets) {
-      const live = await sd.windows.frame(t.winId).catch(() => null);
+      const live = lives[+t.winId];
       if (isCollapsed(+t.winId)) {
-        // Collapsed widget (Sticky Notes, etc.) — pin the rail Y only;
-        // app manages width and x. Y-drift > 3px = user dragged it out
-        // of the rail; setFrame back, preserving live x and width.
+        // Collapsed widget (Sticky Notes, etc.) — pin rail Y AND the
+        // justify-distributed X (layouts.tileWeighted spaces widgets
+        // evenly across the rail width; previously this branch only
+        // wrote Y, so the computed X was silently dropped and widgets
+        // stayed clumped wherever the app placed them). Width is still
+        // app-managed — Sticky Notes refuses width writes and forcing
+        // them creates an overlap loop.
         const yDrift = live ? Math.abs(live.y - t.frame.y) : 0;
-        if (!live || yDrift <= 3) {
+        const xDrift = live ? Math.abs(live.x - t.frame.x) : 0;
+        if (!live || (yDrift <= 3 && xDrift <= 3)) {
           actuals[+t.winId] = live || t.frame;
           state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
           continue;
         }
-        const correctedFrame = { x: live.x, y: t.frame.y, w: live.w, h: live.h };
+        const correctedFrame = { x: t.frame.x, y: t.frame.y, w: live.w, h: live.h };
         state.lastTileTarget[+t.winId] = { frame: { ...correctedFrame }, ts: now };
         const probed = await sd.windows.setFrameProbed(t.winId, correctedFrame).catch(() => null);
         actuals[+t.winId] = (probed && probed.actual) ? probed.actual : correctedFrame;
         continue;
       }
-      // Always record the target so drift-watch / echo-suppression see
+      // Always record the target so echo-suppression sees
       // the CURRENT tile's target, not a stale one from a previous pass.
       state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
       // Already at target within 5px (app rounding) — skip the setFrame
-      // call but the target record above is what makes drift go quiet.
+      // call but the target record above is what keeps echo-suppression current.
       if (live &&
           Math.abs(live.x - t.frame.x) <= 5 && Math.abs(live.y - t.frame.y) <= 5 &&
           Math.abs(live.w - t.frame.w) <= 5 && Math.abs(live.h - t.frame.h) <= 5) {
         actuals[+t.winId] = live;
         continue;
       }
+      pending.push(t);
+    }
+    // Serial AX setFrameProbed per window. A batched variant
+    // (sd.windows.batch + parallel read-back) was tried 2026-06-10 and
+    // REVERTED same day: windows landed at wrong positions / offscreen
+    // (5/6 harness scenarios regressed). The SLS-transaction position path
+    // needs a daemon-side coordinate audit before the tiler can use it.
+    for (const t of pending) {
       const probed = await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
       actuals[+t.winId] = (probed && probed.actual) ? probed.actual : t.frame;
     }
 
-    // PASS-2: refusal handling. Any non-collapsed window that ended up
-    // > 50px from its target is "refused" (app-imposed min/max). For
-    // each refused window:
-    //   1. Write weight = actualSize / pxPerWeight (using pre-pass
-    //      totalWeight as denominator) so the new weight reflects the
-    //      actually-honored pixel share.
-    //   2. Renormalize the siblings INVERSELY by the same delta so the
-    //      total weight stays constant.
-    //   3. Re-apply flexible windows once with new weights — refused
-    //      windows are already at their actual size, no re-setFrame.
+    // PASS-2: refusal handling. Any flex window that ended up more than
+    // REFUSAL_PX from its target is "refused" (app-imposed min/max).
+    // Under the pin model we treat refusal exactly like a user resize:
+    // write the actual size to state.pinnedSizes. The next layout pass
+    // will respect it; flex siblings absorb the freed space naturally
+    // via distributePinned.
+    //
+    // REFUSAL_PX must equal the settled-echo cutoff in events.js
+    // (dMajor <= 20): a deviation the echo filter won't swallow MUST be
+    // contained here as a refusal pin, or it leaks to the out-of-bracket
+    // resize path as a phantom user resize and ripples junk pins across
+    // the row. The old 50px threshold left a 20-50px dead zone — e.g.
+    // Terminal's min width refusing a 268px flex target by ~28px sat as
+    // a permanent overlap (under 50 → never pinned) AND fed the resize
+    // machinery (over 20 → not an echo). 2026-06-10 harness S6.
+    // The floor stays above grid-snap noise (Terminal rounds width to
+    // character cells, ≤ ~7px) and PASS-1's 5px skip tolerance.
+    const REFUSAL_PX = 20;
     const axis = horizontal ? "w" : "h";
     const refused = nonCollapsed.filter((id) => {
+      // Pinned windows can refuse their pin too (pairwise transfer can ask
+      // for less than the app's minimum — TextEdit won't go below ~115px).
+      // If we skip them here, the refusal leaks out as a resized bang and
+      // the out-of-bracket path re-pins the NEXT neighbor as if the user
+      // resized — a phantom ripple across the row. Correcting the pin to
+      // the actual size here keeps the refusal contained.
       const a = actuals[+id], t = targets.find(t => t.winId === id);
       if (!a || !t) return false;
       const dW = Math.abs(a.w - t.frame.w), dH = Math.abs(a.h - t.frame.h);
-      return horizontal ? dW > 50 : dH > 50;
+      return horizontal ? dW > REFUSAL_PX : dH > REFUSAL_PX;
     });
     if (refused.length === 0 || refused.length >= nonCollapsed.length) continue;
 
-    const totalAxis = horizontal ? screenFrame.w : screenFrame.h;
-    const avail = totalAxis - cfg.tileGap * Math.max(nonCollapsed.length - 1, 0);
-    const oldTotal = nonCollapsed.reduce((s, id) => s + (state.windowWeights[id] ?? 1), 0);
-    if (avail <= 0 || oldTotal <= 0) continue;
-    const pxPerWeight = avail / oldTotal;
-
-    // Step 1+2: sync refused, renormalize siblings.
-    let refusedDelta = 0;
     for (const id of refused) {
-      const newW = Math.max(0.2, actuals[+id][axis] / pxPerWeight);
-      const oldW = state.windowWeights[id] ?? 1;
-      refusedDelta += (newW - oldW);
-      state.windowWeights[id] = newW;
+      state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
+      // Update the recorded target to what the app actually accepted.
+      // Leaving the PASS-1 target in place made the out-of-bracket resize
+      // path compare the live frame against a target the app already
+      // refused — >20px apart forever — so it re-ran PIN-PAIR as if the
+      // USER had resized, squeezing the innocent neighbor (the
+      // "Terminals stuck at 240px after QA churn" report, 2026-06-10).
+      state.lastTileTarget[+id] = { frame: { ...actuals[+id] }, ts: now };
     }
-    const siblings = nonCollapsed.filter(id => !refused.includes(id));
-    const sibOldSum = siblings.reduce((s, id) => s + (state.windowWeights[id] ?? 1), 0);
-    const sibNewSum = sibOldSum - refusedDelta;
-    const sibFloor  = 0.2 * siblings.length;
-    if (sibOldSum > 0 && sibNewSum >= sibFloor) {
-      const scale = sibNewSum / sibOldSum;
-      for (const id of siblings) {
-        state.windowWeights[id] = Math.max(0.2, (state.windowWeights[id] ?? 1) * scale);
-      }
-    }
-    log(`PASS2-WEIGHTS-SYNC refused=${JSON.stringify(refused)} weights=${JSON.stringify(nonCollapsed.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))}`);
+    log(`PASS2-PIN-REFUSED refused=${JSON.stringify(refused.map(id => ({id, px: state.pinnedSizes[id]})))}`);
 
-    // Step 3: re-apply flexible windows with their new weights. Refused
-    // windows stay at their actual sizes; we thread them through the
-    // position cursor without re-setFrame-ing them.
-    const consumed = refused.reduce((s, id) => s + actuals[+id][axis], 0);
-    const flexAvail = totalAxis - consumed - cfg.tileGap * Math.max(nonCollapsed.length - 1, 0);
-    if (flexAvail <= 0) continue;
-    const newSibSum = siblings.reduce((s, id) => s + (state.windowWeights[id] ?? 1), 0);
-    if (newSibSum <= 0) continue;
-    const collapsedH = horizontal && collapsed.length > 0
-      ? (cfg.collapsedWindowHeight + cfg.tileGap) : 0;
-    let pos = horizontal ? screenFrame.x : screenFrame.y;
-    for (const id of nonCollapsed) {
-      const isRef = refused.includes(id);
-      const size = isRef
-        ? actuals[+id][axis]
-        : Math.floor(flexAvail * (state.windowWeights[id] ?? 1) / newSibSum);
-      if (!isRef) {
-        const frame = horizontal
-          ? { x: pos, y: screenFrame.y, w: size, h: screenFrame.h - collapsedH }
-          : { x: screenFrame.x, y: pos, w: screenFrame.w, h: size };
-        state.lastTileTarget[+id] = { frame: { ...frame }, ts: now };
-        await sd.windows.setFrameProbed(id, frame).catch(() => null);
+    // Re-flow with refused windows now pinned. Refused tiles are already at
+    // their actual size from the PASS-1 setFrame; only flex tiles need a
+    // second setFrame. distributePinned will compute the new flex shares.
+    const targets2 = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf);
+    const flexFixes = [];
+    for (const t of targets2) {
+      if (refused.includes(t.winId)) continue; // already at actual
+      if (collapsed.includes(t.winId)) continue; // collapsed branch handled in PASS-1
+      const cur = state.lastTileTarget[+t.winId]?.frame;
+      if (cur &&
+          Math.abs(cur.x - t.frame.x) <= 2 && Math.abs(cur.y - t.frame.y) <= 2 &&
+          Math.abs(cur.w - t.frame.w) <= 2 && Math.abs(cur.h - t.frame.h) <= 2) {
+        continue; // PASS-1 target unchanged → no setFrame needed
       }
-      pos += size + cfg.tileGap;
+      state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+      flexFixes.push(t);
+    }
+    for (const t of flexFixes) {
+      await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
     }
   }
 }
 
-// Drift watcher — independent of bangs. Every 500ms, scan all tiled
-// windows and compare CG actual to last tile target. Any window with a
-// size delta > 20px gets its weight updated and a tile pass fires. This
-// is the "live truth" backstop the user asked for: ANY resize (user,
-// app-initiated, programmatic) gets re-tiled without needing a focus
-// change or other trigger to wake the layout.
-let driftWatcherTimer = null;
-let driftPaused = false;
-async function driftWatch() {
-  if (driftPaused || state.dragInFlight) return;
-  if (state.fullscreenState?.active) return;
-  if (state.snapshotsState?.isCreating) return;
-  for (const d of state.displays) {
-    const tiled = state.lastTiledByDisplay[d.displayID] || [];
-    let drifted = null;
-    let maxDrift = 0;
-    for (const id of tiled) {
-      const live = await sd.windows.frame(id).catch(() => null);
-      if (!live) continue;
-      if (state.windowsById[id]) state.windowsById[id].frame = live;
-      const tgt = state.lastTileTarget?.[id]?.frame;
-      if (!tgt) continue;
-      const horizontal = d.frame.w > d.frame.h;
-      const dSize = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
-      if (dSize > maxDrift) { maxDrift = dSize; drifted = +id; }
-    }
-    if (drifted != null && maxDrift > 20) {
-      log(`DRIFT-WATCH id=${drifted} delta=${Math.round(maxDrift)} → re-weight + tile`);
-      // The window's actual size disagrees with its weight-implied size.
-      // Treat as a user resize — update its weight to match the live
-      // pixel share, scale the pair-neighbor inversely. THEN tile.
-      // Imported lazily to break the events.js ↔ tiler.js circular dep.
-      const { setWeightFromActualSize } = await import("./events.js");
-      setWeightFromActualSize(drifted);
-      state.tileReason = `drift(${drifted})`;
-      await tileWindows();
+// Post-animation refusal sweep — the animated branch's stand-in for PASS-2.
+// The animated branch can't observe refusals at apply time (frames land
+// asynchronously over cfg.animationDuration), and a silent refuser gives the
+// out-of-bracket resize path nothing to wake on: an app that accepts the
+// position but refuses the size (System Settings pinned at its ~845px min
+// width, 2026-06-10) emits only `moved` bangs, which events.js ignores
+// outside brackets — the overlap never self-corrected. So after the
+// animation window we do ONE live read per tile and pin anything still
+// >REFUSAL_PX off its current target, exactly like PASS-2, then re-tile
+// once so flex siblings absorb the containment.
+//
+// Single timer slot per display: rapid passes supersede the previous sweep
+// (each new pass re-animates and schedules its own). Sweeping against
+// state.lastTileTarget (not captured targets) keeps a late sweep correct
+// even if it fires after a newer pass updated the targets.
+const animSweepTimers = Object.create(null); // displayID -> timer
+function schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal) {
+  if (animSweepTimers[displayID]) clearTimeout(animSweepTimers[displayID]);
+  const delay = (cfg.animationDuration || 0.18) * 1000 + 150;
+  animSweepTimers[displayID] = setTimeout(async () => {
+    delete animSweepTimers[displayID];
+    // A drag or a newer pass owns the frames right now — that newer pass
+    // scheduled its own sweep.
+    if (state.dragInFlight || state.tilingCount > 0) return;
+    // Frames still in transit (final ticks land late under load): probing
+    // now would read mid-flight positions as refusals. Re-arm once more.
+    if (nonCollapsed.some((id) => isAnimating(id))) {
+      schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal);
       return;
     }
-  }
+    const REFUSAL_PX = 20; // keep equal to PASS-2 / the settled-echo cutoff
+    const refused = [];
+    for (const id of nonCollapsed) {
+      const tgt = state.lastTileTarget?.[+id]?.frame;
+      if (!tgt) continue;
+      const live = await sd.windows.frame(id).catch(() => null);
+      if (!live) continue;
+      const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
+      if (dMajor > REFUSAL_PX) refused.push([+id, live]);
+    }
+    if (refused.length === 0 || refused.length >= nonCollapsed.length) return;
+    const now = Date.now();
+    for (const [id, live] of refused) {
+      state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
+      // Same containment trick as PASS-2: record what the app actually
+      // accepted so the resize machinery sees a settled target, not a
+      // permanently-refused one.
+      state.lastTileTarget[id] = { frame: { ...live }, ts: now };
+    }
+    log(`ANIM-PASS2-PIN refused=${JSON.stringify(refused.map(([id]) => ({ id, px: state.pinnedSizes[id] })))}`);
+    state.tileReason = "anim-refusal";
+    state.snapNextTile = true; // containment pass — snap through PASS-1/PASS-2
+    await tileWindows();
+  }, delay);
 }
-export function startDriftWatcher() {
-  if (driftWatcherTimer) clearInterval(driftWatcherTimer);
-  driftWatcherTimer = setInterval(driftWatch, 500);
-}
-export function pauseDriftWatcher(paused) { driftPaused = !!paused; }
 
 let tilingTimer = null;
 export async function tileWindows() {
@@ -311,7 +379,12 @@ export async function tileWindows() {
   // so unrelated triggers (focusedChanged, sd.windows.all push, etc.)
   // don't yank the dragged window out from under the cursor.
   if (state.dragInFlight) {
-    log("skip tiling — drag in flight");
+    // Don't lose the pass: ANY click opens a bracket (global eventtap), so
+    // a created/destroyed event landing mid-click would otherwise skip its
+    // retile forever — handleWindowEvent already committed lastKnownIds, so
+    // no later diff re-fires it. endDragBracket runs the deferred pass.
+    state.tileDeferred = true;
+    log("skip tiling — drag in flight (deferred)");
     return;
   }
   if (state.fullscreenState && state.fullscreenState.active) {
@@ -322,10 +395,13 @@ export async function tileWindows() {
     log("skip tiling — snapshot in flight");
     return;
   }
+  state.tileDeferred = false;
+  const snap = state.snapNextTile === true;
+  state.snapNextTile = false;
   cancelAllAnimations();
   state.tilingCount = 1;
   try {
-    await tileWindowsInternal();
+    await tileWindowsInternal(snap);
   } catch (e) {
     const detail = JSON.stringify({
       message: e?.message,

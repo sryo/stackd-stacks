@@ -40,7 +40,7 @@ async function toggleFocusedWindowInList() {
   // isAppIncluded against the freshly-mutated state.listedApps rather than
   // inverting the local `listed` variable — the inverse depends on
   // cfg.exclusionMode and isAppIncluded already encapsulates that.
-  sd.bang('overlay-border.inclusion', {
+  sd.bang.declare('overlay-border.inclusion').emit({
     winId: f.id,
     included: isAppIncluded(state.windowsById[f.id] || f)
   });
@@ -56,26 +56,29 @@ function toggleDebug() {
   console.log("[WindowScape] debug:", cfg.debugLogging ? "ON" : "OFF");
 }
 
-// Bind all verbs as window.onHotkey_<name>(). The hotkey bridge looks these up.
+// Bind all verbs through sd.hotkey.on. The daemon dispatches via the same
+// onHotkey_<name> slot the per-kind sugar installs into, so manifest hotkey
+// callbacks resolve identically — but we avoid global mutation and gain
+// disposers (unused here; stack-lifetime cleanup is automatic via reload).
 export function bind() {
-  window.onHotkey_toggleExcluded   = toggleFocusedWindowInList;
-  window.onHotkey_movePrev         = () => moveWindowInOrder("backward");
-  window.onHotkey_moveNext         = () => moveWindowInOrder("forward");
-  window.onHotkey_moveScreenPrev   = () => moveWindowToAdjacentScreen("previous");
-  window.onHotkey_moveScreenNext   = () => moveWindowToAdjacentScreen("next");
-  window.onHotkey_resetWeights     = resetAllWeights;
-  window.onHotkey_grow             = grow;
-  window.onHotkey_shrink           = shrink;
-  window.onHotkey_cycleWidth       = cycleWidth;
-  window.onHotkey_toggleFullscreen = toggleSimulatedFullscreen;
-  window.onHotkey_forceRetile      = forceRetile;
-  window.onHotkey_toggleDebug      = toggleDebug;
-  window.onHotkey_focusNext        = () => focusAdjacentWindow("forward");
-  window.onHotkey_focusPrev        = () => focusAdjacentWindow("backward");
-  window.onHotkey_minimize         = minimizeFocused;
+  sd.hotkey.on("toggleExcluded",   toggleFocusedWindowInList);
+  sd.hotkey.on("movePrev",         () => moveWindowInOrder("backward"));
+  sd.hotkey.on("moveNext",         () => moveWindowInOrder("forward"));
+  sd.hotkey.on("moveScreenPrev",   () => moveWindowToAdjacentScreen("previous"));
+  sd.hotkey.on("moveScreenNext",   () => moveWindowToAdjacentScreen("next"));
+  sd.hotkey.on("resetWeights",     resetAllWeights);
+  sd.hotkey.on("grow",             grow);
+  sd.hotkey.on("shrink",           shrink);
+  sd.hotkey.on("cycleWidth",       cycleWidth);
+  sd.hotkey.on("toggleFullscreen", toggleSimulatedFullscreen);
+  sd.hotkey.on("forceRetile",      forceRetile);
+  sd.hotkey.on("toggleDebug",      toggleDebug);
+  sd.hotkey.on("focusNext",        () => focusAdjacentWindow("forward"));
+  sd.hotkey.on("focusPrev",        () => focusAdjacentWindow("backward"));
+  sd.hotkey.on("minimize",         minimizeFocused);
   // Snapshot bulk verbs — port of snapshots.lua's context-menu Restore All /
   // Close All / Clear All. Each operates on every tile in the strip.
-  window.onHotkey_snapshotsRestoreAll = snapshotsRestoreAll;
-  window.onHotkey_snapshotsCloseAll   = snapshotsCloseAll;
-  window.onHotkey_snapshotsClearAll   = snapshotsClearAll;
+  sd.hotkey.on("snapshotsRestoreAll", snapshotsRestoreAll);
+  sd.hotkey.on("snapshotsCloseAll",   snapshotsCloseAll);
+  sd.hotkey.on("snapshotsClearAll",   snapshotsClearAll);
 }

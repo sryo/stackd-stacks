@@ -26,8 +26,11 @@
          - region:"fullscreen" + display:"primary" → the WebView covers the
            primary display. Strips for other displays will render off-screen
            (documented primitive gap in modules/snapshots.js).
-         - clickThrough:true → DOM events don't reach this WebView; left-
-           click + mouse-move are routed via eventtap callbacks in main.js. -->
+         - clickThrough:true at the window level. snapshots.js flips it to
+           false dynamically (sd.mouse-driven, per-tile rects) so DOM
+           mousedown on tiles fires while empty screen still passes through
+           to the app behind. snapshotsLeftClick eventtap is still used for
+           drag-bracket bookkeeping (independent of WebView geometry). -->
   <script type="module" src="./modules/main.js"></script>
 </body>
 </html>

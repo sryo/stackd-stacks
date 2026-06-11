@@ -1,5 +1,5 @@
 :root {
-  --bar-bg: rgb(13, 13, 15);
+  --bar-bg: #000;
   --bar-fg: rgba(235, 235, 235, 0.92);
   --bar-font-size: 13px;
   --bar-edge-pad: 12px;
@@ -9,8 +9,7 @@
 }
 
 html, body {
-  margin: 0; padding: 0; height: 100%;
-  background: transparent;
+  height: 100%;
   color: var(--bar-fg);
   font: var(--bar-font-size) -apple-system, system-ui;
   -webkit-font-smoothing: antialiased;
@@ -55,6 +54,14 @@ html, body {
    except the last in each zone. flex `gap` would do this for us but breaks
    on the empty-item-hidden case in fullscreen-peek. */
 .item + .item { margin-left: var(--bar-item-gap); }
+
+/* Now-playing pills (active rich pill + per-app secondaries) sit snug
+   together to read as one cluster. The 6px gap is just enough to keep
+   the labels from touching while staying clearly distinct from the
+   default 14px gap that separates them from unrelated bar items. */
+.item[data-item-id^="nowplaying:"] + .item[data-item-id^="nowplaying:"] {
+  margin-left: 6px;
+}
 
 .item.bold { font-weight: 600; letter-spacing: -0.01em; }
 

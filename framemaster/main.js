@@ -66,23 +66,47 @@ let displays = [];
 let lastKilledBundleId = null;
 let lastKilledAppName = null;
 
-sd.display.all.subscribe(list => { displays = list || []; });
+// Push the 4-per-display corner band rects to the daemon so the consuming
+// leftMouseDown tap only swallows clicks inside a hot corner — anything
+// outside passes through to the focused app normally. Re-pushed on every
+// display change so dock moves / resolution changes don't leave stale gates.
+function computeCornerRects() {
+  const out = [];
+  const b = CORNER_BAND;
+  for (const d of displays) {
+    const f = d.frame; if (!f) continue;
+    out.push({ x: f.x,             y: f.y,             w: b, h: b });   // top-left
+    out.push({ x: f.x + f.w - b,   y: f.y,             w: b, h: b });   // top-right
+    out.push({ x: f.x,             y: f.y + f.h - b,   w: b, h: b });   // bottom-left
+    out.push({ x: f.x + f.w - b,   y: f.y + f.h - b,   w: b, h: b });   // bottom-right
+  }
+  return out;
+}
+
+sd.display.all.subscribe(list => {
+  displays = list || [];
+  const rects = computeCornerRects();
+  // Both the leftMouseDown consume tap (click→action) and the mouseMoved
+  // observer tap (hover→enter/leave) gate on the same corner-band rects.
+  // The mouseMoved tap is opted into emitLeave so it fires {phase:"enter"}
+  // when the cursor crosses INTO a corner and {phase:"leave"} on the way
+  // out — replaces the sd.mouse 30Hz poll the previous revision used to
+  // maintain per-corner enter/leave state in JS.
+  sd.events.setTapRects("click", rects);
+  sd.events.setTapRects("hover", rects);
+});
 
 function shiftHeld() { return (lastFlags & FLAGS.shift) !== 0; }
 
 function displayForPoint(x, y) {
-  for (const d of displays) {
-    const f = d.frame;
-    if (!f) continue;
-    if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return d;
-  }
-  return displays[0] || null;
+  return sd.display.forPoint(x, y) || displays[0] || null;
 }
 
-// JS-side replacement for the removed daemon hot-corners primitive (R1d).
-// Iterate every connected display each tick — the active corner is "any
-// corner of any screen" so multi-monitor setups behave the way users expect.
-// State is latched per-corner so callbacks only fire on the rising edge.
+// JS-side classifier — given a point already known to be inside SOME corner
+// rect (the daemon's rect gate did the "in/out" test), tell us WHICH corner.
+// Returns null if the point isn't inside any corner band on any display,
+// which can happen during the leave-phase event (point is now outside) and
+// for transient race cases when displays change mid-event.
 function cornerForPoint(x, y) {
   for (const d of displays) {
     const f = d.frame; if (!f) continue;
@@ -97,11 +121,6 @@ function cornerForPoint(x, y) {
   }
   return null;
 }
-
-const cornerState = {
-  "top-left": false, "top-right": false,
-  "bottom-left": false, "bottom-right": false,
-};
 
 // FrameMaster.lua's hasActionableWindow gates on subrole — only AXStandardWindow
 // and AXDialog get to be acted on. Curated reader sd.windows.subrole(id) saves
@@ -207,9 +226,10 @@ function showTip(corner, x, y, customText) {
   placeTip(corner, x, y);
   tip.textContent = truncate(text);
   tip.classList.add("show");
-  // No auto-hide timer — the cursor-leave handler in fcEnter calls hideTip
-  // when the cursor exits the corner band. Auto-hiding mid-hover would
-  // make the tooltip flicker out while the user is still on the corner.
+  // No auto-hide timer — the cursor-leave handler in the `hover` eventtap
+  // callback (phase === "leave") calls hideTip when the cursor exits the
+  // corner band. Auto-hiding mid-hover would make the tooltip flicker out
+  // while the user is still on the corner.
   if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
 }
 
@@ -327,34 +347,37 @@ const actions = {
 };
 
 // ---------------------------------------------------------------------------
-// Corner latch. Same shape the migrated framecorners stack used post-R1d.
-
-function fcEnter(e) {
-  if (e.state === "enter") {
-    armed = e.corner;
+// Corner latch — daemon-driven hover state.
+//
+// `phase` rides on the payload thanks to the `emitLeave: true` opt-in on the
+// `hover` eventtap entry. `enter` fires the first time mouseMoved crosses
+// INTO any corner rect; `leave` fires once when mouseMoved exits (point is
+// now outside all rects, but the previous event was inside — the daemon
+// synthesizes the fire at the boundary so JS hears about it). `move` fires
+// for subsequent in-rect events; we ignore it here because the tooltip
+// placement is set on enter and tracks the armed corner via lastFlags
+// re-renders.
+//
+// CORNER_BAND-thin rects mean enter/leave fires at the rising/falling edge
+// of a 4px band — same shape sd.mouse polling produced, minus the 30Hz
+// idle wake-up. Multi-monitor: each display contributes 4 corner rects, so
+// crossing from one display's bottom-right to another's top-left fires
+// leave-then-enter naturally.
+sd.events.on("hover", (e) => {
+  if (!e) return;
+  if (e.phase === "enter") {
+    const corner = cornerForPoint(e.x, e.y);
+    if (!corner) return;   // race: displays changed between rect push and event
+    armed = corner;
     armedPoint = { x: e.x, y: e.y };
-    // The Spoon shows the tooltip immediately on enter; no dwell. Keep that.
-    showTip(e.corner, e.x, e.y);
-  } else {
-    if (armed === e.corner) {
-      armed = null;
-      armedPoint = null;
-    }
+    showTip(corner, e.x, e.y);
+  } else if (e.phase === "leave") {
+    armed = null;
+    armedPoint = null;
     hideTip();
   }
-}
-
-sd.mouse.subscribe((m) => {
-  if (!m) return;  // signal fires null first; wait for real coords
-  const { x, y } = m;
-  const here = cornerForPoint(x, y);
-  for (const c of Object.keys(cornerState)) {
-    const inside = (here === c);
-    if (inside !== cornerState[c]) {
-      cornerState[c] = inside;
-      fcEnter({ corner: c, state: inside ? "enter" : "leave", x, y });
-    }
-  }
+  // phase === "move": no-op. The tooltip is already placed at the enter
+  // point; flagsChanged re-renders the text when shift is held.
 });
 
 // ---------------------------------------------------------------------------
@@ -362,7 +385,7 @@ sd.mouse.subscribe((m) => {
 // tooltip text live (matches FrameMaster.lua's `cornerHover` flagsChanged
 // branch). leftMouseDown fires the action of the armed corner.
 
-window.onTap_click = async () => {
+sd.events.on("click", async () => {
   if (!armed) return;
   const win = sd.windows.focused.peek();
   const app = sd.app.frontmost.peek();
@@ -376,9 +399,9 @@ window.onTap_click = async () => {
   let result;
   try { result = await fn(win, app); } catch (e) { result = ""; }
   if (result && where) showTip(corner, where.x, where.y, result);
-};
+});
 
-window.onTap_flags = (e) => {
+sd.events.on("flags", (e) => {
   lastFlags = e.flags;
   if (armed && armedPoint) showTip(armed, armedPoint.x, armedPoint.y);
-};
+});

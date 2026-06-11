@@ -7,7 +7,7 @@ import { cfg } from "./config.js";
 import {
   state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log, warn
 } from "./core.js";
-import { tileWindows, getWindowWeight, setWindowWeight } from "./tiler.js";
+import { tileWindows } from "./tiler.js";
 import { captureAndMinimize } from "./snapshots.js";
 
 function focusedWinId() {
@@ -20,29 +20,49 @@ function focusedWin() {
   return id ? state.windowsById[id] : null;
 }
 
-// Adjust focused-window weight by delta. Clamps to widthMin/widthMax.
-function adjustFocusedWidth(delta) {
+// Adjust focused tile's pin by ±deltaPx along its display's major axis.
+// If the tile isn't pinned yet, the new pin is computed from its current
+// live size + delta. grow/shrink always end with the tile pinned — the
+// principle is "user touched this tile's size, lock it." cycleWidth
+// removes the pin and resets to flex.
+const GROW_STEP_PX = 100;
+const PIN_MIN_PX   = 100;
+export function adjustFocusedPin(deltaPx) {
   const w = focusedWin();
-  if (!w) return;
-  const current = getWindowWeight(w.id);
-  const target = Math.max(cfg.widthMin, Math.min(cfg.widthMax, current + delta));
-  setWindowWeight(w.id, target);
+  if (!w || !w.frame) return;
+  const d = w && state.displays.find((s) => {
+    const f = s.frame;
+    const cx = w.frame.x + w.frame.w / 2, cy = w.frame.y + w.frame.h / 2;
+    return cx >= f.x && cx < f.x + f.w && cy >= f.y && cy < f.y + f.h;
+  });
+  const horizontal = d ? d.frame.w > d.frame.h : true;
+  const baseSize = state.pinnedSizes[w.id] ?? (horizontal ? w.frame.w : w.frame.h);
+  const newSize = Math.max(PIN_MIN_PX, Math.floor(baseSize + deltaPx));
+  state.pinnedSizes[w.id] = newSize;
+  if (state.onLayoutChange) state.onLayoutChange();
   tileWindows();
-  log(`width ${delta >= 0 ? "grew" : "shrank"} to ${target.toFixed(2)}`);
+  log(`pin ${deltaPx >= 0 ? "grew" : "shrank"} to ${newSize}px (${horizontal ? "w" : "h"})`);
 }
 
-export function grow()   { adjustFocusedWidth(cfg.widthStep); }
-export function shrink() { adjustFocusedWidth(-cfg.widthStep); }
+export function grow()   { adjustFocusedPin(GROW_STEP_PX); }
+export function shrink() { adjustFocusedPin(-GROW_STEP_PX); }
 
+// Clear the focused tile's pin AND weight — it rejoins the flex pool with
+// the default weight. "Cycle" name preserved from the Lua original; the
+// effect now is "reset this tile to default flex behavior."
 export function cycleWidth() {
   const w = focusedWin();
   if (!w) return;
-  setWindowWeight(w.id, cfg.widthDefault);
+  delete state.pinnedSizes[w.id];
+  delete state.windowWeights[w.id];
+  if (state.onLayoutChange) state.onLayoutChange();
   tileWindows();
 }
 
 export function resetAllWeights() {
   state.windowWeights = Object.create(null);
+  state.pinnedSizes = Object.create(null);
+  if (state.onLayoutChange) state.onLayoutChange();
   tileWindows();
 }
 
@@ -111,9 +131,18 @@ export function moveWindowInOrder(direction) {
   const horizontal = d.frame.w > d.frame.h;
 
   // Filter to non-collapsed windows on this display, sorted by position.
+  // Scoped to the tiler's last-tiled set (same tiledSet pattern as the
+  // mouse-drag reorder in events.js): the raw order can carry windows the
+  // tiler currently skips — hidden/offscreen entries with stale frames.
+  // Without this, a reorder step can swap the focused window with an
+  // INVISIBLE neighbor: the list changes, the screen doesn't, and the
+  // gesture/hotkey feels dead.
+  const tiled = state.lastTiledByDisplay[d.displayID];
+  const tiledSet = tiled && tiled.length ? new Set(tiled.map((id) => +id)) : null;
   const sorted = order
     .map((id) => state.windowsById[id])
     .filter((win) => win && win.frame && win.frame.h > cfg.collapsedWindowHeight)
+    .filter((win) => !tiledSet || tiledSet.has(+win.id))
     .filter((win) => {
       const wd = displayForWindow(win);
       return wd && wd.displayID === d.displayID;
@@ -130,7 +159,9 @@ export function moveWindowInOrder(direction) {
   [sorted[idx], sorted[target]] = [sorted[target], sorted[idx]];
 
   // Splice the new sorted order back into the full per-space order list,
-  // keeping off-display + collapsed entries in place. Same as operations.lua.
+  // keeping off-display + collapsed + non-tiled entries in place. Same as
+  // operations.lua. Slot conditions MUST mirror the `sorted` filters above,
+  // or sIdx runs past the end of sorted.
   const newOrder = [];
   let sIdx = 0;
   for (const id of order) {
@@ -139,7 +170,8 @@ export function moveWindowInOrder(direction) {
     const wd = displayForWindow(win);
     const onDisp = wd && wd.displayID === d.displayID;
     const nonCollapsed = win.frame && win.frame.h > cfg.collapsedWindowHeight;
-    if (onDisp && nonCollapsed) {
+    const inTiledSet = !tiledSet || tiledSet.has(+id);
+    if (onDisp && nonCollapsed && inTiledSet) {
       newOrder.push(sorted[sIdx++].id);
     } else {
       newOrder.push(id);

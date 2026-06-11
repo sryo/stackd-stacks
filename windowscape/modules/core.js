@@ -7,7 +7,20 @@ import { cfg } from "./config.js";
 
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
-  windowWeights:      Object.create(null), // winId -> weight
+  windowWeights:      Object.create(null), // winId -> weight (flex tiles only)
+  // winId -> pixel size on the major axis. Presence = "this tile is pinned at
+  // this exact size; do NOT include it in the weight-based redistribution."
+  // Written by user-resize pairwise transfer (events.js pinFromActualSize —
+  // pins both sides of the dragged edge), AX refusal (tiler.js PASS-2), and
+  // grow/shrink/cycleWidth verbs. Cleared by cycleWidth (focused only) and
+  // resetWeights (all). hy3:base mechanic.
+  pinnedSizes:        Object.create(null),
+  // A tile pass was skipped while a drag bracket was open; endDragBracket
+  // (or its safety timeout) runs the deferred pass when the bracket closes.
+  tileDeferred:       false,
+  // winId -> ts of first consecutive onscreen=false observation (tiler's
+  // debounced eviction of hidden windows vs occlusion flicker).
+  offscreenSince:     Object.create(null),
   focusHistory:       [],
   focusHistoryMax:    10,
   listedApps:         Object.create(null), // bundleId/name -> true
@@ -62,6 +75,14 @@ export const state = {
   // this with the latest id so the trailing bang wins; the bracket's close
   // handler reads it to decide resize-redistribute vs reorder.
   dragCandidateId:    null,
+  // One-shot animation suppression for the NEXT tileWindows() call. The
+  // resize-containment paths (out-of-bracket pin, bracket-close pin, the
+  // post-animation refusal sweep) set this so their corrective pass SNAPS
+  // through the full PASS-1/PASS-2 machinery instead of animating —
+  // a resized window should settle instantly, and the snap path's probed
+  // actuals are what keep pairwise locality honest. Lifecycle retiles
+  // (open/close/minimize/spaces) leave it false and animate.
+  snapNextTile:       false,
   tilingCount:        0,
   onLayoutChange:     null,
   // Simulated-fullscreen state — see modules/fullscreen.js.
@@ -75,6 +96,7 @@ export const state = {
     savedFrames:   Object.create(null), // winId -> pre-enter frame snapshot
     savedOrder:    null,             // [winId, ...] for the affected space
     savedWeights:  null,             // { winId: weight } snapshot
+    savedPinnedSizes: null,          // { winId: px } snapshot
     spaceId:       null              // space the fullscreen owns
   },
   // Snapshot subsystem state — see modules/snapshots.js.

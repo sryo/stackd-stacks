@@ -6,28 +6,32 @@
   <title>Muse</title>
 </head>
 <body>
-  <div id="muse" data-open="0">
-    <div class="input-band">
-      <div class="input" id="input" contenteditable="false" spellcheck="false"></div>
-      <div class="chips">
-        <div class="chip-text" id="chip-text" title="text context">T</div>
-        <div class="chip-stack" id="chip-stack" data-count="0">
-          <span class="more" id="chip-more"></span>
-          <img class="s0" id="chip-s0"><img class="s1" id="chip-s1"><img class="s2" id="chip-s2">
-        </div>
+  <!-- Body IS the panel. Daemon owns the 320x320 size, glass material, and
+       12px border-radius via the manifest. Visibility is controlled by the
+       invocable lifecycle (sd.window.invoke / dismiss), not CSS. -->
+  <div class="input-band">
+    <div class="input-wrap">
+      <div class="input-placeholder" id="input-placeholder"></div>
+      <div class="input" id="input" contenteditable="true" spellcheck="false"></div>
+    </div>
+    <div class="chips">
+      <div class="chip-text" id="chip-text" title="text context">T</div>
+      <div class="chip-stack" id="chip-stack" data-count="0">
+        <span class="more" id="chip-more"></span>
+        <img class="s0" id="chip-s0"><img class="s1" id="chip-s1"><img class="s2" id="chip-s2">
       </div>
     </div>
-    <div class="middle">
-      <div class="hints" id="hints">
-        <div class="row"><span class="key">⌘⇧S</span> attach</div>
-        <div class="row"><span class="key">⌘⇧V</span> paste</div>
-        <div class="row"><span class="key">⌘⌫</span> clear</div>
-      </div>
-      <div class="matrix" id="matrix"></div>
-      <div class="spacer"></div>
-    </div>
-    <div class="output" id="output"></div>
   </div>
+  <div class="middle">
+    <div class="hints" id="hints">
+      <div class="row"><span class="key">⌘⇧S</span> attach</div>
+      <div class="row"><span class="key">⌘⇧V</span> paste</div>
+      <div class="row"><span class="key">⌘⌫</span> clear</div>
+    </div>
+    <div class="matrix" id="matrix"></div>
+    <div class="spacer"></div>
+  </div>
+  <div class="output" id="output"></div>
 
   <script type="module">
     import { sd }       from "sd://runtime/api.js";
@@ -50,8 +54,8 @@
     const RIGHT_CMD_KEYCODE      = 54;
     const CGEVENT_CMD_FLAG       = 0x100000;
 
-    const $muse    = document.getElementById("muse");
     const $input   = document.getElementById("input");
+    const $inputPlaceholder = document.getElementById("input-placeholder");
     const $output  = document.getElementById("output");
     const $chipText  = document.getElementById("chip-text");
     const $chipStack = document.getElementById("chip-stack");
@@ -203,14 +207,44 @@
       return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
     }
 
+    // Mirrors HS fitText() (init.lua:947–965): shrink font size by 1px until
+    // the rendered content fits inside the element's clientHeight, bottoming
+    // out at `minSize`. Uses scrollHeight (the natural content height) as the
+    // measurement — same role wrapLines() plays in lua. Caller restores
+    // fontSize before measuring so we don't accumulate shrinks across renders.
+    function fitText(el, maxSize, minSize) {
+      el.style.fontSize = maxSize + "px";
+      // clientHeight may be 0 if the element is not yet laid out (e.g. window
+      // not visible); bail with the max size in that case.
+      const region = el.clientHeight;
+      if (region <= 0) return;
+      let size = maxSize;
+      while (size > minSize && el.scrollHeight > region) {
+        size -= 1;
+        el.style.fontSize = size + "px";
+      }
+    }
+
     function renderInput() {
       if (state.buffer === "") {
-        $input.innerHTML = placeholderHTML();
-        $input.classList.add("placeholder");
+        // Native contenteditable: keep $input empty so the browser shows a
+        // caret at offset 0, render the placeholder hint in a sibling overlay
+        // that's pointer-events:none so clicks fall through to $input.
+        if ($input.textContent !== "") $input.textContent = "";
+        $inputPlaceholder.innerHTML = placeholderHTML();
+        $inputPlaceholder.dataset.on = "1";
       } else {
-        $input.textContent = state.buffer;
-        $input.classList.remove("placeholder");
+        // Only write textContent when it actually differs — writing it on
+        // every keystroke would collapse the browser's selection back to
+        // offset 0 mid-typing.
+        if ($input.textContent !== state.buffer) {
+          $input.textContent = state.buffer;
+          setSelectionOffset($input, state.caret);
+        }
+        $inputPlaceholder.dataset.on = "0";
+        $inputPlaceholder.innerHTML = "";
       }
+      fitText($input, 18, 11);
 
       const n = state.attachments.length;
       $chipStack.dataset.count = String(Math.min(n, 9));
@@ -247,11 +281,14 @@
       }
       $output.classList.remove("error");
       $output.textContent = content || "";
+      // HS fitText for output uses min 12px; max matches the CSS base.
+      fitText($output, 18, 12);
     }
 
     function renderError(message) {
       $output.classList.add("error");
       $output.textContent = message || "";
+      fitText($output, 18, 12);
     }
 
     function countChars(s) {
@@ -265,7 +302,10 @@
 
     async function anchorPoint() {
       try {
-        const elH = await sd.ax.focusedElement();
+        // System-wide focus (HS-faithful) — covers cross-app cases like the
+        // menu bar and system dialogs. Falls through to nil if AX is denied
+        // or no element is focused.
+        const elH = await sd.ax.focusedElementSystemWide();
         if (typeof elH === "number") {
           let placed = null;
           try {
@@ -297,19 +337,47 @@
           && (r.w || 0) > 0 && (r.h || 0) > 0;
     }
 
-    function placePanel(anchor) {
-      const sf = sd.screen.current && sd.screen.current.frame;
-      if (!sf) return;
+    async function placePanel(anchor) {
+      // Anchor → leadX/trailX/bottom triple. No anchor → fall back to mouse
+      // (HS init.lua:441-443). Last-resort fallback is the window's home
+      // screen via sd.screen.current, so we never end up with no frame.
       let leadX, trailX, bottom;
       if (anchor) {
         leadX = anchor.x;
         trailX = anchor.x + anchor.w;
         bottom = anchor.y + anchor.h;
       } else {
-        leadX = sf.x + sf.w / 2 - PANEL / 2;
-        trailX = leadX + PANEL;
-        bottom = sf.y + sf.h / 2 - PANEL / 2;
+        const m = sd.mouse.peek();
+        if (m) {
+          leadX = m.x;
+          trailX = m.x;
+          bottom = m.y;
+        }
       }
+
+      // Pick the screen the ANCHOR lives on — NOT sd.screen.current (which
+      // is the panel's home screen, fixed at construction to the manifest's
+      // anchor display = primary). On multi-display this was the bug: clamp
+      // math forced muse back to the primary even when the user was typing
+      // on an external. Mirrors HS init.lua:446-452.
+      let scr = (leadX != null && bottom != null) ? sd.display.forPoint(leadX, bottom) : null;
+      if (!scr) {
+        const m = sd.mouse.peek();
+        if (m) {
+          scr = sd.display.forPoint(m.x, m.y);
+          if (!scr) {
+            const all = sd.display.all.peek() || [];
+            scr = all[0] || null;
+          }
+          if (leadX == null) { leadX = m.x; trailX = m.x; bottom = m.y; }
+        } else {
+          const all = sd.display.all.peek() || [];
+          scr = all[0] || null;
+        }
+      }
+      const sf = scr && scr.frame;
+      if (!sf) return;
+      if (leadX == null) { leadX = sf.x + sf.w / 2 - PANEL / 2; trailX = leadX + PANEL; bottom = sf.y + sf.h / 2 - PANEL / 2; }
 
       let x = leadX;
       if (x + PANEL > sf.x + sf.w - SCREEN_MARGIN) x = trailX - PANEL;
@@ -320,12 +388,9 @@
       if (yScreen + PANEL > sf.y + sf.h - SCREEN_MARGIN) yScreen = sf.y + sf.h - SCREEN_MARGIN - PANEL;
       if (yScreen < sf.y + SCREEN_MARGIN) yScreen = sf.y + SCREEN_MARGIN;
 
-      // Convert from native screen coords (origin top-left of this display)
-      // to in-window px relative to our fullscreen WKWebView.
-      const localX = x - sf.x;
-      const localY = yScreen - sf.y;
-      $muse.style.left = `${localX}px`;
-      $muse.style.top  = `${localY}px`;
+      // sd.window.setFrame takes CG/AX coords (top-left origin) — same
+      // convention as the screen frame we just selected.
+      await sd.window.setFrame({ x, y: yScreen, w: PANEL, h: PANEL });
     }
 
     async function readSelectedTextContext() {
@@ -342,7 +407,7 @@
       if (state.open) return;
       opts = opts || {};
       const anchor = await anchorPoint();
-      placePanel(anchor);
+      await placePanel(anchor);
 
       state.open = true;
       state.buffer = "";
@@ -360,11 +425,14 @@
       const sel = await readSelectedTextContext();
       if (sel) state.textContext = sel;
 
-      $muse.dataset.open = "1";
       renderInput();
       renderOutput();
       setStatus("idle");
       await sd.window.invoke();
+      // Focus has to happen after invoke() — the window isn't keyable until
+      // it's shown. Caret lives at offset 0 of an empty $input.
+      $input.focus();
+      setSelectionOffset($input, 0);
     }
 
     async function closeOverlay() {
@@ -380,7 +448,6 @@
       state.caret = 0;
       state.response = "";
       state.lastClose = Date.now();
-      $muse.dataset.open = "0";
       await sd.window.dismiss();
     }
 
@@ -484,7 +551,11 @@
       if (state.capturing || !state.open) return;
       state.capturing = true;
       const path = `/tmp/muse-cap-${Date.now()}.png`;
-      $muse.style.visibility = "hidden";
+      // Hide the panel during screencapture so it doesn't appear in the
+      // grab. style.visibility on a now-bodyless wrapper would have nothing
+      // to hide; sd.window.setAlpha fades the whole window (glass + content)
+      // which is what we actually want anyway.
+      await sd.window.setAlpha(0);
       try {
         const r = await sd.proc.exec("/usr/sbin/screencapture", ["-i", "-x", "-t", "png", path], { timeout: 60 });
         if (r && r.code === 0) {
@@ -501,7 +572,7 @@
           await sd.proc.exec("/bin/rm", ["-f", path]);
         }
       } finally {
-        $muse.style.visibility = "visible";
+        await sd.window.setAlpha(1);
         state.capturing = false;
       }
     }
@@ -523,6 +594,56 @@
       renderInput();
     }
 
+    // ----- Native caret bridging -----
+    //
+    // The input is a contenteditable div. The browser owns rendering of the
+    // caret, the selection, word-by-word navigation (Alt+arrows), line-edge
+    // nav (Cmd+arrows), word-delete (Alt+Backspace), and Cmd+A — all for
+    // free. We just read its state after every event and mirror it into
+    // state.buffer / state.caret, which the rest of the stack already relies
+    // on. Reading offsets means walking the text nodes because contenteditable
+    // ranges are (node, offset) pairs, not flat string offsets.
+    function getInputText() {
+      // textContent collapses across nested nodes — fine here because $input
+      // only ever contains plain text (no <br>, no nested spans) since we
+      // assign via .textContent and never .innerHTML for buffer content.
+      return $input.textContent || "";
+    }
+
+    function getSelectionOffset(el) {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return 0;
+      const range = sel.getRangeAt(0);
+      // Only trust the selection if it's actually inside the input.
+      if (!el.contains(range.endContainer) && range.endContainer !== el) return 0;
+      const pre = range.cloneRange();
+      pre.selectNodeContents(el);
+      pre.setEnd(range.endContainer, range.endOffset);
+      return pre.toString().length;
+    }
+
+    function setSelectionOffset(el, offset) {
+      const text = el.firstChild;
+      const range = document.createRange();
+      const sel = window.getSelection();
+      if (text && text.nodeType === Node.TEXT_NODE) {
+        const len = text.nodeValue.length;
+        const o = Math.max(0, Math.min(offset, len));
+        range.setStart(text, o);
+        range.setEnd(text, o);
+      } else {
+        range.setStart(el, 0);
+        range.setEnd(el, 0);
+      }
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    function syncFromDOM() {
+      state.buffer = getInputText();
+      state.caret = getSelectionOffset($input);
+    }
+
     sd.appearance.subscribe((a) => {
       const dark = !!(a && a.dark);
       document.documentElement.dataset.dark = dark ? "1" : "0";
@@ -541,7 +662,7 @@
       }
     };
 
-    window.onTap_flags = (e) => {
+    sd.events.on("flags", (e) => {
       if (!e || e.keyCode !== RIGHT_CMD_KEYCODE) return;
       const downNow = (e.flags & CGEVENT_CMD_FLAG) !== 0;
       const now = Date.now();
@@ -563,8 +684,14 @@
         state.rCmdHeld = false;
         state.lastRCmdEdge = now;
       }
-    };
+    });
 
+    // Key handling strategy: intercept only the Muse-specific chords + Enter
+    // + Escape. Everything else (printable input, Backspace, Delete, arrows,
+    // Cmd/Alt+arrows, Cmd+A, Alt+Backspace, etc.) is passed through to the
+    // browser's contenteditable, which knows macOS conventions. We then sync
+    // state.buffer + state.caret from the resulting DOM via the `input` and
+    // `selectionchange` listeners below.
     document.addEventListener("keydown", async (e) => {
       if (!state.open) return;
       if (e.key === "Escape") {
@@ -598,22 +725,44 @@
         else                     await commitResponse();
         return;
       }
-      if (e.key === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Block Cmd+V (system paste) and Cmd+X — the user-visible paste verb is
+      // Cmd+Shift+V (handled above) which sets textContext, not buffer. Cmd+C
+      // is allowed so users can copy selected input.
+      if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "v" || e.key === "V" || e.key === "x" || e.key === "X")) {
         e.preventDefault();
-        if (state.buffer.length > 0) {
-          state.buffer = [...state.buffer].slice(0, -1).join("");
-          renderInput();
-          updateReadyState();
-        }
         return;
       }
-      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault();
-        state.buffer += e.key;
-        renderInput();
-        updateReadyState();
+      // Everything else flows to the contenteditable handler. The `input`
+      // listener below syncs state.buffer + state.caret from the new DOM.
+    });
+
+    // Browser fires `input` after the contenteditable mutation has landed —
+    // textContent and selectionStart are already up-to-date here.
+    $input.addEventListener("input", () => {
+      if (!state.open) return;
+      syncFromDOM();
+      // If buffer just became empty we need to swap to placeholder rendering,
+      // and vice versa. renderInput handles both transitions.
+      renderInput();
+      updateReadyState();
+    });
+
+    // Arrow keys and clicks move the caret without firing `input`. Listen to
+    // selectionchange (document-level only event) and update state.caret so
+    // the rest of the stack (anything that reads state.caret) stays consistent.
+    document.addEventListener("selectionchange", () => {
+      if (!state.open) return;
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      const r = sel.getRangeAt(0);
+      if ($input.contains(r.endContainer) || r.endContainer === $input) {
+        state.caret = getSelectionOffset($input);
       }
     });
+
+    // After invoke(), the browser doesn't auto-focus contenteditable. Force
+    // it so keystrokes land in the input and the caret is visible.
+    $input.addEventListener("mousedown", () => { /* let click position caret */ });
 
     window.addEventListener("blur", () => {
       if (state.open && !state.capturing) closeOverlay();

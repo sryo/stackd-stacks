@@ -1,7 +1,8 @@
 // Window snapshot (minimize) system — JS port of WindowScape/snapshots.lua.
 //
-// Maintains a per-display strip of window thumbnails at the bottom of the
-// screen. Capturing a window grabs its CGSHWCaptureWindowList image via
+// Maintains a per-display strip of window thumbnails: a right-side column
+// on landscape displays, a bottom row on portrait displays (matches lua).
+// Capturing a window grabs its CGSHWCaptureWindowList image via
 // sd.windows.snapshot(id) and AX-minimizes the window; the thumbnail tile
 // sits in the strip until the user clicks it to restore (or closeAll/
 // restoreAll/clearAll bulk-acts).
@@ -26,13 +27,14 @@
 // - Refresh timer: setInterval polls sd.windows.snapshot(id) every 5s for
 //   each tracked window, replacing the cached image so the preview stays
 //   current as the underlying window changes off-screen.
-// - Right-click manual snapshot: registered via stack.json `eventtap`
-//   (rightMouseDown). On match, look up the window under the cursor and
-//   call captureWithoutMinimize.
+// - Right-click context menu: registered via stack.json `eventtap`
+//   (rightMouseDown). Only fires when the cursor is on an existing
+//   snapshot tile — otherwise passthrough. Matches lua rightClickTap.
 // - State persistence: sd.settings.set/get. Image dataURLs persist directly.
 
 import { sd } from "sd://runtime/api.js";
-import { state, log } from "./core.js";
+import { cfg } from "./config.js";
+import { state, log, isAppIncluded } from "./core.js";
 
 // Layout constants — same as snapshots.lua.
 export const PADDING       = 8;
@@ -120,46 +122,57 @@ function snapshotsOnDisplay(displayID) {
 
 // Port of snapshots.lua getReservedArea — returns the strip rectangle in
 // global screen coords for a given display, or null if no snapshots there.
+// Landscape → right-side column (COLUMN_WIDTH wide, full height). Portrait
+// → bottom row (full width, maxTileH + PADDING*2 tall). Mirrors lua exactly.
 export function getReservedArea(d) {
   if (!d) return null;
   const list = snapshotsOnDisplay(d.displayID);
   if (list.length === 0) return null;
+  // Anchor to visibleFrame so the strip sits clear of the menubar / dock /
+  // any other system-reserved chrome (matches what adjustedFrameForDisplay
+  // below already does for the tiler).
+  const vf = d.visibleFrame || d.frame;
+  const isLandscape = d.frame.w > d.frame.h;
+  if (isLandscape) {
+    return {
+      x: vf.x + vf.w - COLUMN_WIDTH,
+      y: vf.y,
+      w: COLUMN_WIDTH,
+      h: vf.h
+    };
+  }
   let maxHeight = 0;
   for (const { data } of list) {
     const snapSize = data.snapSize || getSnapshotSize();
     if (snapSize.h > maxHeight) maxHeight = snapSize.h;
   }
-  const frame = d.frame;
-  const isLandscape = frame.w > frame.h;
-  if (isLandscape) {
-    // Bottom strip (deviating from lua's right-column landscape; bar-style
-    // bottom anchor matches the user's visual spec in the port brief).
-    const rowHeight = maxHeight + PADDING * 2;
-    return {
-      x: frame.x,
-      y: frame.y + frame.h - rowHeight,
-      w: frame.w,
-      h: rowHeight
-    };
-  }
-  // Portrait — bottom strip still.
   const rowHeight = maxHeight + PADDING * 2;
   return {
-    x: frame.x,
-    y: frame.y + frame.h - rowHeight,
-    w: frame.w,
+    x: vf.x,
+    y: vf.y + vf.h - rowHeight,
+    w: vf.w,
     h: rowHeight
   };
 }
 
 // Port of snapshots.lua getAdjustedScreenFrame — visibleFrame minus the
-// reserved strip height. tiler.js calls this so tiles don't draw under the
+// reserved strip. Landscape shrinks width (right column), portrait shrinks
+// height (bottom row). tiler.js calls this so tiles don't draw under the
 // strip.
 export function adjustedFrameForDisplay(d) {
   if (!d) return null;
   const vf = d.visibleFrame || d.frame;
   const reserved = getReservedArea(d);
   if (!reserved) return null;
+  const isLandscape = d.frame.w > d.frame.h;
+  if (isLandscape) {
+    return {
+      x: vf.x,
+      y: vf.y,
+      w: Math.max(0, vf.w - reserved.w),
+      h: vf.h
+    };
+  }
   return {
     x: vf.x,
     y: vf.y,
@@ -209,20 +222,32 @@ const STRIP_CSS = `
   #ws-strips-root .ws-strip {
     position: absolute;
     display: flex;
-    flex-direction: row;
-    align-items: flex-end;
     gap: ${GAP}px;
     padding: ${PADDING}px;
     overflow: hidden;
     pointer-events: auto;
     box-sizing: border-box;
   }
-  #ws-strips-root .ws-strip-inner {
-    display: flex;
+  #ws-strips-root .ws-strip.horizontal {
     flex-direction: row;
     align-items: flex-end;
+  }
+  #ws-strips-root .ws-strip.vertical {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  #ws-strips-root .ws-strip-inner {
+    display: flex;
     gap: ${GAP}px;
     transition: transform 80ms linear;
+  }
+  #ws-strips-root .ws-strip.horizontal .ws-strip-inner {
+    flex-direction: row;
+    align-items: flex-end;
+  }
+  #ws-strips-root .ws-strip.vertical .ws-strip-inner {
+    flex-direction: column;
+    align-items: flex-end;
   }
   #ws-strips-root .ws-tile {
     position: relative;
@@ -239,8 +264,9 @@ const STRIP_CSS = `
                 left      ${ZOOM_IN_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1),
                 top       ${ZOOM_IN_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
-    transform-origin: center bottom;
   }
+  #ws-strips-root .ws-strip.horizontal .ws-tile { transform-origin: center bottom; }
+  #ws-strips-root .ws-strip.vertical   .ws-tile { transform-origin: right center; }
   #ws-strips-root .ws-tile.in {
     opacity: 1;
     transform: scale(1);
@@ -392,7 +418,12 @@ export function updateLayout() {
     const reserved = getReservedArea(d);
     if (!reserved) continue;
 
-    // Position the strip container in local WebView coords.
+    // Position the strip container in local WebView coords; apply the
+    // orientation class so the flex-direction switches between row (bottom
+    // strip on portrait) and column (right rail on landscape).
+    const isLandscape = d.frame.w > d.frame.h;
+    entry.container.classList.toggle("vertical",   isLandscape);
+    entry.container.classList.toggle("horizontal", !isLandscape);
     const local = globalToLocal(reserved);
     Object.assign(entry.container.style, {
       left:   `${local.x}px`,
@@ -401,19 +432,21 @@ export function updateLayout() {
       height: `${local.h}px`
     });
 
-    // Total inner content width (for scroll clamp).
-    let contentW = 0;
+    // Total inner content length along the strip axis (for scroll clamp).
+    let contentLen = 0;
     for (let i = 0; i < list.length; i++) {
       const snapSize = list[i].data.snapSize || getSnapshotSize();
-      contentW += snapSize.w;
-      if (i > 0) contentW += GAP;
+      contentLen += isLandscape ? snapSize.h : snapSize.w;
+      if (i > 0) contentLen += GAP;
     }
-    const visibleW = local.w - PADDING * 2;
-    const maxOffset = Math.max(0, contentW - visibleW);
+    const visibleLen = (isLandscape ? local.h : local.w) - PADDING * 2;
+    const maxOffset = Math.max(0, contentLen - visibleLen);
     const cur = state.snapshotsState.stripScrollOffsets[d.displayID] || 0;
     const clamped = Math.max(0, Math.min(cur, maxOffset));
     state.snapshotsState.stripScrollOffsets[d.displayID] = clamped;
-    entry.inner.style.transform = `translateX(${-clamped}px)`;
+    entry.inner.style.transform = isLandscape
+      ? `translateY(${-clamped}px)`
+      : `translateX(${-clamped}px)`;
 
     // Drop tiles whose snapshots are gone.
     const liveIds = new Set(list.map((x) => x.winId));
@@ -456,7 +489,63 @@ export function updateLayout() {
       prev = el;
     }
   }
+  // DOM layout changed — recompute per-tile screen rects so the cursor-gate
+  // knows about the current layout. requestAnimationFrame waits for layout
+  // to settle (tile sizes/positions) before measuring.
+  requestAnimationFrame(refreshTileScreenRects);
 }
+
+// ----------------------------------------------------------------------------
+// Click-through gate
+//
+// The window is clickThrough:true by default, so empty screen passes through
+// to the underlying app. We flip it to false dynamically while the cursor is
+// over a tile rect — the WebView then receives the click and the tile's DOM
+// mousedown handler (see makeTile / onTileMouseDown) fires. Mirrors the
+// bar/core.js item-rect flip pattern: rects exist only for the binary gate
+// decision; the click action itself is plain DOM dispatch on the tile.
+// ----------------------------------------------------------------------------
+
+let tileScreenRects = [];
+let clickThroughCurrent = true;     // matches the manifest default
+
+function refreshTileScreenRects() {
+  tileScreenRects.length = 0;
+  const my = myScreenInfo && myScreenInfo.frame;
+  if (!my) return;
+  for (const did of Object.keys(stripsByDisplay)) {
+    const entry = stripsByDisplay[did];
+    for (const el of entry.tiles.values()) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      tileScreenRects.push({
+        x: my.x + r.left,
+        y: my.y + r.top,
+        w: r.width,
+        h: r.height
+      });
+    }
+  }
+}
+
+function isOverAnyTile(mx, my) {
+  for (const r of tileScreenRects) {
+    if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) return true;
+  }
+  return false;
+}
+
+async function updateClickThrough(over) {
+  const want = !over;
+  if (want === clickThroughCurrent) return;
+  clickThroughCurrent = want;
+  await sd.window.setClickThrough(want);
+}
+
+sd.mouse.subscribe((m) => {
+  if (!m) return;
+  updateClickThrough(isOverAnyTile(m.x, m.y));
+});
 
 function makeTile(winId, data) {
   const snapSize = data.snapSize || getSnapshotSize();
@@ -477,11 +566,29 @@ function makeTile(winId, data) {
   closeDot.className = "ws-close";
   el.appendChild(closeDot);
 
-  // Note: the stack panel is clickThrough:true (so it doesn't block clicks
-  // on underlying tiled windows), which means DOM events here never fire.
-  // Hover + click + right-click are routed through eventtap callbacks below
-  // (onMouseMoveEvent / onLeftClickEvent / onRightClickEvent).
+  // Tile owns its click. Panel is clickThrough:false + body pointer-events:
+  // none, so empty screen passes through to the underlying app while tiles
+  // (pointer-events:auto in STRIP_CSS) capture their own events.
+  el.addEventListener("mousedown", (e) => onTileMouseDown(winId, e));
   return el;
+}
+
+function onTileMouseDown(winId, e) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // Close-dot zone (top-left 14×14 px) — matches lua SNAPSHOT_CLOSE_SIZE.
+  if (e.offsetX < 14 && e.offsetY < 14) {
+    closeFromSnapshot(winId);
+    return;
+  }
+  // Shift-click → drop snapshot without restoring.
+  if (e.shiftKey) {
+    cleanupResources(winId);
+    updateLayout();
+    return;
+  }
+  restoreFromSnapshot(winId);
 }
 
 // ----------------------------------------------------------------------------
@@ -515,19 +622,26 @@ export function showTooltip(winId, tileEl) {
     tt.appendChild(document.createTextNode(lines[i]));
   }
 
-  // Position above the tile (mirrors lua's "anchor above center" idea —
-  // lua used left-of-tile for landscape; bottom-strip variant places it
-  // above so it doesn't clip into the bottom-of-screen edge).
+  // Lua positions the tooltip to the left of the tile on landscape (right
+  // rail) and above the tile on portrait (bottom row). Pick orientation
+  // from the parent strip's class.
   const r = tileEl.getBoundingClientRect();
   tt.style.visibility = "hidden";
   tt.classList.add("visible");
   const tr = tt.getBoundingClientRect();
-  let x = r.left + r.width / 2 - tr.width / 2;
-  let y = r.top - tr.height - 8;
-  // Clamp to viewport
-  if (x < 4) x = 4;
+  const vertical = tileEl.closest(".ws-strip")?.classList.contains("vertical");
+  let x, y;
+  if (vertical) {
+    x = r.left - tr.width - 8;
+    y = r.top + r.height / 2 - tr.height / 2;
+  } else {
+    x = r.left + r.width / 2 - tr.width / 2;
+    y = r.top - tr.height - 8;
+  }
+  if (x < 4) x = vertical ? r.right + 8 : 4;
   if (x + tr.width > window.innerWidth - 4) x = window.innerWidth - tr.width - 4;
-  if (y < 4) y = r.bottom + 8;
+  if (y < 4) y = vertical ? 4 : r.bottom + 8;
+  if (y + tr.height > window.innerHeight - 4) y = window.innerHeight - tr.height - 4;
   tt.style.left = `${x}px`;
   tt.style.top  = `${y}px`;
   tt.style.visibility = "";
@@ -641,11 +755,11 @@ function hideContextMenu() {
 
 import {
   captureAndMinimize as _captureAndMinimize,
-  captureWithoutMinimize as _captureWithoutMinimize
+  captureForOSMinimize as _captureForOSMinimize
 } from "./snapshot_create.js";
 
-export const captureAndMinimize    = _captureAndMinimize;
-export const captureWithoutMinimize = _captureWithoutMinimize;
+export const captureAndMinimize  = _captureAndMinimize;
+export const captureForOSMinimize = _captureForOSMinimize;
 
 // ----------------------------------------------------------------------------
 // Restore / cleanup / bulk verbs
@@ -838,36 +952,15 @@ function tileAt(x, y) {
   return null;
 }
 
-// Left-click eventtap — DOM clicks don't reach clickThrough panels, so the
-// strip's click handling is routed through here. Mirrors the lua
-// mouseCallback "mouseDown" branch (sans drag, which lua had via a separate
-// leftMouseDragged tap — drag-to-reposition between displays is deferred
-// since the JS strip is a single fullscreen panel).
+// Left-click eventtap — fires on every leftMouseDown regardless of window
+// geometry (it's an OS-level tap). Tile clicks themselves are handled via
+// DOM mousedown on each .ws-tile (see makeTile + onTileMouseDown); this
+// callback only handles dismissing the open right-click menu when the user
+// clicks anywhere off it. Drag-bracket open is wired in main.js.
 export function onLeftClickEvent(payload) {
   const { x, y } = payload || {};
   if (x == null || y == null) return;
-  // Menu has priority — a left-click anywhere closes it (and triggers a
-  // row if the click hits one).
-  if (menuEl && tryMenuClickAt(x, y)) return;
-  if (state.snapshotsState.order.length === 0) return;
-  const hit = tileAt(x, y);
-  if (!hit) return;
-  const { winId, localX, localY } = hit;
-  // Close-dot zone (top-left 14×14 px) — matches lua SNAPSHOT_CLOSE_SIZE.
-  if (localX < 14 && localY < 14) {
-    closeFromSnapshot(winId);
-    return;
-  }
-  // Shift-click → drop snapshot without restoring (matches lua's modifier
-  // branch). flags bit 17 = NSEvent shift.
-  const flags = payload.flags || 0;
-  const SHIFT_MASK = 1 << 17;
-  if (flags & SHIFT_MASK) {
-    cleanupResources(winId);
-    updateLayout();
-    return;
-  }
-  restoreFromSnapshot(winId);
+  if (menuEl) tryMenuClickAt(x, y);
 }
 
 // Mouse-moved eventtap — drives hover state on tiles. The CGEventTap fires
@@ -933,47 +1026,17 @@ function findTileEl(winId) {
   return null;
 }
 
-// Right-click eventtap — two branches:
-//   1. Right-click ON a tile     → show context menu (Restore / Close /
-//                                   Restore All / Close All / Clear All).
-//                                   Port of snapshot_create.lua's
-//                                   mouseCallback "right" branch.
-//   2. Right-click on a window   → capture-without-minimize that window.
-//                                   Port of events.lua rightClickTap.
+// Right-click eventtap — port of events.lua rightClickTap: if the cursor
+// is on an existing snapshot tile, show the context menu (Restore / Close
+// / Restore All / Close All / Clear All); otherwise passthrough. The lua
+// version explicitly returns false on miss; we just do nothing.
 export async function onRightClickEvent(payload) {
   const { x, y } = payload || {};
   if (x == null || y == null) return;
   const hit = tileAt(x, y);
-  if (hit) {
-    const data = state.snapshotsState.snapshots[hit.winId];
-    showContextMenu(hit.winId, data);
-    return;
-  }
-  // Find the topmost window at (x, y).
-  const win = pickWindowAt(x, y);
-  if (!win) return;
-  await captureWithoutMinimize(win.id);
-}
-
-function pickWindowAt(x, y) {
-  // Sort by focus history first so the most-recently-focused window wins
-  // when frames overlap. windowsById has no z-order, so this is a heuristic.
-  const candidates = [];
-  for (const id in state.windowsById) {
-    const w = state.windowsById[id];
-    if (!w || !w.frame) continue;
-    const f = w.frame;
-    if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) {
-      candidates.push(w);
-    }
-  }
-  if (candidates.length === 0) return null;
-  // Prefer focused window in focus history order.
-  for (const fid of state.focusHistory) {
-    const m = candidates.find((w) => w.id === fid);
-    if (m) return m;
-  }
-  return candidates[0];
+  if (!hit) return;
+  const data = state.snapshotsState.snapshots[hit.winId];
+  showContextMenu(hit.winId, data);
 }
 
 // ----------------------------------------------------------------------------
@@ -1072,11 +1135,26 @@ export async function init() {
       });
     }
     // Minimized: if WE drove it via captureAndMinimize, the snapshot entry
-    // already exists — nothing to do. OS-minimized windows aren't auto-
-    // captured; the user expected the native genie animation. Stack reload
-    // picks them up via the AX read in loadPersistedSnapshots.
+    // already exists — nothing to do. Otherwise the OS minimized the window
+    // (yellow dot, Cmd+M, Dock right-click) and we capture the bitmap
+    // out-of-band — the buttons.js intercept can't reliably consume the
+    // yellow-dot click on Tahoe (WindowServer wins the race), so the
+    // lifecycle bang is the reliable trigger.
+    //
+    // Eligibility mirrors what the tiler considers a "real" tile: app
+    // included, non-collapsed, isStandard (set before the minimize moved
+    // the window out of windowsById — we check the cached entry). Skip
+    // anything we shouldn't be putting in the strip.
     chainBang("onBang_sd_window_minimized", (id) => {
-      if (isMinimized(id)) return;
+      if (isMinimized(id)) return;          // we already captured
+      const w = state.windowsById[id];
+      if (!w || !w.frame) return;
+      if (w.isStandard === false) return;
+      if (w.frame.h <= cfg.collapsedWindowHeight) return;
+      if (!isAppIncluded(w)) return;
+      captureForOSMinimize(id).catch((e) =>
+        console.warn(`[WindowScape] captureForOSMinimize ${id}:`, e)
+      );
     });
     // Deminimized: if WE drove this via restoreFromSnapshot, let its fade
     // animation play to completion; that path handles the cleanup itself.

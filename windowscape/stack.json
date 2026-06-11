@@ -5,12 +5,13 @@
   "size": { "h": 0 },
   "clickThrough": true,
   "display": "primary",
-  "permissions": ["windows", "spaces", "apps", "settings", "fs", "display", "mouse"],
-  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved"],
+  "permissions": [],
+  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved", "sd.window.resized"],
   "eventtap": [
     { "event": "scrollWheel",      "callback": "snapshotsScroll" },
     { "event": "rightMouseDown",   "callback": "snapshotsRightClick" },
     { "event": "leftMouseDown",    "callback": "snapshotsLeftClick" },
+    { "event": "leftMouseDown",    "callback": "windowscapeButtonClick", "consume": true, "requireRects": true },
     { "event": "leftMouseUp",      "callback": "dragMouseUp" }
   ],
   "hotkeys": [

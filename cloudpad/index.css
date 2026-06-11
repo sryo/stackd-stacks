@@ -1,15 +1,10 @@
 body {
-  margin: 0;
   font: 11px -apple-system, system-ui, sans-serif;
   color: #fff;
 }
 
 #panel {
   padding: 10px 12px;
-  background: rgba(20, 20, 22, 0.78);
-  border-radius: 10px;
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
   height: 100%;
   box-sizing: border-box;
   display: flex;
@@ -37,8 +32,8 @@ h1 {
   height: 8px;
   border-radius: 50%;
 }
-.dot.off { background: #5a3030; box-shadow: 0 0 4px rgba(255, 80, 80, 0.5); }
-.dot.on  { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, 0.7); }
+.dot.off { background: #5a3030; }
+.dot.on  { background: #30d158; }
 
 #url {
   font: 12px ui-monospace, Menlo, monospace;

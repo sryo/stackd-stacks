@@ -9,8 +9,7 @@
   --sd-accent: #7c8cff;
 }
 html, body {
-  margin: 0; padding: 0; height: 100%;
-  background: transparent;
+  height: 100%;
   color: var(--sd-fg);
   font: 13px var(--sd-font);
   -webkit-font-smoothing: antialiased;

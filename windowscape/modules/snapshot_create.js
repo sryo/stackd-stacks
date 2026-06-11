@@ -1,11 +1,17 @@
 // Snapshot capture helpers — JS port of WindowScape/snapshot_create.lua.
 //
-// Two entry points:
+// Entry points:
 //   captureAndMinimize(winId)    — grab snapshot, AX-minimize the window,
 //                                  tile reabsorbs the space, tile renders.
 //                                  Used by operations.minimizeFocused.
-//   captureWithoutMinimize(winId)— grab snapshot, leave window in place.
-//                                  Used by right-click eventtap.
+//   captureForOSMinimize(winId)  — the OS already minimized the window
+//                                  (user clicked the yellow dot, Cmd+M, etc.);
+//                                  grab the bitmap and add the tile without
+//                                  driving another minimize. The window is
+//                                  already AX-minimized, so CGSHWCaptureWindowList
+//                                  works against its WindowServer-cached
+//                                  bitmap. Used by snapshots.js
+//                                  onBang_sd_window_minimized.
 //
 // Zoom-in animation: lua used hs.canvas:frame timer interpolation from the
 // window's original frame down to the strip slot. In JS, the tile element
@@ -117,23 +123,30 @@ export async function captureAndMinimize(winId) {
   }, 200);
 }
 
-// Port of snapshot_create.lua's right-click path (createSnapshot called
-// without driving the minimize). Window stays in place; tile is added to
-// the strip with the current snapshot.
-export async function captureWithoutMinimize(winId) {
+// Capture a window that JUST minimized via the OS (yellow dot click, Cmd+M,
+// Dock right-click, etc.). The lifecycle bang `sd.window.minimized` fires
+// after WindowServer finishes the genie; by then the window is no longer
+// onscreen, so we read its last-known frame/app/title from windowsById
+// before the next windowsAll push evicts it. CGSHWCaptureWindowList still
+// returns a clean bitmap of the minimized window's pre-genie contents.
+//
+// No second minimize call; no focus shift (the OS already shifted focus to
+// whichever window inherited it). Just bitmap + tile + retile to reserve
+// strip space.
+export async function captureForOSMinimize(winId) {
   if (state.snapshotsState.isCreating) return;
+  if (state.snapshotsState.snapshots[winId]) return; // already tracked
   state.snapshotsState.isCreating = true;
   state.snapshotsState.isCreatingStart = Date.now();
   try {
     const data = await captureCore(winId);
     if (!data) return;
     updateLayout();
-    // Tiler may want to reserve strip space — kick a re-tile.
-    setTimeout(async () => {
-      const tiler = await getTiler();
-      await tiler.tileWindows();
-    }, 100);
   } finally {
     state.snapshotsState.isCreating = false;
   }
+  setTimeout(async () => {
+    const tiler = await getTiler();
+    await tiler.tileWindows();
+  }, 200);
 }

@@ -6,9 +6,10 @@
   "clickThrough": true,
   "level": "cursor",
   "display": "all",
-  "permissions": ["mouse", "battery"],
+  "permissions": [],
   "eventtap": [
     { "event": "keyDown",          "callback": "hide" },
-    { "event": "leftMouseDragged", "callback": "hide" }
+    { "event": "leftMouseDragged", "callback": "hide" },
+    { "event": "flagsChanged",     "callback": "flags" }
   ]
 }

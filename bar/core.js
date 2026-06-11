@@ -130,6 +130,12 @@ function relayout() {
   $bar.classList.toggle("fs-minimal",
     state.mode === "fullscreen-minimal" && !anyContent);
   $bar.classList.toggle("fs-peek", state.mode === "fullscreen-peek");
+
+  // DOM just changed — recompute item screen-rects so the click-through
+  // hover detector knows about the current layout. requestAnimationFrame
+  // waits for layout to settle (widths via labelFor strings may have
+  // changed) before measuring.
+  requestAnimationFrame(refreshItemScreenRects);
 }
 
 function setValue(item, val) {
@@ -194,6 +200,57 @@ function handleClick(item) {
     sd.proc.exec("/bin/sh", ["-c", cb]);
   }
 }
+
+// ----- click-through routing ---------------------------------------------------
+//
+// The bar's panel covers the full menubar strip. By default it's clickThrough
+// so the system menubar (Apple menu, app File/Edit, status items) stays
+// clickable — but that also blocks clicks on our own items. We flip
+// sd.window.setClickThrough(false) when the cursor enters an item rect and
+// back to true when it leaves, so each click reaches the right window.
+//
+// Detection runs off sd.mouse (system-polled) rather than DOM mouseenter
+// events, which never fire while clickThrough=true. Item rects are computed
+// in screen coords from each item element's getBoundingClientRect() + the
+// bar's home screen origin (the bar's WebView covers (sf.x, sf.y) to
+// (sf.x+sf.w, sf.y+barH)).
+let clickThroughCurrent = true;     // matches the daemon default for non-invocable stacks
+let itemScreenRects = [];
+
+function refreshItemScreenRects() {
+  itemScreenRects.length = 0;
+  const sf = sd.screen.current && sd.screen.current.frame;
+  if (!sf) return;
+  for (const el of document.querySelectorAll(".item")) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    itemScreenRects.push({
+      x: sf.x + r.left,
+      y: sf.y + r.top,
+      w: r.width,
+      h: r.height
+    });
+  }
+}
+
+function isOverAnyItem(mx, my) {
+  for (const r of itemScreenRects) {
+    if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) return true;
+  }
+  return false;
+}
+
+async function updateClickThrough(over) {
+  const want = !over;
+  if (want === clickThroughCurrent) return;
+  clickThroughCurrent = want;
+  await sd.window.setClickThrough(want);
+}
+
+sd.mouse.subscribe((m) => {
+  if (!m) return;
+  updateClickThrough(isOverAnyItem(m.x, m.y));
+});
 
 // ----- right-click context menu ------------------------------------------------
 
@@ -266,13 +323,13 @@ function trackPeek() {
 // ----- hotkey: toggle the system menu bar -------------------------------------
 
 let menubarSuppressed = false;
-window.onHotkey_toggleSystemMenubar = async () => {
+sd.hotkey.on("toggleSystemMenubar", async () => {
   if (menubarSuppressed) {
     await sd.menubar.restore();  menubarSuppressed = false;
   } else {
     await sd.menubar.suppress(); menubarSuppressed = true;
   }
-};
+});
 
 // ----- plugin registration -----------------------------------------------------
 //
@@ -295,7 +352,7 @@ window.onHotkey_toggleSystemMenubar = async () => {
 // re-fire their register call. This makes initial-state convergence
 // order-independent (bar may load before or after the plugins).
 
-window.onBang_bar_register = (detail) => {
+sd.bang.declare('bar.register').on((detail) => {
   console.log("[bar] register fired", JSON.stringify(detail));
   if (!detail || !detail.id) return;
   const itemSpec = {
@@ -312,21 +369,21 @@ window.onBang_bar_register = (detail) => {
   externalItems.set(itemSpec.id, itemSpec);
   if (detail.value != null) state.values[itemSpec.id] = String(detail.value);
   relayout();
-};
+});
 
-window.onBang_bar_unregister = (detail) => {
+sd.bang.declare('bar.unregister').on((detail) => {
   if (!detail || !detail.id) return;
   externalItems.delete(String(detail.id));
   delete state.values[String(detail.id)];
   relayout();
-};
+});
 
-window.onBang_bar_update = (detail) => {
+sd.bang.declare('bar.update').on((detail) => {
   if (!detail || !detail.id) return;
   const it = externalItems.get(String(detail.id));
   if (!it) return; // ignore updates for unregistered items
   setValue(it, detail.value);
-};
+});
 
 // ----- boot --------------------------------------------------------------------
 
@@ -348,5 +405,5 @@ window.onBang_bar_update = (detail) => {
   // bar.register before this bar instance booted (load order isn't
   // guaranteed); this re-collect closes that race. Plugins that listen
   // to this bang re-emit their bar.register payload.
-  sd.bang('bar.requestRegister', {});
+  sd.bang.declare('bar.requestRegister').emit({});
 })();

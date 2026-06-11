@@ -4,6 +4,6 @@
   "region": "fullscreen",
   "size": { "h": 0 },
   "clickThrough": true,
-  "permissions": ["overlay", "windows", "settings"],
+  "permissions": [],
   "handles": ["overlay-border.inclusion"]
 }

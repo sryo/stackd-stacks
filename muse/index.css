@@ -1,26 +1,20 @@
 :root {
-  --muse-bg:        rgba(255, 255, 255, 0.98);
   --muse-fg:        #111;
   --muse-muted:     rgba(0, 0, 0, 0.55);
   --muse-accent:    #1a4dd9;
   --muse-error:     #d93434;
-  --muse-stroke:    rgba(26, 77, 217, 0.85);
-  --muse-radius:    12px;
   --muse-pad:       16px;
-  --muse-panel:     320px;
   --muse-font:      -apple-system, "SF Pro Text", system-ui, ui-sans-serif;
   --muse-font-bold: -apple-system, "SF Pro Display", system-ui, ui-sans-serif;
 }
 
 [data-dark="1"] {
-  --muse-bg:        rgba(30, 30, 32, 0.96);
   --muse-fg:        #f4f4f5;
   --muse-muted:     rgba(244, 244, 245, 0.55);
 }
 
 html, body {
-  margin: 0; padding: 0; height: 100%;
-  background: transparent;
+  height: 100%;
   font-family: var(--muse-font);
   font-size: 14px;
   color: var(--muse-fg);
@@ -29,23 +23,15 @@ html, body {
   overflow: hidden;
 }
 
-#muse {
-  position: absolute;
-  width: var(--muse-panel);
-  height: var(--muse-panel);
+/* Body IS the panel — daemon owns the glass material + border-radius +
+   320x320 size via manifest. No background, border, shadow, or backdrop
+   filter here; the window is the chrome. */
+body {
   box-sizing: border-box;
-  background: var(--muse-bg);
-  border: 2px solid var(--muse-stroke);
-  border-radius: var(--muse-radius);
   padding: var(--muse-pad);
-  display: none;
+  display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  backdrop-filter: blur(18px) saturate(160%);
 }
-
-#muse[data-open="1"] { display: flex; }
 
 .input-band {
   position: relative;
@@ -54,9 +40,15 @@ html, body {
   align-items: flex-start;
 }
 
-.input {
+.input-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
+  height: 100%;
+}
+
+.input {
+  position: relative;
   font-size: 18px;
   line-height: 1.25;
   color: var(--muse-fg);
@@ -68,10 +60,26 @@ html, body {
   font-family: var(--muse-font);
   height: 100%;
   overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-.input.placeholder { color: var(--muse-muted); }
-.input .accent { color: var(--muse-accent); }
+.input-placeholder {
+  position: absolute;
+  inset: 0;
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--muse-muted);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  font-family: var(--muse-font);
+  pointer-events: none;
+  overflow: hidden;
+  display: none;
+}
+.input-placeholder[data-on="1"] { display: block; }
+.input-placeholder .accent { color: var(--muse-accent); }
 
 .chips {
   position: absolute;

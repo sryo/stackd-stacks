@@ -2,7 +2,8 @@
   "id": "cloudpad",
   "name": "CloudPad",
   "anchor": { "edge": "top-right", "inset": [16, 16] },
-  "size": { "w": 260, "h": 96 },
+  "size": { "w": 1, "h": 1 },
+  "material": "none",
   "permissions": [
     "httpserver",
     "display",

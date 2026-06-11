@@ -29,7 +29,7 @@ function emitInclusionBang(winId) {
   if (!winId) return;
   const w = state.windowsById[winId];
   if (!w) return;
-  sd.bang('overlay-border.inclusion', { winId, included: isAppIncluded(w) });
+  sd.bang.declare('overlay-border.inclusion').emit({ winId, included: isAppIncluded(w) });
 }
 
 // Returns true if the window is on the same display + active space as the
@@ -107,6 +107,7 @@ export async function enterSimulatedFullscreen(winId) {
   fs.savedFrames = savedFrames;
   fs.savedOrder = [...(state.windowOrderBySpace[spaceId] || [])];
   fs.savedWeights = { ...state.windowWeights };
+  fs.savedPinnedSizes = { ...state.pinnedSizes };
 
   // Park peers + fullscreen the target in one atomic compositor flip.
   await sd.windows.batch(async () => {
@@ -134,6 +135,7 @@ export async function exitSimulatedFullscreen() {
   const savedFrames = fs.savedFrames || {};
   const savedOrder = fs.savedOrder;
   const savedWeights = fs.savedWeights;
+  const savedPinnedSizes = fs.savedPinnedSizes;
   const focusedWinId = fs.windowId;
   const spaceId = fs.spaceId;
 
@@ -146,15 +148,19 @@ export async function exitSimulatedFullscreen() {
   fs.savedFrames = Object.create(null);
   fs.savedOrder = null;
   fs.savedWeights = null;
+  fs.savedPinnedSizes = null;
 
-  // Restore the order + weights snapshots. If the saved order references
-  // ids that have since died (window closed mid-fullscreen) the next
-  // updateWindowOrder call will prune them on its eligibility pass.
+  // Restore the order + weights + pins snapshots. If the saved order
+  // references ids that have since died (window closed mid-fullscreen)
+  // the next updateWindowOrder call will prune them on its eligibility pass.
   if (savedOrder && spaceId != null) {
     state.windowOrderBySpace[spaceId] = savedOrder;
   }
   if (savedWeights) {
     state.windowWeights = savedWeights;
+  }
+  if (savedPinnedSizes) {
+    state.pinnedSizes = savedPinnedSizes;
   }
 
   // Re-park sweep — restore each saved frame for windows still alive.

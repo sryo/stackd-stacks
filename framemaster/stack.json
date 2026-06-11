@@ -7,10 +7,11 @@
   "level": "tooltip",
   "permissions": [
     "windows", "apps", "applescript", "display",
-    "events", "app", "mouse"
+    "events", "app"
   ],
   "eventtap": [
-    { "event": "leftMouseDown", "callback": "click" },
-    { "event": "flagsChanged",  "callback": "flags" }
+    { "event": "leftMouseDown", "callback": "click", "consume": true, "requireRects": true },
+    { "event": "flagsChanged",  "callback": "flags" },
+    { "event": "mouseMoved",    "callback": "hover", "requireRects": true, "emitLeave": true }
   ]
 }

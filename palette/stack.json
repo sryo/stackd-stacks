@@ -2,9 +2,13 @@
   "id": "palette",
   "name": "Palette",
   "invocable": true,
-  "anchor": { "edge": "top", "inset": [200, 0] },
-  "size": { "w": 640, "h": 440 },
-  "permissions": ["apps", "icons", "proc", "settings", "app", "pasteboard", "fs"],
+  "anchor": { "edge": "top-center", "inset": [200] },
+  "size": { "w": 800, "h": 330 },
+  "material": "glass",
+  "cornerRadius": 24,
+  "padding": 0,
+  "permissions": [],
+  "handles": ["palette.open"],
   "hotkeys": [
     { "key": "ctrl+cmd+space", "callback": "open" }
   ]

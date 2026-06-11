@@ -1,52 +1,21 @@
 html, body {
-  margin: 0;
-  padding: 0;
   height: 100%;
-  background: transparent;
   overflow: hidden;
 }
 
-body {
-  opacity: 0;
-  transition: opacity 0.25s ease-out;
-}
-
-body.active {
-  opacity: 1;
-  transition: opacity 0s;
-}
-
-#hud {
-  position: fixed;
-  left: 50%;
-  bottom: 40px;
-  transform: translateX(-50%);
-  width: 80px;
-  height: 80px;
-  pointer-events: none;
-}
-
-#hud svg {
-  width: 80px;
-  height: 80px;
+svg {
+  width: 100%;
+  height: 100%;
   display: block;
 }
 
-#ring-bg {
-  fill: rgba(26, 26, 26, 0.6);
-}
-
-#ring-fill {
-  fill: rgba(255, 255, 255, 0.9);
-}
-
-#ring-inner {
-  fill: rgba(26, 26, 26, 0.95);
-}
-
+#ring-fill { stroke: rgba(255, 255, 255, 0.9); }
 #symbol {
   fill: #ffffff;
   font: 22px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   text-anchor: middle;
   dominant-baseline: central;
 }
+
+body[data-theme="light"] #ring-fill { stroke: rgba(0, 0, 0, 0.9); }
+body[data-theme="light"] #symbol    { fill: rgba(0, 0, 0, 0.9); }

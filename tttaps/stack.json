@@ -1,9 +1,7 @@
 {
   "id": "tttaps",
   "name": "TTTaps",
-  "anchor": { "edge": "bottom-right", "inset": [0, 0] },
-  "size": { "w": 1, "h": 1 },
-  "clickThrough": true,
+  "headless": true,
   "permissions": [],
   "eventtap": [
     { "event": "gesture", "callback": "onGesture" }

@@ -2,9 +2,11 @@
   "id": "muse",
   "name": "Muse",
   "invocable": true,
-  "region": "fullscreen",
-  "size": { "w": 0, "h": 0 },
-  "permissions": ["ax", "windows", "appearance", "events", "pasteboard", "proc", "fs", "settings", "app"],
+  "anchor": { "edge": "top-left", "inset": [100, 100] },
+  "size": { "w": 320, "h": 320 },
+  "material": "vibrancy.hud",
+  "cornerRadius": 24,
+  "permissions": [],
   "eventtap": [
     { "event": "flagsChanged", "callback": "flags" }
   ],

@@ -52,12 +52,12 @@
       tickHandle = setInterval(tick, 250);
     }
 
-    window.onHotkey_undo = async () => {
+    sd.hotkey.on("undo", async () => {
       if (!armedAction) return;
       const a = armedAction;
       hideToast();
       try { await a(); } catch (e) { console.error("undoclose: action failed", e); }
-    };
+    });
 
     // ──────────────────── App-terminated detector ────────────────────────────
     // sd.apps doesn't expose a terminated event; diff the running list.
@@ -131,9 +131,10 @@
       if (path) lastFinderPath = path;
     }
 
-    sd.windows.focused.subscribe((w) => {
+    sd.windows.focusedChanged.subscribe((w) => {
       if (!w || w.app !== "Finder") return;
       // Match the Lua's 0.2s wait for AppleScript to settle after focus change.
+      // focusedChanged (not the union `focused`) so title-only edits don't refire.
       clearTimeout(captureTimer);
       captureTimer = setTimeout(captureFinderPath, 200);
     });

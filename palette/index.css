@@ -1,34 +1,39 @@
 :root {
-  --sd-bg:        rgba(20, 20, 24, 0.84);
   --sd-fg:        #e8e8ea;
   --sd-fg-dim:    rgba(232, 232, 234, 0.55);
   --sd-fg-mute:   rgba(232, 232, 234, 0.35);
-  --sd-radius:    14px;
+  --sd-divider:   rgba(255, 255, 255, 0.06);
+  --sd-overlay:   rgba(255, 255, 255, 0.08);
   --sd-font:      -apple-system, system-ui, ui-system;
   --sd-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
   --sd-accent:    #7c8cff;
 }
 
+body[data-theme="light"] {
+  --sd-fg:        #1d1d1f;
+  --sd-fg-dim:    rgba(29, 29, 31, 0.62);
+  --sd-fg-mute:   rgba(29, 29, 31, 0.42);
+  --sd-divider:   rgba(0, 0, 0, 0.08);
+  --sd-overlay:   rgba(0, 0, 0, 0.08);
+}
+
+/* Body IS the palette card — daemon owns the glass material, 12px corner
+   radius, and 500x330 size via the manifest. JS may re-place the panel
+   via sd.window.setFrame (mouse-anchored). No background, border,
+   border-radius, backdrop-filter, or box-shadow here. */
 html, body {
-  margin: 0; padding: 0; height: 100%;
-  background: transparent;
+  height: 100%;
   color: var(--sd-fg);
   font: 14px var(--sd-font);
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 
-.card {
-  height: 100%;
+body {
   box-sizing: border-box;
-  background: var(--sd-bg);
-  border-radius: var(--sd-radius);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  backdrop-filter: blur(28px) saturate(180%);
-  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.6);
-  display: flex; flex-direction: column;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  border: 0.5px solid rgba(255,255,255,0.06);
 }
 
 .crumbs {
@@ -50,7 +55,7 @@ input#q {
   font-size: 20px;
   color: var(--sd-fg);
   box-sizing: border-box;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--sd-divider);
 }
 input#q::placeholder { color: var(--sd-fg-mute); }
 
@@ -62,7 +67,7 @@ input#q::placeholder { color: var(--sd-fg-mute); }
 .results::-webkit-scrollbar { display: none; }
 
 .row {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 10px;
   height: 40px; padding: 0 16px;
   cursor: pointer;
 }
@@ -70,24 +75,40 @@ input#q::placeholder { color: var(--sd-fg-mute); }
   background: color-mix(in srgb, var(--sd-accent) 22%, transparent);
   box-shadow: inset 2px 0 0 var(--sd-accent);
 }
+.row.disabled .name { color: var(--sd-fg-dim); }
 .num {
   font-family: var(--sd-font-mono);
   font-size: 10px; color: var(--sd-fg-mute);
   width: 14px; text-align: right;
 }
 .icon { width: 22px; height: 22px; flex: 0 0 22px; }
-.name { font-weight: 500; }
+.icon:not([src]) { display: none; }
+.mark {
+  color: var(--sd-accent); font-size: 12px;
+  width: 10px; text-align: center;
+}
+.mark:empty { display: none; }
+.name { font-weight: 500; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
 .name b { color: var(--sd-accent); font-weight: 700; }
 .sub  {
   margin-left: auto; color: var(--sd-fg-dim);
   font-family: var(--sd-font-mono); font-size: 10px;
-  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  white-space: nowrap; flex: 0 0 auto; padding-left: 12px;
 }
-.accessory { color: var(--sd-accent); width: 12px; text-align: center; }
+.hist {
+  color: var(--sd-accent); font-size: 12px;
+  width: 14px; text-align: center;
+}
+.hist:empty { display: none; }
+.accessory {
+  color: var(--sd-accent); font-family: var(--sd-font-mono); font-size: 11px;
+  min-width: 12px; text-align: right;
+}
+.accessory:empty { display: none; }
 
 .footer {
   display: flex; gap: 14px; padding: 8px 16px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  border-top: 1px solid var(--sd-divider);
   color: var(--sd-fg-dim);
   font-size: 10px;
   flex-wrap: wrap;
@@ -95,7 +116,7 @@ input#q::placeholder { color: var(--sd-fg-mute); }
 .footer .hint { display: inline-flex; align-items: center; gap: 4px; }
 .footer kbd {
   font-family: var(--sd-font-mono); font-size: 10px;
-  background: rgba(255,255,255,0.08);
+  background: var(--sd-overlay);
   border-radius: 3px;
   padding: 1px 5px;
   color: var(--sd-fg);

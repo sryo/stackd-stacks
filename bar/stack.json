@@ -9,7 +9,7 @@
     "audio", "apps", "proc", "settings", "spaces", "menubar", "menu",
     "mouse", "app"
   ],
-  "handles": ["bar.register", "bar.unregister", "bar.update"],
+  "handles": ["bar.register", "bar.unregister", "bar.update", "nowplaying.toggle"],
   "hotkeys": [
     { "key": "ctrl+alt+cmd+m", "callback": "toggleSystemMenubar" }
   ]

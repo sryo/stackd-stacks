@@ -4,17 +4,24 @@
 <body>
 <script type="module">
   // TTTaps — port of TTTaps.lua. Trackpad multi-finger recognizer running
-  // off the private NSEventTypeGesture stream. Fires four bangs:
+  // off the private NSEventTypeGesture stream. Fires five bangs:
   //
   //   sd.tttap.tap      — { fingers }                           N fingers land, one lifts
   //   sd.tttap.plusOne  — { cluster, side: "left"|"right" }     +1 tap on a 2/3/4 cluster
   //   sd.tttap.drag     — { fingers, direction }                cluster slides past commit threshold
   //   sd.tttap.dragStep — { fingers, direction }                each commit-distance within a drag
+  //   sd.tttap.dragEnd  — { fingers, axis }                     all fingers lift after a drag-active gesture
   //
   // Subscribers register the normal way:
   //   handles: ["sd.tttap.tap"]  in manifest
   //   window.onBang_sd_tttap_tap = (d) => { if (d.fingers === 5) ... };
   import { sd } from "sd://runtime/api.js";
+
+  // Declared handles so consumers pair via sd.bang.declare(name).on(fn)
+  // (declare().on() auto-registers with the daemon; no manifest handles).
+  const dragBang     = sd.bang.declare("sd.tttap.drag");
+  const dragStepBang = sd.bang.declare("sd.tttap.dragStep");
+  const dragEndBang  = sd.bang.declare("sd.tttap.dragEnd");
 
   const CFG = {
     gestureStartThreshold:   0.15,
@@ -24,6 +31,9 @@
     staleStateWindow:        0.30,
     dragArmThreshold:        0.04,
     dragCommitThreshold:     0.08,
+    // Vertical steps commit sooner for step-enabled clusters: resize wants
+    // many small increments (smooth growth), reorder wants deliberate slots.
+    dragStepCommitThresholdV: 0.035,
     directionFlipMultiplier: 1.5,
     clusterCap:              5,
     debugLog:                false,
@@ -37,13 +47,13 @@
     // dragClusters    — sizes that emit one-shot sd.tttap.drag
     // dragStepClusters — sizes that emit per-step sd.tttap.dragStep (axis-locked)
     //
-    // Defaults: tap + drag for 2..5, plusOne for 2..4. dragStep OFF by default
-    // because most consumers want "drag fires once" semantics. Flip a number
-    // into dragStepClusters (e.g. [3]) to opt in per cluster.
+    // Defaults: tap + drag for 2..5, plusOne for 2..4, dragStep for 3 only
+    // (windowscape steps tile order/size with it — modules/gestures.js).
+    // Other sizes keep "drag fires once" semantics; add a number to opt in.
     tapClusters:      [2, 3, 4, 5],
     plusOneClusters:  [2, 3, 4],
     dragClusters:     [2, 3, 4, 5],
-    dragStepClusters: [],
+    dragStepClusters: [3],
   };
 
   function emitsTapAt(n)     { return CFG.tapClusters.includes(n); }
@@ -68,6 +78,8 @@
   let dragDirection          = null;
   let dragFired              = false;
   let dragAxisLock           = null;
+  let dragEndEmitted         = false;
+  let lastDragCluster        = 0;
 
   function resetState() {
     initialFingerCount     = 0;
@@ -84,6 +96,8 @@
     dragDirection          = null;
     dragFired              = false;
     dragAxisLock           = null;
+    dragEndEmitted         = false;
+    lastDragCluster        = 0;
   }
 
   function snapshotInitial(touches) {
@@ -124,7 +138,7 @@
   }
 
   // ─────────────────────────── recognizer ──────────────────────────────────
-  window.onTap_onGesture = (event) => {
+  sd.events.on("onGesture", (event) => {
     // The Lua bails on event:getTouchDetails().pressure — that's a force-touch
     // event. Stackd's Gesture.describe doesn't expose pressure yet; force
     // touches typically arrive as a different subtype, so filtering by
@@ -147,6 +161,16 @@
           sd.bang("sd.tttap.tap", { fingers: peakCount });
         }
         onTapFiredThisCycle = true;
+      }
+      // Drag-active gesture ended — the recognizer's "fingers are gone"
+      // edge (same spot TTTaps.lua resets state). Emitted BEFORE the
+      // phantom-lift early-return so bracket consumers (windowscape
+      // gesture-resize) close promptly; if the lift turns out phantom and
+      // another step commits, dragEndEmitted re-arms there and a second
+      // dragEnd follows the real lift.
+      if (gestureDragged && !dragEndEmitted) {
+        dragEndEmitted = true;
+        dragEndBang.emit({ fingers: lastDragCluster || peakCount, axis: dragAxisLock });
       }
       if (lastNonZeroTouchTime && currentTime - lastNonZeroTouchTime < CFG.phantomLiftWindow) {
         pendingPhantomLift = true;
@@ -288,19 +312,25 @@
           }
         }
         if (dragArmed) {
-          const onAxis = (dragDirection === "left" || dragDirection === "right") ? absX : absY;
-          if (onAxis >= CFG.dragCommitThreshold) {
+          const verticalDir = dragDirection === "up" || dragDirection === "down";
+          const onAxis = verticalDir ? absY : absX;
+          const commitAt = (hasStep && verticalDir) ? CFG.dragStepCommitThresholdV : CFG.dragCommitThreshold;
+          if (onAxis >= commitAt) {
             if (CFG.debugLog) {
               console.log(`tttaps: DRAG cluster=${initialFingerCount} dir=${dragDirection} dx=${avgDx.toFixed(3)} dy=${avgDy.toFixed(3)}`);
             }
             gestureDragged = true;
             if (hasOneShot && !dragFired) {
-              sd.bang("sd.tttap.drag", { fingers: initialFingerCount, direction: dragDirection });
+              dragBang.emit({ fingers: initialFingerCount, direction: dragDirection });
             }
             if (hasStep) {
-              sd.bang("sd.tttap.dragStep", { fingers: initialFingerCount, direction: dragDirection });
+              dragStepBang.emit({ fingers: initialFingerCount, direction: dragDirection });
             }
             dragFired = true;
+            // Cluster size at commit time — initialFingerCount decays as
+            // fingers lift one by one, so dragEnd can't read it at n==0.
+            lastDragCluster = initialFingerCount;
+            dragEndEmitted  = false;
             if (hasStep) {
               if (!dragAxisLock) {
                 dragAxisLock = (dragDirection === "left" || dragDirection === "right")
@@ -330,7 +360,7 @@
         }
       }
     }
-  };
+  });
 </script>
 </body>
 </html>

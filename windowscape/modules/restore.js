@@ -33,7 +33,8 @@ async function writeSync() {
       slots.push({
         bundleId: bid,
         title: titleHint(w.title),
-        weight: state.windowWeights[id] ?? cfg.widthDefault
+        weight: state.windowWeights[id] ?? cfg.widthDefault,
+        pinPx: state.pinnedSizes[id] ?? null
       });
     }
     if (slots.length > 0) payload.spaces[String(spaceId)] = slots;
@@ -83,13 +84,14 @@ export async function loadLayout() {
       }
       if (pick) {
         claimed.add(pick.id);
-        matched.push({ id: pick.id, weight: slot.weight });
+        matched.push({ id: pick.id, weight: slot.weight, pinPx: slot.pinPx });
       }
     }
     const newOrder = [];
     for (const m of matched) {
       newOrder.push(m.id);
       if (m.weight != null) state.windowWeights[m.id] = m.weight;
+      if (m.pinPx != null) state.pinnedSizes[m.id] = m.pinPx;
     }
     for (const id of liveOrder) {
       if (!claimed.has(id)) newOrder.push(id);

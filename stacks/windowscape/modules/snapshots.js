@@ -108,13 +108,40 @@ export function getSnapshotSize() {
   return { w: COLUMN_WIDTH - PADDING * 2, h: 80 };
 }
 
-// Snapshots on the given display, in insertion order.
-function snapshotsOnDisplay(displayID) {
+// Set of Space (desktop) IDs currently active across all displays, taken from
+// the sd.spaces.all snapshot events.js maintains. The host panel is
+// canJoinAllSpaces, so a tile drawn into it is visible on every desktop; we
+// gate rendering on this set to confine each tile (and the strip space it
+// reserves) to the desktop it was captured on.
+function activeSpaceIDSet() {
+  const set = new Set();
+  for (const uuid of Object.keys(state.spacesByDisplay)) {
+    const a = state.spacesByDisplay[uuid] && state.spacesByDisplay[uuid].active;
+    if (a != null) set.add(a);
+  }
+  return set;
+}
+
+// A snapshot renders now if its origin Space is active. Untagged (legacy
+// persisted) entries and the pre-Spaces-info window both fall through to
+// "always show" so nothing silently disappears.
+function snapshotVisibleNow(data, activeSet) {
+  if (!data) return false;
+  if (data.spaceID == null) return true;
+  if (!activeSet || activeSet.size === 0) return true;
+  return activeSet.has(data.spaceID);
+}
+
+// Snapshots on the given display whose origin Space is currently active, in
+// insertion order.
+function snapshotsOnDisplay(displayID, activeSet) {
   const out = [];
+  if (!activeSet) activeSet = activeSpaceIDSet();
   for (const winId of state.snapshotsState.order) {
     const data = state.snapshotsState.snapshots[winId];
     if (!data) continue;
     if (data.displayID !== displayID) continue;
+    if (!snapshotVisibleNow(data, activeSet)) continue;
     out.push({ winId, data });
   }
   return out;
@@ -394,13 +421,15 @@ export function updateLayout() {
     }
   }
 
-  // Group snapshots by display.
+  // Group snapshots by display, keeping only those whose origin Space is
+  // active. Tiles for inactive-Space snapshots fall out of `list` below and
+  // get pruned by the liveIds cleanup, so they vanish when you switch desktops
+  // and re-appear when you switch back.
+  const activeSet = activeSpaceIDSet();
   const byDisplay = Object.create(null);
-  for (const winId of state.snapshotsState.order) {
-    const data = state.snapshotsState.snapshots[winId];
-    if (!data || !data.displayID) continue;
-    if (!byDisplay[data.displayID]) byDisplay[data.displayID] = [];
-    byDisplay[data.displayID].push({ winId, data });
+  for (const d of state.displays) {
+    const list = snapshotsOnDisplay(d.displayID, activeSet);
+    if (list.length) byDisplay[d.displayID] = list;
   }
 
   // Remove strip containers for displays that no longer have snapshots.
@@ -1056,6 +1085,7 @@ function snapshotsForSave() {
       frame:      d.frame,
       image:      d.image,
       displayID:  d.displayID,
+      spaceID:    d.spaceID,
       snapSize:   d.snapSize,
       capturedAt: d.capturedAt
     };

@@ -25,7 +25,7 @@
 // with a box-shadow + border that gives the tile a "frosted" presence.
 
 import { sd } from "sd://runtime/api.js";
-import { state, displayForWindow, log } from "./core.js";
+import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log } from "./core.js";
 import {
   getSnapshotSizeForWindow,
   updateLayout
@@ -70,6 +70,13 @@ async function captureCore(winId) {
   const frame = { ...w.frame };
   const snapSize = getSnapshotSizeForWindow(frame);
 
+  // The Space (desktop) the window lived on at minimize time. A minimized
+  // window is on its display's active Space by definition, so the active
+  // Space of the window's display is the one the tile belongs to. snapshots.js
+  // renders a tile only while this Space is active — without it the tile would
+  // appear on every desktop, since the host panel is canJoinAllSpaces.
+  const spaceID = (d && activeSpaceOnDisplay(d.uuid)) || getCurrentSpace();
+
   const data = {
     app:        w.app || "",
     bundleId:   w.bundleId || null,
@@ -77,6 +84,7 @@ async function captureCore(winId) {
     frame,
     image:      snap ? snap.dataURL : null,
     displayID,
+    spaceID,
     snapSize,
     capturedAt: Date.now()
   };

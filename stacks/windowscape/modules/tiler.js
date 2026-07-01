@@ -49,6 +49,9 @@ export function pruneStaleWeights() {
   for (const k of Object.keys(state.pinnedSizes)) {
     if (!live.has(+k)) delete state.pinnedSizes[k];
   }
+  for (const k of state.refusalPins) {
+    if (!live.has(+k)) state.refusalPins.delete(k);
+  }
   for (const k of Object.keys(state.offscreenSince)) {
     if (!live.has(+k)) delete state.offscreenSince[k];
   }
@@ -162,8 +165,24 @@ async function tileWindowsInternal(snap) {
     const pinIds = nonCollapsed.filter((id) => state.pinnedSizes[id] != null);
     const pinSum = pinIds.reduce((s, id) => s + state.pinnedSizes[id], 0);
     if (pinSum > majorAxis) {
-      log(`PIN-CLAMP display=${d.displayID} sum=${pinSum}px > workarea=${majorAxis}px — dropping pins ${JSON.stringify(pinIds.map(id => ({ id: +id, px: state.pinnedSizes[id] })))}`);
-      for (const id of pinIds) delete state.pinnedSizes[id];
+      // Two-stage shed: user pins first, refusal pins only if still over.
+      // A refusal pin encodes an app minimum the window will re-assert —
+      // dropping it just re-runs even-split → refuse → pin → clamp forever
+      // (the 2026-07-01 new-window storm that pushed tiles under the
+      // snapshots rail). The old "a pin set can't legitimately exceed the
+      // major axis" assumption fails when refusal sizes were captured
+      // while overlapping the rail's reserved strip.
+      const userPins = pinIds.filter((id) => !state.refusalPins.has(+id));
+      for (const id of userPins) delete state.pinnedSizes[id];
+      const stillPinned = pinIds.filter((id) => state.pinnedSizes[id] != null);
+      const stillSum = stillPinned.reduce((s, id) => s + state.pinnedSizes[id], 0);
+      if (stillSum > majorAxis) {
+        for (const id of stillPinned) {
+          delete state.pinnedSizes[id];
+          state.refusalPins.delete(+id);
+        }
+      }
+      log(`PIN-CLAMP display=${d.displayID} sum=${pinSum}px > workarea=${majorAxis}px — shed user=${JSON.stringify(userPins.map(id => +id))}${stillSum > majorAxis ? " + refusal=" + JSON.stringify(stillPinned.map(id => +id)) : ""}`);
     }
 
     // Collapsed widgets get positioned at their current pixel size — the
@@ -284,6 +303,7 @@ async function tileWindowsInternal(snap) {
 
     for (const id of refused) {
       state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
+      state.refusalPins.add(+id);
       // Update the recorded target to what the app actually accepted.
       // Leaving the PASS-1 target in place made the out-of-bracket resize
       // path compare the live frame against a target the app already
@@ -311,8 +331,24 @@ async function tileWindowsInternal(snap) {
       state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
       flexFixes.push(t);
     }
+    // Contain re-flow refusals in the SAME pass. The probe already reads
+    // back the actual frame — discarding it let a flex window that refused
+    // its shrunken PASS-2 share (even split < its app minimum after a new
+    // window joined) leak the mismatch to the out-of-bracket path, which
+    // pinned it as a phantom user resize and started the pin/clamp storm
+    // that left windows overlapping the snapshots rail (2026-07-01). No
+    // further re-flow here — the next pass absorbs the containment pin.
     for (const t of flexFixes) {
-      await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
+      const probed = await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
+      const a = probed && probed.actual;
+      if (!a) continue;
+      const dMajor2 = Math.abs(horizontal ? a.w - t.frame.w : a.h - t.frame.h);
+      if (dMajor2 > REFUSAL_PX) {
+        state.pinnedSizes[+t.winId] = Math.max(50, a[axis]);
+        state.refusalPins.add(+t.winId);
+        state.lastTileTarget[+t.winId] = { frame: { ...a }, ts: now };
+        log(`PASS2-FLEX-REFUSED id=${t.winId} pinned=${state.pinnedSizes[+t.winId]}px`);
+      }
     }
   }
 }
@@ -361,6 +397,7 @@ function schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal) 
     const now = Date.now();
     for (const [id, live] of refused) {
       state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
+      state.refusalPins.add(+id);
       // Same containment trick as PASS-2: record what the app actually
       // accepted so the resize machinery sees a settled target, not a
       // permanently-refused one.

@@ -5,9 +5,11 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
-  state, log, updateWindowOrder, isAppIncluded, displayForWindow
+  state, log, evt, updateWindowOrder, isAppIncluded, displayForWindow,
+  migrateWindowId, activeSpaceOnDisplay
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
+import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating } from "./animation.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 import { refresh as refreshButtons } from "./buttons.js";
@@ -45,15 +47,23 @@ let eventDebounceTimer = null;
 let lastKnownIds = new Set();
 let lastKnownFrames = Object.create(null); // id -> { app, frame }
 
-// CGS-lag suppression. The daemon fires sd.window.destroyed off the AX
-// observer, then immediately rebuilds sd.windows.all from CGWindowList —
-// which can lag the AX destroy by ~50–500ms, so the all-push that lands
-// right after the destroy bang STILL includes the just-closed id. Without
-// suppression, the all-subscriber overwrites our eager delete in
-// windowsById and handleWindowEvent's 30ms debounce sees no change vs
-// lastKnownIds → early returns → no retile until something else wakes
-// the system (the "few seconds" the user reported on 2→1 closes).
-const destroyedRecently = new Map(); // id -> timestamp ms
+// CGS-lag suppression + recreation stash. The daemon fires
+// sd.window.destroyed off the AX observer, then immediately rebuilds
+// sd.windows.all from CGWindowList — which can lag the AX destroy by
+// ~50–500ms, so the all-push that lands right after the destroy bang
+// STILL includes the just-closed id. Without suppression, the
+// all-subscriber overwrites our eager delete in windowsById and
+// handleWindowEvent's 30ms debounce sees no change vs lastKnownIds →
+// early returns → no retile until something else wakes the system (the
+// "few seconds" the user reported on 2→1 closes).
+//
+// The entry also stashes the window's per-id state (weight/pin/tile
+// target/space cache) at destroy time: the destroy handler eagerly purges
+// all of it before the debounced handleWindowEvent can pair the destroy
+// with a same-slot recreation (apps like Terminal recreate a window at
+// the same frame on tab operations), so migration must read from here,
+// not from the live maps.
+const destroyedRecently = new Map(); // id -> { ts, app, frame, weight, pin, target, spaces }
 const DESTROYED_GRACE_MS = 2000;
 
 // Refresh windowSpaces cache for ids we haven't seen before, so the tiler
@@ -65,10 +75,18 @@ async function refreshSpacesCache(ids) {
   }
 }
 
-// True if the lifecycle delta looks like a tab switch: same-app windows with
-// near-identical frames. Port of events.lua isTabSwitch.
-function isTabSwitch(newIds, removedIds, currentData) {
-  if (newIds.length === 0 || removedIds.length === 0) return false;
+// Same-slot recreation pairing — successor of the boolean isTabSwitch
+// (events.lua). A "tab switch" here is really an app destroying a window
+// and recreating it at a near-identical frame (Terminal does this on tab
+// operations); the daemon's CGWindowIDs are stable across true tab
+// switches, so any destroy+create pair we see is real window churn.
+// Greedy one-to-one matching by ascending frame diff: same app, total
+// |Δx|+|Δy|+|Δw|+|Δh| < 50px. Returning pairs instead of a boolean fixes
+// the old bug where ONE matching pair suppressed the retile for every
+// unrelated window in the same debounce batch.
+function matchRecreationPairs(newIds, removedIds, currentData) {
+  if (newIds.length === 0 || removedIds.length === 0) return [];
+  const candidates = [];
   for (const nid of newIds) {
     const nd = currentData[nid];
     if (!nd) continue;
@@ -79,10 +97,17 @@ function isTabSwitch(newIds, removedIds, currentData) {
       const f1 = od.frame, f2 = nd.frame;
       const diff = Math.abs(f1.x - f2.x) + Math.abs(f1.y - f2.y) +
                    Math.abs(f1.w - f2.w) + Math.abs(f1.h - f2.h);
-      if (diff < 50) return true;
+      if (diff < 50) candidates.push({ oid, nid, diff });
     }
   }
-  return false;
+  candidates.sort((a, b) => a.diff - b.diff);
+  const usedOld = new Set(), usedNew = new Set(), pairs = [];
+  for (const c of candidates) {
+    if (usedOld.has(c.oid) || usedNew.has(c.nid)) continue;
+    usedOld.add(c.oid); usedNew.add(c.nid);
+    pairs.push(c);
+  }
+  return pairs;
 }
 
 function debouncedHandleWindowEvent() {
@@ -113,13 +138,36 @@ async function handleWindowEvent() {
   const newIds = [...currentIds].filter((id) => !lastKnownIds.has(id));
   const removedIds = [...lastKnownIds].filter((id) => !currentIds.has(id));
 
-  const tabSwitch = isTabSwitch(newIds, removedIds, currentData);
+  const pairs = matchRecreationPairs(newIds, removedIds, currentData);
 
   lastKnownIds = currentIds;
   lastKnownFrames = currentData;
 
-  if (tabSwitch) return;
-  if (newIds.length === 0 && removedIds.length === 0) return;
+  // Migrate identity for each recreation pair: the new id inherits the old
+  // id's order position, tile membership, weight/pin, tile target and space
+  // cache. Keep the destroyedRecently entry for the old id — the CGS-lag
+  // all-push suppression above still needs to filter the ghost.
+  const pairedNew = new Set(), pairedOld = new Set();
+  for (const { oid, nid } of pairs) {
+    migrateWindowId(oid, nid, destroyedRecently.get(oid));
+    pairedOld.add(oid); pairedNew.add(nid);
+    evt(`RECREATE-MIGRATE ${oid}→${nid} (${currentData[nid]?.app})`);
+  }
+  // Belt: if the stash had no spaces list, fetch one so the tiler's space
+  // filter has data. No-op when the stash seeded the cache.
+  if (pairs.length) refreshSpacesCache([...pairedNew]);
+
+  const restNew = newIds.filter((id) => !pairedNew.has(id));
+  const restRemoved = removedIds.filter((id) => !pairedOld.has(id));
+  if (restNew.length === 0 && restRemoved.length === 0) {
+    if (pairs.length === 0) return;
+    // Pure recreation batch: pairs are same-display by construction
+    // (<50px frame diff), so per-display membership counts are unchanged —
+    // no retile needed. updateWindowOrder still runs to validate
+    // eligibility and fire onLayoutChange (state save).
+    updateWindowOrder();
+    return;
+  }
 
   // Refresh cache for newcomers AND for any currently-eligible window
   // whose cache entry is missing. The strict "only newIds" approach
@@ -131,11 +179,11 @@ async function handleWindowEvent() {
   // present on both ticks but cache-missing fell through forever.
   const cacheMissing = [...currentIds].filter((id) => !state.windowSpacesCache[id]);
   await refreshSpacesCache(cacheMissing);
-  for (const id of removedIds) delete state.windowSpacesCache[id];
+  for (const id of restRemoved) delete state.windowSpacesCache[id];
 
-  log(`event: +${newIds.length} -${removedIds.length}`);
+  log(`event: +${restNew.length} -${restRemoved.length}`);
   updateWindowOrder();
-  state.tileReason = `lifecycle +${newIds.length}-${removedIds.length}`;
+  state.tileReason = `lifecycle +${restNew.length}-${restRemoved.length}`;
   await tileWindows();
   // Refresh the focused window's inclusion verdict — overlay-border owns
   // the border render now, we just push the policy.
@@ -187,6 +235,27 @@ function armOobResizeTimer(id, entry) {
       armOobResizeTimer(id, entry);
       return;
     }
+    // Apply-latency grace: a tile pass re-targeted this window moments ago
+    // and apps apply setFrames asynchronously — a live read now can catch
+    // the PRE-apply frame and mint a phantom pin. That was the engine of
+    // the 2026-07-01 storm: each pass's pin transfer produced the next
+    // window's ±delta mismatch, phantom pins oversubscribed the row,
+    // PIN-CLAMP reset, repeat — with tiles left overlapping the snapshots
+    // rail between rounds. Wait out a fresh target (each retry re-checks,
+    // so back-to-back passes keep deferring); if it never ages, bail
+    // WITHOUT pinning — a real drift either re-bangs after the storm or
+    // is contained by the next pass's PASS-2.
+    const tgtTs = state.lastTileTarget?.[id]?.ts;
+    if (tgtTs != null && Date.now() - tgtTs < 1000) {
+      if (entry.retries < 8) {
+        entry.retries++;
+        armOobResizeTimer(id, entry);
+        return;
+      }
+      oobResize.delete(id);
+      log(`OOB-SETTLE-BAIL id=${id} — target still fresh after ${entry.retries} retries, not pinning`);
+      return;
+    }
     oobResize.delete(id);
     const live = await sd.windows.frame(id).catch(() => null);
     if (!live) return;
@@ -198,6 +267,13 @@ function armOobResizeTimer(id, entry) {
     const horizontal = d.frame.w > d.frame.h;
     const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
     if (dMajor <= 20) return; // settled echo — pass moved it back already
+    // Fire-time zoom check (not bang-time): the 300ms debounce coalesces
+    // the zoom's moved+resized bang train into one suppressed decision.
+    if (isZoomSuspect(id)) {
+      evt(`ZOOM-SUPPRESS-PIN id=${id} path=oob`);
+      scheduleZoomSnapBack(id);
+      return;
+    }
     log(`RESIZE-OUTSIDE-BRACKET id=${id} live-dMajor=${Math.round(dMajor)} → pairwise pin + tile`);
     pinFromActualSize(id);
     state.tileReason = `ax-resize(${id})`;
@@ -218,8 +294,8 @@ export function start() {
   sd.windows.all.subscribe(async (list) => {
     if (!Array.isArray(list)) return;
     const now = Date.now();
-    for (const [id, ts] of destroyedRecently) {
-      if (now - ts > DESTROYED_GRACE_MS) destroyedRecently.delete(id);
+    for (const [id, entry] of destroyedRecently) {
+      if (now - entry.ts > DESTROYED_GRACE_MS) destroyedRecently.delete(id);
     }
     const next = Object.create(null);
     for (const w of list) {
@@ -260,8 +336,11 @@ export function start() {
   sd.spaces.all.subscribe((info) => {
     if (!info) return;
     state.spacesByDisplay = info;
-    // Active space changed — rebuild order + retile.
+    // Active space changed — rebuild order + retile. Re-render the snapshot
+    // strip too so tiles follow their origin desktop (show/hide per Space)
+    // and the tiler reserves strip space only on the active desktop.
     updateWindowOrder();
+    updateSnapshotLayout();
     state.tileReason = "spaces";
     tileWindows();
   });
@@ -289,9 +368,16 @@ export function start() {
     }).join("/");
     if (sig === lastDisplayGeoSig) return; // brightness-only push, ignore
     lastDisplayGeoSig = sig;
-    if (displayDebounce) clearTimeout(displayDebounce);
-    displayDebounce = setTimeout(() => {
+    const runDisplaySettle = () => {
       displayDebounce = null;
+      // A drag bracket is open — mid-drag frames are transient, and a
+      // premature updateWindowOrder here migrated the dragged window
+      // between space orders before the drop decision ran. Re-arm and
+      // settle after the bracket closes.
+      if (state.dragInFlight) {
+        displayDebounce = setTimeout(runDisplaySettle, 250);
+        return;
+      }
       // Pull a fresh displays snapshot after the settle delay so screenFrame
       // math uses the now-current visibleFrame instead of the stale value
       // that fired this callback.
@@ -302,7 +388,9 @@ export function start() {
       updateWindowOrder();
       state.tileReason = "display-change";
       tileWindows();
-    }, 250);
+    };
+    if (displayDebounce) clearTimeout(displayDebounce);
+    displayDebounce = setTimeout(runDisplaySettle, 250);
   });
 
   // Lifecycle bangs — invalidate space cache for destroyed windows AND
@@ -310,7 +398,20 @@ export function start() {
   window.onBang_sd_window_destroyed = (detail) => {
     if (detail && detail.id) {
       const id = +detail.id;
-      destroyedRecently.set(id, Date.now());
+      // Stash per-id state BEFORE the eager purge below — if this destroy
+      // turns out to be half of a same-slot recreation pair,
+      // handleWindowEvent's migration reads weight/pin/target/spaces from
+      // this stash (the live maps are already scrubbed by then).
+      const w = state.windowsById[id];
+      destroyedRecently.set(id, {
+        ts: Date.now(),
+        app: w?.app,
+        frame: w?.frame && { ...w.frame },
+        weight: state.windowWeights[id] ?? null,
+        pin: state.pinnedSizes[id] ?? null,
+        target: state.lastTileTarget[id] || null,
+        spaces: state.windowSpacesCache[id] || null,
+      });
       delete state.windowSpacesCache[id];
       // Eagerly drop from the live index so handleWindowEvent's currentIds
       // reflects the close. Without this, CGWindowList's lag (~50–500ms)
@@ -474,13 +575,107 @@ export function start() {
   window.onBang_sd_window_resized = (detail) => handleDragBang(detail, "resized");
 }
 
+// Titlebar double-click (macOS zoom) detection. Zoom manifests as a plain
+// moved+resized AX pair — no distinct event, no isZooming observable — so
+// without detection the bracket-close / out-of-bracket handlers misread it
+// as a user drag-resize and pin the zoomed size (then the tiler fights the
+// zoom animation). Policy (user decision 2026-07-01): IGNORE the zoom —
+// suppress the pin and snap the window back to its tile slot once the
+// animation settles.
+//
+// Detection: two mouse-downs within DOUBLE_CLICK_MS at (nearly) the same
+// point, landing in the top TITLEBAR_BAND_PX of a window we actually tile
+// (union of lastTiledByDisplay — non-tiled/excluded windows keep native
+// zoom). For ZOOM_SUSPECT_MS afterwards, any oversized resize for that id
+// schedules a snap-back retile instead of a pairwise pin.
+const DOUBLE_CLICK_MS = 400;
+const CLICK_SLOP_PX = 5;
+const TITLEBAR_BAND_PX = 40;
+const ZOOM_SUSPECT_MS = 1500;
+let lastDown = null;    // { x, y, ts } of the previous leftMouseDown
+let zoomSuspect = null; // { id, ts, downPos: {x, y} }
+const zoomSnapTimers = new Map(); // id -> { timer, retries }
+
+// Tiled window whose titlebar band contains the point, or null. Tiled
+// windows don't overlap, so first hit wins.
+function titlebarHit(x, y) {
+  for (const displayID in state.lastTiledByDisplay) {
+    const arr = state.lastTiledByDisplay[displayID];
+    if (!Array.isArray(arr)) continue;
+    for (const id of arr) {
+      const f = state.windowsById[+id]?.frame;
+      if (!f) continue;
+      if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + TITLEBAR_BAND_PX) {
+        return +id;
+      }
+    }
+  }
+  return null;
+}
+
+function trackTitlebarDoubleClick(payload) {
+  if (!payload || payload.x == null || payload.y == null) return;
+  const now = Date.now();
+  const p = { x: payload.x, y: payload.y, ts: now };
+  if (lastDown && now - lastDown.ts <= DOUBLE_CLICK_MS &&
+      Math.abs(p.x - lastDown.x) <= CLICK_SLOP_PX &&
+      Math.abs(p.y - lastDown.y) <= CLICK_SLOP_PX) {
+    const id = titlebarHit(p.x, p.y);
+    if (id != null) {
+      zoomSuspect = { id, ts: now, downPos: { x: p.x, y: p.y } };
+      evt(`ZOOM-SUSPECT id=${id}`);
+    }
+  } else if (zoomSuspect &&
+             (Math.abs(p.x - zoomSuspect.downPos.x) > 2 * CLICK_SLOP_PX ||
+              Math.abs(p.y - zoomSuspect.downPos.y) > 2 * CLICK_SLOP_PX)) {
+    // A distinct new click elsewhere ends the suspect window early —
+    // protects a genuine edge-resize started right after a double-click.
+    log(`ZOOM-CLEAR id=${zoomSuspect.id} reason=new-click`);
+    zoomSuspect = null;
+  }
+  lastDown = p;
+}
+
+function isZoomSuspect(id) {
+  return zoomSuspect != null && +zoomSuspect.id === +id &&
+         Date.now() - zoomSuspect.ts < ZOOM_SUSPECT_MS;
+}
+
+// Coalesced snap-back: one retile per zoomed window, after the OS zoom
+// animation settles (~350-500ms). No pin was written and lastTileTarget is
+// untouched, so the pass recomputes the identical tile frame and re-asserts
+// it; trailing bangs land in the fresh echo window (or read the settled
+// frame at the OOB live-read) — no feedback storm.
+function scheduleZoomSnapBack(id) {
+  const prev = zoomSnapTimers.get(id);
+  if (prev && prev.timer) clearTimeout(prev.timer);
+  const entry = { timer: null, retries: 0 };
+  zoomSnapTimers.set(id, entry);
+  armZoomSnapTimer(id, entry);
+}
+function armZoomSnapTimer(id, entry) {
+  entry.timer = setTimeout(async () => {
+    if ((state.dragInFlight || state.tilingCount > 0) && entry.retries < 5) {
+      entry.retries++;
+      armZoomSnapTimer(id, entry);
+      return;
+    }
+    zoomSnapTimers.delete(id);
+    if (zoomSuspect && +zoomSuspect.id === +id) zoomSuspect = null; // consumed
+    evt(`ZOOM-SNAPBACK id=${id} → retile`);
+    state.tileReason = `zoom-snapback(${id})`;
+    state.snapNextTile = true;
+    await tileWindows();
+  }, 450);
+}
+
 // Drag-bracket — opened on leftMouseDown, closed on leftMouseUp. While open,
 // tile passes are blocked (state.dragInFlight) and bang-triggered actions are
 // deferred to bracket close. The candidate moved id is captured from mid-drag
 // bangs; at close, we run ONE decision based on the final frame.
 let dragSafetyTimer = null;
 let dragCloseTimer = null;
-export function startDragBracket() {
+export function startDragBracket(payload) {
   // Reset bracket state. If a previous bracket is still pending close (e.g.
   // user click-drag-click in rapid succession), cancel the pending close so
   // we don't run the prior decision on the new mouse-down.
@@ -488,6 +683,7 @@ export function startDragBracket() {
   if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
   state.dragInFlight = true;
   state.dragCandidateId = null;
+  trackTitlebarDoubleClick(payload);
   // Safety: drop the gate after 5s of no mouseUp. Shouldn't happen (every
   // mouseDown gets a mouseUp), but if the eventtap drops one we don't want
   // tile passes blocked forever.
@@ -504,9 +700,18 @@ export function startDragBracket() {
   }, 5000);
 }
 
-export function endDragBracket() {
+export function endDragBracket(payload) {
   if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
   if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
+  // Double-click-and-HOLD drag: the cursor moved between down and up, so
+  // this is a real drag, not a zoom. Runs synchronously at mouseUp — before
+  // the close timer below reads the suspect.
+  if (zoomSuspect && payload && payload.x != null &&
+      (Math.abs(payload.x - zoomSuspect.downPos.x) > CLICK_SLOP_PX ||
+       Math.abs(payload.y - zoomSuspect.downPos.y) > CLICK_SLOP_PX)) {
+    log(`ZOOM-CLEAR id=${zoomSuspect.id} reason=cursor-moved`);
+    zoomSuspect = null;
+  }
   // 100ms grace for the trailing synth-poll bang to land — the OS posts
   // the final moved/resized bang after mouseUp (CGS-side observation), so
   // we wait so dragCandidateId reflects the FINAL position, not the
@@ -526,6 +731,31 @@ export function endDragBracket() {
         await tileWindows();
       }
       return;
+    }
+    // Zoom suspect — a titlebar double-click is not a drag at all. The
+    // zoom's mid-animation bangs made this window the candidate; both the
+    // resize branch (would pin the zoomed size) and the reorder branch
+    // (would reorder off a mid-zoom frame) are wrong. Snap back instead.
+    if (isZoomSuspect(movedId)) {
+      evt(`ZOOM-SUPPRESS-PIN id=${movedId} path=bracket`);
+      scheduleZoomSnapBack(movedId);
+      return;
+    }
+    // Cross-display drop — checked BEFORE the resize branch, because macOS
+    // auto-shrinks windows that don't fit the destination display and that
+    // size delta must not be read as a user resize (pinFromActualSize would
+    // no-op at idx<0 and the drop would be lost). Source display comes from
+    // lastTiledByDisplay, which is frozen at pre-drag membership while the
+    // bracket is open (tile passes defer), so it's the display the window
+    // was tiled on when the drag started.
+    const moved = state.windowsById[movedId];
+    if (moved && moved.frame) {
+      const src = sourceDisplayIdFor(movedId);
+      const dest = displayForWindow(moved);
+      if (src != null && dest && +dest.displayID !== +src) {
+        await crossDisplayDrop(movedId, src, dest);
+        return;
+      }
     }
     const tgt = state.lastTileTarget?.[movedId]?.frame;
     const liveFrame = state.windowsById[movedId]?.frame;
@@ -590,6 +820,9 @@ export function pinFromActualSize(movedId) {
   const bId = onScreen[bIdx]; // exists: onScreen.length >= 2
 
   state.pinnedSizes[+movedId] = Math.max(50, Math.floor(actualSize));
+  // A user resize supersedes any refusal provenance — PIN-CLAMP may shed
+  // this pin again.
+  state.refusalPins.delete(+movedId);
 
   // B's baseline: its pin if pinned, else its last tile target, else live frame.
   const bTgt = state.lastTileTarget?.[+bId]?.frame;
@@ -608,8 +841,110 @@ export function pinFromActualSize(movedId) {
     log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → 50px (overflow not redistributed)`);
   }
   state.pinnedSizes[+bId] = Math.max(50, bWant);
+  state.refusalPins.delete(+bId);
   if (state.onLayoutChange) state.onLayoutChange();
   log(`PIN-PAIR ${horizontal ? "w" : "h"} edge=${leading ? "leading" : "trailing"} A=${movedId}→${state.pinnedSizes[+movedId]}px B=${bId}→${state.pinnedSizes[+bId]}px delta=${Math.round(delta)}`);
+}
+
+// Display the window was tiled on in the most recent tile pass — the drag
+// bracket defers tile passes, so during a drag this is the pre-drag display.
+function sourceDisplayIdFor(movedId) {
+  for (const displayID in state.lastTiledByDisplay) {
+    const arr = state.lastTiledByDisplay[displayID];
+    if (Array.isArray(arr) && arr.some((id) => +id === +movedId)) return +displayID;
+  }
+  return null;
+}
+
+// Cross-display drop — the window left srcDisplayID and was released on
+// dest. Unlike reorderOnDrop (which reorders among same-display peers),
+// this migrates the window between space orders and reflows BOTH displays.
+// Also the shared bookkeeping for the moveScreenPrev/Next hotkeys
+// (operations.js moveWindowToAdjacentScreen), which had the same
+// stale-space-cache dropout.
+export async function crossDisplayDrop(movedId, srcDisplayID, dest) {
+  const moved = state.windowsById[movedId];
+  if (!moved || !moved.frame) return;
+  evt(`DRAG-CROSS id=${movedId} (${moved.app}) src=${srcDisplayID} dest=${dest.displayID}`);
+
+  // Stale space cache is what used to drop the window from the destination
+  // order. Delete synchronously FIRST — an absent entry means "no info,
+  // include optimistically" in updateWindowOrder's space filter, so no pass
+  // that interleaves the await below can exclude the window.
+  delete state.windowSpacesCache[movedId];
+  const destSpace = activeSpaceOnDisplay(dest.uuid);
+  const fresh = await sd.spaces.windowSpaces(movedId).catch(() => null);
+  if (fresh && fresh.length && destSpace != null && fresh.includes(destSpace)) {
+    state.windowSpacesCache[movedId] = fresh;
+    log(`CROSS-SPACES id=${movedId} refreshed=${JSON.stringify(fresh)}`);
+  } else if (destSpace != null) {
+    // The OS hasn't re-registered the window on the destination Space yet.
+    // Leave the cache absent (optimistic include) and converge once later.
+    setTimeout(async () => {
+      const again = await sd.spaces.windowSpaces(movedId).catch(() => null);
+      if (again && again.length && again.includes(destSpace)) {
+        state.windowSpacesCache[movedId] = again;
+        log(`CROSS-SPACES id=${movedId} converged=${JSON.stringify(again)}`);
+      }
+    }, 750);
+  }
+
+  // Spaces info not populated at all — skip order surgery; the optimistic
+  // cache plus updateWindowOrder will place the window on the dest display.
+  if (destSpace == null) {
+    updateWindowOrder();
+    state.tileReason = `cross-display(${movedId})`;
+    await tileWindows();
+    return;
+  }
+
+  // Remove from the source space's order. Skipped when both displays share
+  // the active space ("Displays have separate Spaces" off) — then the
+  // remove-then-insert below operates on the single shared array.
+  const srcDisplay = state.displays.find((d) => +d.displayID === +srcDisplayID);
+  const srcSpace = srcDisplay ? activeSpaceOnDisplay(srcDisplay.uuid) : null;
+  if (srcSpace != null && srcSpace !== destSpace) {
+    state.windowOrderBySpace[srcSpace] =
+      (state.windowOrderBySpace[srcSpace] || []).filter((id) => +id !== +movedId);
+  }
+
+  // Insert at the drop position among the destination's tiled, non-collapsed
+  // peers. Empty destination (no peers) → append: first window on that
+  // display just works.
+  const tiled = state.lastTiledByDisplay[dest.displayID];
+  const tiledSet = tiled && tiled.length ? new Set(tiled.map((id) => +id)) : null;
+  const destOrder = (state.windowOrderBySpace[destSpace] || []).filter((id) => +id !== +movedId);
+  const peers = [];
+  for (const id of destOrder) {
+    if (tiledSet && !tiledSet.has(+id)) continue;
+    const w = state.windowsById[id];
+    if (!w || !w.frame) continue;
+    if (w.frame.h <= cfg.collapsedWindowHeight) continue;
+    const wd = displayForWindow(w);
+    if (!wd || wd.displayID !== dest.displayID) continue;
+    peers.push(w);
+  }
+  const horizontal = dest.frame.w > dest.frame.h;
+  const newIdx = calculateDropPosition(moved.frame, peers, horizontal);
+  let insertAt = destOrder.length;
+  if (peers.length > 0) {
+    insertAt = newIdx >= peers.length
+      ? destOrder.indexOf(peers[peers.length - 1].id) + 1
+      : destOrder.indexOf(peers[newIdx].id);
+    if (insertAt < 0) insertAt = destOrder.length;
+  }
+  destOrder.splice(insertAt, 0, +movedId);
+  state.windowOrderBySpace[destSpace] = destOrder;
+
+  // Weight is relative and renormalizes per display — keep it. A pin is
+  // absolute px captured against the SOURCE display's major axis (possibly
+  // even the other axis after a landscape→portrait move) — drop it.
+  delete state.pinnedSizes[movedId];
+  state.refusalPins.delete(+movedId);
+
+  updateWindowOrder();
+  state.tileReason = `cross-display(${movedId})`;
+  await tileWindows();
 }
 
 async function reorderOnDrop(movedId) {

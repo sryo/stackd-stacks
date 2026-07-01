@@ -40,10 +40,13 @@ async function init() {
   // drag synth-poll bang. Sharing the eventtap callback so the daemon
   // doesn't install two taps for the same event.
   sd.events.on("snapshotsLeftClick", (payload) => {
-    startDragBracket();
+    // Payload carries the global click point — the bracket uses it to
+    // detect titlebar double-clicks (macOS zoom) so the resulting resize
+    // isn't misread as a user drag-resize.
+    startDragBracket(payload);
     onLeftClickEvent(payload);
   });
-  sd.events.on("dragMouseUp", () => { endDragBracket(); });
+  sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
   // mouseMoved eventtap was firing the hover handler at ~120Hz, blocking
   // every other stack's sd.mouse / sd.windows.all push. The 30Hz sd.mouse
   // signal that timetrail / focus / etc. depend on was getting starved.

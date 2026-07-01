@@ -8,6 +8,7 @@ import {
   state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log, warn
 } from "./core.js";
 import { tileWindows } from "./tiler.js";
+import { crossDisplayDrop } from "./events.js";
 import { captureAndMinimize } from "./snapshots.js";
 
 function focusedWinId() {
@@ -268,14 +269,20 @@ export async function moveWindowToAdjacentScreen(direction) {
     mousePos.x >= oldFrame.x && mousePos.x <= oldFrame.x + oldFrame.w &&
     mousePos.y >= oldFrame.y && mousePos.y <= oldFrame.y + oldFrame.h;
 
-  await sd.windows.setFrame(w.id, {
+  const newFrame = {
     x: target.frame.x + relX * target.frame.w,
     y: target.frame.y + relY * target.frame.h,
     w: relW * target.frame.w,
     h: relH * target.frame.h
-  });
+  };
+  await sd.windows.setFrame(w.id, newFrame);
+  // Eager hydration — the moved bang can trail the setFrame, and the
+  // cross-display bookkeeping below derives the destination from the frame.
+  if (state.windowsById[w.id]) state.windowsById[w.id].frame = { ...newFrame };
+  // Same bookkeeping as a cross-display drag-drop: space-cache refresh,
+  // order migration between spaces, pin drop, both displays reflow.
+  await crossDisplayDrop(w.id, d.displayID, target);
   setTimeout(() => {
-    tileWindows();
     sd.windows.focus(w.id);
     if (mouseWasInside) {
       const updated = state.windowsById[w.id];

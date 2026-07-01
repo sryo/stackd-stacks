@@ -13,6 +13,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { state, log, displayForWindow } from "./core.js";
+import { adjustedFrameForDisplay } from "./snapshots.js";
 import { isFullscreenActive } from "./fullscreen.js";
 import { moveWindowInOrder } from "./operations.js";
 import { startDragBracket, endDragBracket } from "./events.js";
@@ -33,37 +34,26 @@ const RESIZE_MIN_PX  = 100; // matches operations.js PIN_MIN_PX
 // display work area — so the rightmost window slides left instead of dying
 // against the screen edge (trailing-edge growth had no room to grow,
 // 2026-06-10). dragEnd commits the previewed frame and closes the bracket.
-let gestureBracket = null; // { winId, origFrame, frame, horizontal, vf, offX, offY } while active
+let gestureBracket = null; // { winId, origFrame, frame, horizontal, vf } while active
 
 // --- preview outline -------------------------------------------------------
-// Drawn in windowscape's own panel (region:fullscreen, display:primary).
-// Global screen coords map to panel coords by subtracting the display
-// frame origin — same convention as the snapshot strip's rect math.
-// Styled to read as overlay-border's ring scaling (8px, included blue).
-let previewEl = null;
-function showPreview(frame, offX, offY) {
-  if (!previewEl) {
-    previewEl = document.createElement("div");
-    previewEl.style.cssText = [
-      "position: fixed",
-      "box-sizing: border-box",
-      "border: 8px solid rgba(26,77,230,0.8)",
-      "border-radius: 16px",
-      "background: rgba(26,77,230,0.06)",
-      "pointer-events: none",
-      "z-index: 2147483647"
-    ].join(";");
-    document.body.appendChild(previewEl);
-  }
-  previewEl.style.left   = `${frame.x - offX}px`;
-  previewEl.style.top    = `${frame.y - offY}px`;
-  previewEl.style.width  = `${frame.w}px`;
-  previewEl.style.height = `${frame.h}px`;
-  previewEl.style.display = "block";
-}
-function hidePreview() {
-  if (previewEl) previewEl.style.display = "none";
-}
+// Drawn via a daemon free-region overlay (sd.overlay.region) at the preview's
+// GLOBAL rect, so it lands on whichever display holds the focused window —
+// windowscape's own panel is display:"primary" and couldn't render it on
+// other displays (the outline/topbar appear there via their own stacks).
+// Styled to read as overlay-border's ring (8px blue, 16px radius); the
+// overlay panel IS the rect, so .ring fills it (inset:0).
+let previewHandle = null;
+const PREVIEW_HTML = `<div class="ring"></div>`;
+const PREVIEW_CSS = [
+  ".ring {",
+  "  position: absolute; inset: 0; box-sizing: border-box;",
+  "  border: 8px solid rgba(26,77,230,0.8);",
+  "  border-radius: 16px;",
+  "  background: rgba(26,77,230,0.06);",
+  "  pointer-events: none;",
+  "}"
+].join("\n");
 
 function openGestureBracket() {
   const f = sd.windows.focused.peek();
@@ -79,10 +69,21 @@ function openGestureBracket() {
     origFrame: { ...w.frame },
     frame: { ...w.frame },
     horizontal: d ? d.frame.w > d.frame.h : true,
-    vf: (d && (d.visibleFrame || d.frame)) || null,
-    offX: (d && d.frame.x) || 0,
-    offY: (d && d.frame.y) || 0
+    // Clamp against the snapshot-rail-adjusted work area, not the raw
+    // visibleFrame — a gesture-grow of the rightmost window would
+    // otherwise legally extend under the strip.
+    vf: (d && (adjustedFrameForDisplay(d) || d.visibleFrame || d.frame)) || null
   };
+  // Create the preview overlay at the frozen frame (GLOBAL coords, so the
+  // daemon places it on the focused window's display). Async: the first few
+  // steps may land before it resolves — setFrame guards on the handle and the
+  // next step re-sends the latest frame, so nothing visible is lost. If the
+  // bracket already closed by the time create resolves, drop the orphan.
+  sd.overlay.region({ rect: { ...w.frame }, html: PREVIEW_HTML, css: PREVIEW_CSS })
+    .then((h) => {
+      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.frame); }
+      else if (h) h.remove();
+    });
   log(`GESTURE bracket-open id=${w.id}`);
   return gestureBracket;
 }
@@ -118,7 +119,7 @@ function stepPreview(deltaPx) {
       if (g.frame.y + g.frame.h > g.vf.y + g.vf.h) g.frame.y = g.vf.y + g.vf.h - g.frame.h;
     }
   }
-  showPreview(g.frame, g.offX, g.offY);
+  if (previewHandle) previewHandle.setFrame(g.frame);
 }
 
 export function bind() {
@@ -153,7 +154,7 @@ export function bind() {
     if (!gestureBracket) return;
     const g = gestureBracket;
     gestureBracket = null;
-    hidePreview();
+    if (previewHandle) { previewHandle.remove(); previewHandle = null; }
     const dMajor = g.horizontal
       ? Math.abs(g.frame.w - g.origFrame.w)
       : Math.abs(g.frame.h - g.origFrame.h);

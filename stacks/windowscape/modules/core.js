@@ -15,6 +15,14 @@ export const state = {
   // grow/shrink/cycleWidth verbs. Cleared by cycleWidth (focused only) and
   // resetWeights (all). hy3:base mechanic.
   pinnedSizes:        Object.create(null),
+  // Ids whose pinnedSizes entry came from a REFUSAL (PASS-2 / anim sweep /
+  // OOB containment) rather than a user resize. Refusal pins encode an
+  // app's real minimum — the PIN-CLAMP oversubscription reset must shed
+  // user pins first, because dropping a refusal pin just re-triggers the
+  // refusal on the next even split (the 2026-07-01 new-window/rail storm:
+  // clamp → even split → refuse → pin → clamp, forever). Entries whose pin
+  // is gone are harmless — consumers intersect with pinnedSizes.
+  refusalPins:        new Set(),
   // A tile pass was skipped while a drag bracket was open; endDragBracket
   // (or its safety timeout) runs the deferred pass when the bracket closes.
   tileDeferred:       false,
@@ -184,6 +192,71 @@ export function isAppIncluded(win) {
                  (appName  && state.listedApps[appName]);
   if (cfg.exclusionMode) return !listed;
   return !!listed;
+}
+
+// Identity migration for same-slot window recreation (events.js
+// matchRecreationPairs): an app destroyed a window and recreated it at a
+// near-identical frame, so the new id should inherit the old id's place in
+// the world — order position, tile membership, weight/pin, tile target,
+// space cache, minimize state, focus history. `stash` is the destroy-time
+// snapshot events.js captured before the destroy handler purged the live
+// maps; it can be missing (grace expired), in which case only the
+// positional substitutions run.
+export function migrateWindowId(oldId, newId, stash) {
+  oldId = +oldId; newId = +newId;
+  for (const space in state.windowOrderBySpace) {
+    const order = state.windowOrderBySpace[space];
+    const i = order.findIndex((id) => +id === oldId);
+    if (i < 0) continue;
+    if (order.some((id) => +id === newId)) order.splice(i, 1);
+    else order[i] = newId;
+  }
+  for (const displayID in state.lastTiledByDisplay) {
+    const arr = state.lastTiledByDisplay[displayID];
+    if (!Array.isArray(arr)) continue;
+    const i = arr.findIndex((id) => +id === oldId);
+    if (i < 0) continue;
+    if (arr.some((id) => +id === newId)) arr.splice(i, 1);
+    else arr[i] = newId;
+  }
+  if (stash) {
+    if (stash.weight != null && state.windowWeights[newId] == null) {
+      state.windowWeights[newId] = stash.weight;
+    }
+    if (stash.pin != null && state.pinnedSizes[newId] == null) {
+      state.pinnedSizes[newId] = stash.pin;
+    }
+    // Keep the stash's ORIGINAL ts: the 600ms echo window is long expired
+    // (correct — this was never our setFrame), but the out-of-bracket
+    // resize path needs a target so the recreated window sitting at its
+    // old tile frame reads dMajor≈0 instead of pinning phantom sizes.
+    if (stash.target && !state.lastTileTarget[newId]) {
+      state.lastTileTarget[newId] = stash.target;
+    }
+    // Same frame ⇒ same space; seeding avoids an async round-trip during
+    // which the space filter would run on missing data.
+    if (stash.spaces && !state.windowSpacesCache[newId]) {
+      state.windowSpacesCache[newId] = stash.spaces;
+    }
+  }
+  delete state.windowWeights[oldId];
+  delete state.pinnedSizes[oldId];
+  delete state.lastTileTarget[oldId];
+  delete state.windowSpacesCache[oldId];
+  delete state.offscreenSince[oldId];
+  const fi = state.focusHistory.indexOf(oldId);
+  if (fi >= 0) {
+    if (state.focusHistory.includes(newId)) state.focusHistory.splice(fi, 1);
+    else state.focusHistory[fi] = newId;
+  }
+  if (state.minimizedIds.has(oldId)) {
+    state.minimizedIds.delete(oldId);
+    state.minimizedIds.add(newId);
+  }
+  if (state.refusalPins.has(oldId)) {
+    state.refusalPins.delete(oldId);
+    if (state.pinnedSizes[newId] != null) state.refusalPins.add(newId);
+  }
 }
 
 // Rebuild windowOrderBySpace for each display's active space, preserving prior

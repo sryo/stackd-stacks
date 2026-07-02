@@ -491,8 +491,25 @@ export function start() {
   // Bangs OUTSIDE any bracket: resized → 300ms-debounced pairwise pin +
   // retile (scheduleOutOfBracketResize); moved-only → ignored (next tile
   // pass snaps positions).
+  // Button-rect cache refresh, trailing-debounced off geometry bangs. Every
+  // moved/resized bang re-arms; the refresh fires once motion goes quiet.
+  // This wiring was lost in a past refactor (the refreshButtons import sat
+  // unused), leaving the intercept cache stale after every reflow — the
+  // first dot-click after a retile consulted rects from the PREVIOUS
+  // layout. buttons.js's click-time verification is the last line of
+  // defense; this keeps the cache honest so that guard rarely has to fire.
+  let buttonRefreshTimer = null;
+  const scheduleButtonRefresh = () => {
+    if (buttonRefreshTimer) clearTimeout(buttonRefreshTimer);
+    buttonRefreshTimer = setTimeout(() => {
+      buttonRefreshTimer = null;
+      refreshButtons();
+    }, 250);
+  };
+
   const handleDragBang = (detail, kind) => {
     if (!detail || !detail.id) return;
+    scheduleButtonRefresh();
     // ALWAYS hydrate state.windowsById from the bang. sd.windows.all is
     // throttled (fires on focus/title change only), so peer frames otherwise
     // drift stale.

@@ -146,6 +146,24 @@ export async function onButtonClick(payload) {
     return;
   }
   const { winId, kind } = hit;
+  // Click-time verification. The cache can be stale mid-retile, and tiled
+  // windows keep their dots in the same top band — one reflow can park
+  // window B's dots exactly where A's used to be, so trusting the cached
+  // id would close/zoom the WRONG window. Re-read the live rect for the
+  // matched window and require the click to still land inside it; on
+  // mismatch the (already-consumed) click is swallowed, which beats
+  // misfiring on another app. One buttonFrames RPC per dot-click.
+  let live = null;
+  try { live = await sd.windows.buttonFrames(winId); } catch (_) {}
+  const lr = live && live[kind];
+  const pad = 2; // AX-read jitter tolerance
+  if (!lr
+      || x < lr.x - pad || x >= lr.x + lr.w + pad
+      || y < lr.y - pad || y >= lr.y + lr.h + pad) {
+    log(`buttons: stale ${kind} rect for winId=${winId} — click swallowed, cache refreshed`);
+    refresh();
+    return;
+  }
   log(`BUTTON-HIT ${kind} winId=${winId}`);
   switch (kind) {
     case "close":

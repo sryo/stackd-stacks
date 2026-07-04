@@ -1,8 +1,11 @@
 {
   "id": "undoclose",
   "name": "Undo Close",
-  "region": "fullscreen",
-  "size": { "h": 0 },
+  "anchor": { "edge": "top-center", "inset": [80] },
+  "size": { "w": 420, "h": 48 },
+  "material": "glass",
+  "cornerRadius": 12,
+  "padding": 0,
   "level": "high",
   "clickThrough": true,
   "permissions": [],

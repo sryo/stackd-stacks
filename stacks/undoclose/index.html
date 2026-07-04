@@ -5,7 +5,7 @@
   <link rel="stylesheet" href="index.css">
   <title>Undo Close</title>
 </head>
-<body>
+<body data-theme="{{ sd.appearance.dark ? 'dark' : 'light' }}">
   <div id="toast" class="toast" aria-hidden="true">
     <span class="base">Undo close </span><span id="label" class="bold"></span><span class="bold">  ⌘⌥Z  </span><span id="left" class="dim">5s</span>
   </div>
@@ -18,7 +18,15 @@
     // No persistent recents list — just the last thing.
     import { sd } from "sd://runtime/api.js";
 
+    // Window is an anchored glass panel; hidden at alpha=0 by default and
+    // revealed per toast. The first setAlpha call disables the daemon's
+    // first-paint auto-reveal, so there's no flash at launch.
+    sd.window.setAlpha(0);
+
     const TIMEOUT_S = 5;
+    const TOAST_H = 48;
+    const TOP_INSET = 80;
+    const MIN_W = 240;
     const $toast = document.getElementById("toast");
     const $label = document.getElementById("label");
     const $left  = document.getElementById("left");
@@ -29,10 +37,21 @@
 
     function showToast(label) {
       $label.textContent = label;
-      $toast.classList.add("on");
+      // offsetWidth includes the toast's own padding, and flex min-content
+      // sizing keeps the nowrap content un-shrunk even when it overflows the
+      // current window — so a single measure is correct regardless of the
+      // window's prior width. Bridge messages are FIFO, so the resize lands
+      // before the reveal.
+      const w = Math.max(MIN_W, $toast.offsetWidth);
+      const scr = sd.screen.current;
+      if (scr) {
+        const f = scr.frame;
+        sd.window.setFrame({ x: f.x + Math.round((f.w - w) / 2), y: f.y + TOP_INSET, w: w, h: TOAST_H });
+      }
+      sd.window.setAlpha(1);
     }
     function hideToast() {
-      $toast.classList.remove("on");
+      sd.window.setAlpha(0);
       armedAction = null;
       armedDeadline = 0;
       clearInterval(tickHandle);

@@ -29,6 +29,13 @@ export const state = {
   // winId -> ts of first consecutive onscreen=false observation (tiler's
   // debounced eviction of hidden windows vs occlusion flicker).
   offscreenSince:     Object.create(null),
+  // winIds observed onscreen at least once this session. The tiler's 1.5s
+  // offscreen grace exists to ride out occlusion flicker on windows we've
+  // been tiling — a window we've NEVER seen onscreen (Cmd+H'd before the
+  // stack booted, parked off-space) gets no grace, otherwise every stackd
+  // restart tiles a phantom slot for 1.5s and the layout visibly snaps
+  // twice.
+  everOnscreen:       new Set(),
   focusHistory:       [],
   focusHistoryMax:    10,
   listedApps:         Object.create(null), // bundleId/name -> true
@@ -252,6 +259,10 @@ export function migrateWindowId(oldId, newId, stash) {
   if (state.minimizedIds.has(oldId)) {
     state.minimizedIds.delete(oldId);
     state.minimizedIds.add(newId);
+  }
+  if (state.everOnscreen.has(oldId)) {
+    state.everOnscreen.delete(oldId);
+    state.everOnscreen.add(newId);
   }
   if (state.refusalPins.has(oldId)) {
     state.refusalPins.delete(oldId);

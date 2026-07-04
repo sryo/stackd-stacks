@@ -90,6 +90,12 @@ async function tileWindowsInternal(snap) {
       // reserving a phantom slot. 1.5s of persistent offscreen-ness
       // separates the two: flicker recovers within a pass, hiding doesn't.
       if (w.onscreen === false) {
+        // The grace below rides out occlusion flicker on windows we've been
+        // tiling. A window never yet seen onscreen (Cmd+H'd before boot,
+        // parked off-space) isn't flickering — it's absent; tiling it for
+        // 1.5s after a stackd restart reserved a phantom slot and made the
+        // layout snap twice.
+        if (!state.everOnscreen.has(+id)) continue;
         if (state.offscreenSince[id] == null) state.offscreenSince[id] = Date.now();
         if (Date.now() - state.offscreenSince[id] > 1500) continue;
       } else {
@@ -97,7 +103,15 @@ async function tileWindowsInternal(snap) {
       }
       if (w.isMinimized === true) continue;
       if (w.addressable === false) continue;
-      if (w.isStandard === false) continue;
+      // Positive confirmation required, not just "not known-bad": a
+      // created-bang stub (events.js onBang_sd_window_created) carries no
+      // isStandard field, and at daemon boot the 10s poll bursts creates
+      // for every window AX missed — tiling those stubs reserved phantom
+      // slots for other-space/helper windows until the next all-push
+      // evicted them, visibly resizing everything twice. The all-push
+      // subscription re-triggers a pass when it upgrades a stub, so a
+      // slow-AX window still tiles as soon as windows.all confirms it.
+      if (w.isStandard !== true) continue;
       // displayForWindow falls back to displays[0] when a window's center
       // is off ALL displays — happens when a tile gets nudged off-screen
       // briefly; we still want to address it on its assigned display.

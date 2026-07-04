@@ -298,18 +298,34 @@ export function start() {
       if (now - entry.ts > DESTROYED_GRACE_MS) destroyedRecently.delete(id);
     }
     const next = Object.create(null);
+    // The tiler only admits isStandard === true, so a created-bang stub
+    // (no isStandard field) stays out of rotation until this push confirms
+    // it — and since the all-push is not otherwise a tile trigger, the
+    // confirmation must schedule the pass itself or a slow-AX window would
+    // never tile until some unrelated event.
+    let confirmedNew = false;
     for (const w of list) {
       // Skip ids the destroyed bang already told us are gone — CGWindowList
       // can keep reporting them for a beat after AX fires destroy.
       if (destroyedRecently.has(w.id)) continue;
       next[w.id] = w;
+      // Feed the tiler's boot-phantom gate: only windows seen onscreen at
+      // least once earn the offscreen-flicker grace.
+      if (w.onscreen !== false) state.everOnscreen.add(+w.id);
+      if (w.isStandard === true && state.windowsById[w.id]?.isStandard !== true) {
+        confirmedNew = true;
+      }
     }
     state.windowsById = next;
+    if (confirmedNew) debouncedHandleWindowEvent();
     // Prune minimizedIds of IDs that are gone — keeps the set bounded
     // and lets a re-created window (same app, new CGWindowID) get a
     // fresh tile slot.
     for (const id of state.minimizedIds) {
       if (!next[id]) state.minimizedIds.delete(id);
+    }
+    for (const id of state.everOnscreen) {
+      if (!next[id]) state.everOnscreen.delete(id);
     }
   });
 

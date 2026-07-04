@@ -7,7 +7,7 @@
 </head>
 <body data-theme="{{ sd.appearance.dark ? 'dark' : 'light' }}">
   <div id="toast" class="toast" aria-hidden="true">
-    <span class="base">Undo close </span><span id="label" class="bold"></span><span class="bold">  ⌘⌥Z  </span><span id="left" class="dim">5s</span>
+    <span class="base">Undo close </span><span id="label" class="bold"></span><span class="bold">  ⌘⌥Z  </span><span id="left" class="dim">5s</span><span id="protect" class="dim" hidden>  ·  Protect ⌘⌥P</span>
   </div>
   <script type="module">
     // UndoClose — faithful port of UndoClose.lua (sryo).
@@ -27,13 +27,17 @@
     const TOAST_H = 48;
     const TOP_INSET = 80;
     const MIN_W = 240;
-    const $toast = document.getElementById("toast");
-    const $label = document.getElementById("label");
-    const $left  = document.getElementById("left");
+    const $toast   = document.getElementById("toast");
+    const $label   = document.getElementById("label");
+    const $left    = document.getElementById("left");
+    const $protect = document.getElementById("protect");
 
     let armedAction = null;
     let armedDeadline = 0;
     let tickHandle = null;
+    // Set to { bundleId, name } only when the current toast is an AppTimeout
+    // kill — the ⌘⌥P protect affordance is meaningless for user-quit apps.
+    let armedProtect = null;
 
     function showToast(label) {
       $label.textContent = label;
@@ -54,6 +58,8 @@
       sd.window.setAlpha(0);
       armedAction = null;
       armedDeadline = 0;
+      armedProtect = null;
+      $protect.hidden = true;
       clearInterval(tickHandle);
       tickHandle = null;
     }
@@ -65,10 +71,23 @@
     function arm(label, action) {
       armedAction = action;
       armedDeadline = Date.now() + TIMEOUT_S * 1000;
+      // Default: relaunch-only toast. armProtect re-reveals the segment after.
+      armedProtect = null;
+      $protect.hidden = true;
       showToast(label);
       $left.textContent = TIMEOUT_S + "s";
       clearInterval(tickHandle);
       tickHandle = setInterval(tick, 250);
+    }
+
+    // Same transient toast, but also offers ⌘⌥P to protect the app from
+    // future AppTimeout auto-closes. ⌘⌥Z still relaunches via the closure.
+    function armProtect(label, bundleId, name) {
+      arm(label, async () => { await sd.apps.launch(bundleId); });
+      armedProtect = { bundleId, name };
+      $protect.hidden = false;
+      // Re-measure: the extra segment widens the toast, so recenter.
+      showToast(label);
     }
 
     sd.hotkey.on("undo", async () => {
@@ -76,6 +95,35 @@
       const a = armedAction;
       hideToast();
       try { await a(); } catch (e) { console.error("undoclose: action failed", e); }
+    });
+
+    sd.hotkey.on("protect", () => {
+      if (!armedProtect) return;
+      const { bundleId, name } = armedProtect;
+      hideToast();
+      // AppTimeout owns its allowlist (per-stack settings); ask it to protect.
+      sd.bang("apptimeout.protect", { bundleId, name });
+    });
+
+    // ──────────────────── AppTimeout-kill detector ───────────────────────────
+    // AppTimeout emits apptimeout.killed just before it kills an idle app.
+    // This owns the toast for those closes — it's authoritative and doesn't
+    // depend on the diff detector's window-history heuristic below (which can
+    // miss an app that went windowless before this stack loaded). The bang
+    // arrives just before the termination propagates through sd.apps.running,
+    // so the mark is set in time for the diff to skip its duplicate toast.
+    const TIMED_OUT_TTL_MS = 3000;
+    const recentlyTimedOut = new Map();   // bundleId → epoch ms
+    function isRecentlyTimedOut(bid) {
+      const ts = recentlyTimedOut.get(bid);
+      if (ts === undefined) return false;
+      if (Date.now() - ts > TIMED_OUT_TTL_MS) { recentlyTimedOut.delete(bid); return false; }
+      return true;
+    }
+    sd.bang.declare("apptimeout.killed").on(({ bundleId, name } = {}) => {
+      if (!bundleId) return;
+      recentlyTimedOut.set(bundleId, Date.now());
+      armProtect(name || bundleId, bundleId, name);
     });
 
     // ──────────────────── App-terminated detector ────────────────────────────
@@ -118,6 +166,9 @@
       if (prevApps.size > 0) {
         for (const [bid, name] of prevApps) {
           if (!now.has(bid)) {
+            // AppTimeout kills are handled by the apptimeout.killed signal
+            // above (with the protect affordance); don't double-toast them.
+            if (isRecentlyTimedOut(bid)) continue;
             arm(name, async () => { await sd.apps.launch(bid); });
           }
         }

@@ -9,8 +9,9 @@
   "level": "high",
   "clickThrough": true,
   "permissions": [],
-  "handles": ["sd.window.destroyed", "sd.window.focused"],
+  "handles": ["sd.window.destroyed", "sd.window.focused", "apptimeout.killed"],
   "hotkeys": [
-    { "key": "cmd+alt+z", "callback": "undo" }
+    { "key": "cmd+alt+z", "callback": "undo" },
+    { "key": "cmd+alt+p", "callback": "protect" }
   ]
 }

@@ -10,36 +10,56 @@
   // windowless 5 minutes later, kill it. Gaining a window or becoming
   // frontmost cancels the timer. Apps are identified by bundle identifier,
   // not display name — localizedName varies with the system locale.
+  //
+  // While anything is counting down, a "⌛ N" pill registers into the bar
+  // (bar.register plugin API); clicking it pops a native menu that shows
+  // remaining time and toggles the protected list, persisted via
+  // sd.settings("ignored") as { bundleId: displayName|null }.
   import { sd } from "sd://runtime/api.js";
 
   const CHECK_INTERVAL_MS = 10_000;
   const TIMEOUT_S         = 300;
 
-  // Allowlist by bundle identifier, not display name. The Lua original
-  // matched on localizedName, which is locale-dependent — on this es-AR
-  // system "Calendar" arrives as "Calendario", "Activity Monitor" as
-  // "Monitor de Actividad", so allowed apps failed the check and got
-  // killed. Non-obvious mappings: com.apple.iCal = Calendar,
-  // org.m0k.transmission = Transmission, com.google.antigravity =
-  // Antigravity. The Lua list also had Dock, SystemUIServer,
-  // ControlCenter, loginwindow, Spotlight — dropped: non-`regular`
-  // activationPolicy processes are already filtered below.
-  const IGNORED_BUNDLES = new Set([
-    "com.apple.finder",
-    "org.m0k.transmission",
-    "com.apple.iCal",
-    "com.apple.Stickies",
-    "com.spotify.client",
-    "net.whatsapp.WhatsApp",
-    "com.apple.ActivityMonitor",
-    "org.hammerspoon.Hammerspoon",
-    "com.stackd.daemon",
-    "dev.zed.Zed",
-    "com.google.antigravity",
-    "com.apple.dt.Xcode"
-  ]);
+  // Seed for first boot only; thereafter sd.settings("ignored") is the
+  // truth and the menu edits it. Keyed by bundle identifier, not display
+  // name — the Lua original matched on localizedName, which is
+  // locale-dependent (on this es-AR system "Calendar" arrives as
+  // "Calendario"), so allowed apps failed the check and got killed.
+  // Display names stored so apps that aren't running still render
+  // readably in the menu.
+  const DEFAULT_IGNORED = {
+    "com.apple.finder":           "Finder",
+    "org.m0k.transmission":       "Transmission",
+    "com.apple.iCal":             "Calendar",
+    "com.apple.Stickies":         "Stickies",
+    "com.spotify.client":         "Spotify",
+    "net.whatsapp.WhatsApp":      "WhatsApp",
+    "com.apple.ActivityMonitor":  "Activity Monitor",
+    "org.hammerspoon.Hammerspoon": "Hammerspoon",
+    "com.stackd.daemon":          "stackd",
+    "dev.zed.Zed":                "Zed",
+    "com.google.antigravity":     "Antigravity",
+    "com.apple.dt.Xcode":         "Xcode"
+  };
+
+  let ignored = null;                  // bundle id → display name|null
+
+  async function loadIgnored() {
+    const saved = await sd.settings.get("ignored");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      ignored = saved;
+    } else {
+      ignored = { ...DEFAULT_IGNORED };
+      await sd.settings.set("ignored", ignored);
+    }
+  }
 
   const windowlessSince = new Map();   // bundle id → epoch seconds
+
+  // A real, killable app is a `.app` bundle. XPC service helpers live in
+  // `.xpc` bundles (inside frameworks) and must never be auto-closed.
+  // bundleURL comes from sd.apps.running (daemon exposes it for this).
+  const isApp = (app) => typeof app.bundleURL === "string" && app.bundleURL.endsWith(".app");
 
   function check() {
     const apps = sd.apps.running.value || [];
@@ -58,11 +78,15 @@
     const seen = new Set();
     for (const app of apps) {
       // Skipping bundleId-less apps also avoids sd.apps.kill(undefined).
-      if (!app.bundleId || IGNORED_BUNDLES.has(app.bundleId)) continue;
+      if (!app.bundleId || ignored[app.bundleId] !== undefined) continue;
       // Equivalent to Hammerspoon's app:kind() == 1: skip accessory
       // (LSUIElement) and prohibited (XPC helper) processes so we don't
       // try to kill Browser Helper / sandbox brokers / etc.
       if (app.activationPolicy !== "regular") continue;
+      // Only real .app bundles. XPC service helpers (openAndSavePanelService,
+      // QuickLookUIService) live in .xpc bundles and briefly flip to .regular
+      // while presenting a panel, so activationPolicy alone lets them through.
+      if (!isApp(app)) continue;
       seen.add(app.bundleId);
       const count = winCount.get(app.pid) || 0;
       const isFrontmost = !!app.active;
@@ -73,6 +97,9 @@
           console.log("apptimeout: monitoring", app.name);
         } else if (now - windowlessSince.get(app.bundleId) >= TIMEOUT_S) {
           console.log("apptimeout: closing", app.name, "(timeout)");
+          // Tell undoclose who did it, so its toast can offer to protect
+          // this app from future auto-closes (⌘⌥P → apptimeout.protect).
+          sd.bang("apptimeout.killed", { bundleId: app.bundleId, name: app.name });
           sd.apps.kill(app.bundleId);
           windowlessSince.delete(app.bundleId);
         }
@@ -85,8 +112,104 @@
     for (const bundleId of windowlessSince.keys()) {
       if (!seen.has(bundleId)) windowlessSince.delete(bundleId);
     }
+    syncPill();
   }
 
+  // undefined = unknown (fresh boot, or the bar just reloaded and lost its
+  // externalItems) — distinct from null (known-unregistered) so the first
+  // sync after boot clears any pill a previous incarnation left behind.
+  let pillLabel;
+
+  function syncPill() {
+    const desired = windowlessSince.size ? `⌛ ${windowlessSince.size}` : null;
+    if (desired === pillLabel) return;
+    if (desired === null) {
+      sd.bang("bar.unregister", { id: "apptimeout" });
+    } else if (pillLabel == null) {
+      sd.bang("bar.register", {
+        id: "apptimeout",
+        side: "center-left",
+        order: 58,
+        value: desired,
+        onClickBang: "apptimeout.menu"
+      });
+    } else {
+      sd.bang("bar.update", { id: "apptimeout", value: desired });
+    }
+    pillLabel = desired;
+  }
+
+  function fmtLeft(sinceEpoch, now) {
+    const left = Math.max(0, TIMEOUT_S - (now - sinceEpoch));
+    return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  }
+
+  // Add a bundle to the protected set (idempotent), cancelling any in-flight
+  // countdown for it, and persist. One code path for the menu toggle and the
+  // apptimeout.protect bang (fired by undoclose's ⌘⌥P).
+  async function protect(bundleId, name) {
+    if (!bundleId || ignored[bundleId] !== undefined) return;
+    ignored[bundleId] = name || null;
+    windowlessSince.delete(bundleId);
+    await sd.settings.set("ignored", ignored);
+    syncPill();
+  }
+
+  sd.bang.declare("apptimeout.menu").on(async () => {
+    const apps = sd.apps.running.value || [];
+    const now = Math.floor(Date.now() / 1000);
+    const nameOf = new Map(apps.filter(a => a.bundleId).map(a => [a.bundleId, a.name]));
+
+    const items = [];
+    for (const [bundleId, since] of windowlessSince) {
+      items.push({
+        id: bundleId,
+        title: `${nameOf.get(bundleId) || bundleId} — ${fmtLeft(since, now)} left`
+      });
+    }
+    const running = apps
+      .filter(a => a.bundleId && a.activationPolicy === "regular" && isApp(a) && !windowlessSince.has(a.bundleId))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (items.length && running.length) items.push({ separator: true });
+    for (const a of running) {
+      items.push({ id: a.bundleId, title: a.name, checked: ignored[a.bundleId] !== undefined });
+    }
+    const absent = Object.keys(ignored).filter(id => !nameOf.has(id)).sort();
+    if (absent.length) {
+      items.push({ separator: true });
+      for (const id of absent) items.push({ id, title: ignored[id] || id, checked: true });
+    }
+
+    const picked = await sd.menu.popup(items);
+    if (!picked) return;
+    if (ignored[picked] !== undefined) {
+      const title = nameOf.get(picked) || ignored[picked] || picked;
+      delete ignored[picked];
+      await sd.settings.set("ignored", ignored);
+      console.log("apptimeout: unprotected", title);
+      syncPill();
+    } else {
+      await protect(picked, nameOf.get(picked));
+      console.log("apptimeout: protected", nameOf.get(picked) || picked);
+    }
+  });
+
+  // undoclose's ⌘⌥P after an auto-close: protect the app it just told us
+  // about, so it's never auto-closed again.
+  sd.bang.declare("apptimeout.protect").on(async ({ bundleId, name } = {}) => {
+    if (!bundleId || ignored[bundleId] !== undefined) return;
+    await protect(bundleId, name);
+    console.log("apptimeout: protected", name || bundleId, "(via undoclose)");
+  });
+
+  // The bar re-emits this at its own boot, so registration survives a bar
+  // reload regardless of which stack loaded first.
+  sd.bang.declare("bar.requestRegister").on(() => {
+    pillLabel = undefined;
+    syncPill();
+  });
+
+  await loadIgnored();
   setInterval(check, CHECK_INTERVAL_MS);
   check();
 </script>

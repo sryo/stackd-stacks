@@ -8,23 +8,38 @@
   // Every 10s, scan running apps. Any non-ignored regular app that has zero
   // windows AND is not frontmost gets a timestamp. If the same app is still
   // windowless 5 minutes later, kill it. Gaining a window or becoming
-  // frontmost cancels the timer.
+  // frontmost cancels the timer. Apps are identified by bundle identifier,
+  // not display name — localizedName varies with the system locale.
   import { sd } from "sd://runtime/api.js";
 
   const CHECK_INTERVAL_MS = 10_000;
   const TIMEOUT_S         = 300;
 
-  // From AppTimeout.lua. Note: WhatsApp's display name contains a U+200E
-  // LEFT-TO-RIGHT MARK byte ("‎WhatsApp") in the Lua — preserved here
-  // so the name-equality check matches.
-  const IGNORED = new Set([
-    "Finder", "Dock", "SystemUIServer", "ControlCenter", "Transmission",
-    "Calendar", "Stickies", "Spotify", "‎WhatsApp", "Activity Monitor",
-    "Hammerspoon", "stackd", "loginwindow", "Spotlight", "Zed", "Antigravity",
-    "Xcode"
+  // Allowlist by bundle identifier, not display name. The Lua original
+  // matched on localizedName, which is locale-dependent — on this es-AR
+  // system "Calendar" arrives as "Calendario", "Activity Monitor" as
+  // "Monitor de Actividad", so allowed apps failed the check and got
+  // killed. Non-obvious mappings: com.apple.iCal = Calendar,
+  // org.m0k.transmission = Transmission, com.google.antigravity =
+  // Antigravity. The Lua list also had Dock, SystemUIServer,
+  // ControlCenter, loginwindow, Spotlight — dropped: non-`regular`
+  // activationPolicy processes are already filtered below.
+  const IGNORED_BUNDLES = new Set([
+    "com.apple.finder",
+    "org.m0k.transmission",
+    "com.apple.iCal",
+    "com.apple.Stickies",
+    "com.spotify.client",
+    "net.whatsapp.WhatsApp",
+    "com.apple.ActivityMonitor",
+    "org.hammerspoon.Hammerspoon",
+    "com.stackd.daemon",
+    "dev.zed.Zed",
+    "com.google.antigravity",
+    "com.apple.dt.Xcode"
   ]);
 
-  const windowlessSince = new Map();   // app name → epoch seconds
+  const windowlessSince = new Map();   // bundle id → epoch seconds
 
   function check() {
     const apps = sd.apps.running.value || [];
@@ -42,32 +57,33 @@
     const now = Math.floor(Date.now() / 1000);
     const seen = new Set();
     for (const app of apps) {
-      if (!app.name || IGNORED.has(app.name)) continue;
+      // Skipping bundleId-less apps also avoids sd.apps.kill(undefined).
+      if (!app.bundleId || IGNORED_BUNDLES.has(app.bundleId)) continue;
       // Equivalent to Hammerspoon's app:kind() == 1: skip accessory
       // (LSUIElement) and prohibited (XPC helper) processes so we don't
       // try to kill Browser Helper / sandbox brokers / etc.
       if (app.activationPolicy !== "regular") continue;
-      seen.add(app.name);
+      seen.add(app.bundleId);
       const count = winCount.get(app.pid) || 0;
       const isFrontmost = !!app.active;
 
       if (count === 0 && !isFrontmost) {
-        if (!windowlessSince.has(app.name)) {
-          windowlessSince.set(app.name, now);
+        if (!windowlessSince.has(app.bundleId)) {
+          windowlessSince.set(app.bundleId, now);
           console.log("apptimeout: monitoring", app.name);
-        } else if (now - windowlessSince.get(app.name) >= TIMEOUT_S) {
+        } else if (now - windowlessSince.get(app.bundleId) >= TIMEOUT_S) {
           console.log("apptimeout: closing", app.name, "(timeout)");
           sd.apps.kill(app.bundleId);
-          windowlessSince.delete(app.name);
+          windowlessSince.delete(app.bundleId);
         }
-      } else if (windowlessSince.has(app.name)) {
-        windowlessSince.delete(app.name);
+      } else if (windowlessSince.has(app.bundleId)) {
+        windowlessSince.delete(app.bundleId);
         console.log("apptimeout: stopped monitoring", app.name);
       }
     }
     // Drop entries whose app quit entirely between ticks.
-    for (const name of windowlessSince.keys()) {
-      if (!seen.has(name)) windowlessSince.delete(name);
+    for (const bundleId of windowlessSince.keys()) {
+      if (!seen.has(bundleId)) windowlessSince.delete(bundleId);
     }
   }
 

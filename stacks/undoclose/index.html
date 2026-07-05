@@ -7,7 +7,12 @@
 </head>
 <body data-theme="{{ sd.appearance.dark ? 'dark' : 'light' }}">
   <div id="toast" class="toast" aria-hidden="true">
-    <span class="base">Undo close </span><span id="label" class="bold"></span><span class="bold">  ⌘⌥Z  </span><span id="left" class="dim">5s</span><span id="protect" class="dim" hidden>  ·  Protect ⌘⌥P</span>
+    <span class="grp"><span class="lead">Undo close</span> <span id="label" class="name"></span></span>
+    <span class="actions">
+      <span class="act"><span class="keys">⌘⌥Z</span> <span class="verb">Reopen</span></span>
+      <span id="protect" class="act" hidden><span class="keys">⌘⌥P</span> <span class="verb">Protect</span></span>
+    </span>
+    <span id="left" class="count">5s</span>
   </div>
   <script type="module">
     // UndoClose — faithful port of UndoClose.lua (sryo).

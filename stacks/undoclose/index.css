@@ -28,12 +28,23 @@ body {
   user-select: none;
 }
 
-/* Window alpha owns visibility; the toast is just centered content. */
+/* Window alpha owns visibility; the toast is just centered content.
+   One uniform size — the app name leads by weight, not size; shortcut
+   keys read a touch brighter than their verb. Flex `gap` does the
+   spacing (literal spaces in markup collapse to one and can't). */
 .toast {
+  display: flex;
+  align-items: baseline;
+  gap: 22px;
   padding: 0 18px;
   white-space: nowrap;
+  font-size: 15px;
 }
 
-.base { font-size: 14px; color: var(--sd-fg); }
-.bold { font-size: 18px; font-weight: 600; color: var(--sd-fg); }
-.dim  { font-size: 14px; color: var(--sd-fg-dim); font-variant-numeric: tabular-nums; }
+.lead    { color: var(--sd-fg-dim); }
+.name    { font-weight: 600; color: var(--sd-fg); }
+.actions { display: flex; gap: 16px; }
+.act     { color: var(--sd-fg-dim); }
+.keys    { color: var(--sd-fg); font-variant-numeric: tabular-nums; }
+.verb    { color: var(--sd-fg-dim); }
+.count   { color: var(--sd-fg-dim); font-variant-numeric: tabular-nums; }

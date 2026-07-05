@@ -49,6 +49,46 @@ function labelFor(item) {
   return item.icon || "";
 }
 
+// SF Symbol support: a `{sf:name}` token in any label (item.icon or value)
+// renders as a mask tinted by the item's text color. The daemon's sd.symbol
+// RPC returns { dataURL, width, height }; we cache per name and re-lay-out
+// once a fetch lands. null = known-bad name (don't re-fetch); undefined =
+// still in flight (render nothing for that one frame).
+const sfCache = new Map();      // name → {dataURL,width,height} | null
+const sfPending = new Set();
+
+function getSf(name) {
+  if (sfCache.has(name)) return sfCache.get(name);
+  if (!sfPending.has(name)) {
+    sfPending.add(name);
+    sd.symbol.render(name, { size: 15 })
+      .then((res) => { sfCache.set(name, res || null); sfPending.delete(name); relayout(); })
+      .catch(() => { sfCache.set(name, null); sfPending.delete(name); });
+  }
+  return undefined;
+}
+
+const SF_TOKEN = /\{sf:([a-z0-9.]+)\}/gi;
+
+function renderLabel(el, str) {
+  el.replaceChildren();
+  let last = 0, m;
+  SF_TOKEN.lastIndex = 0;
+  while ((m = SF_TOKEN.exec(str)) !== null) {
+    if (m.index > last) el.appendChild(document.createTextNode(str.slice(last, m.index)));
+    const sf = getSf(m[1]);
+    if (sf) {
+      const span = document.createElement("span");
+      span.className = "sf";
+      span.style.setProperty("--sf-url", `url("${sf.dataURL}")`);
+      span.style.setProperty("--sf-aspect", String(sf.width / sf.height));
+      el.appendChild(span);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < str.length) el.appendChild(document.createTextNode(str.slice(last)));
+}
+
 const $bar = document.getElementById("bar");
 const zones = {
   left:           $bar.querySelector('[data-side="left"]'),
@@ -113,7 +153,7 @@ function relayout() {
       const el = document.createElement("div");
       el.className = "item" + (item.bold ? " bold" : "");
       el.dataset.itemId = item.id;
-      el.textContent = labelFor(item);
+      renderLabel(el, labelFor(item));
       el.addEventListener("mousedown", (e) => {
         if (e.button !== 0) return;
         handleClick(item);
@@ -340,7 +380,7 @@ sd.hotkey.on("toggleSystemMenubar", async () => {
 //     side:      'right',             // left | center-left | center-right | right
 //     order:     50,                  // lower = closer to the screen edge
 //     value:     'https://...',       // initial text
-//     icon:      '☁',                 // optional prefix (matches static items)
+//     icon:      '{sf:cloud}',        // optional prefix; {sf:name} renders an SF Symbol
 //     bold:      false,               // optional
 //     onClickBang: 'cloudpad.copy'    // bang to fire on click (optional)
 //   });

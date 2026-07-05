@@ -28,7 +28,7 @@ export default {
       if (info.spaces.length <= 1) {
         cached = ""; refresh(); return;
       }
-      const dots = info.spaces.map((id) => (id === info.active ? "●" : "○"));
+      const dots = info.spaces.map((id) => (id === info.active ? "{sf:circle.fill}" : "{sf:circle}"));
       cached = dots.join(" ");
       refresh();
     });

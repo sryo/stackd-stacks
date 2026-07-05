@@ -50,6 +50,21 @@ html, body {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }
+
+/* SF Symbol glyph rendered from an sd.symbol data-URL. The image is a
+   template (alpha shape only); currentColor fills it, so the symbol tracks
+   the item's text color — including .item.bold and light/dark. --sf-aspect
+   (width/height from the primitive) keeps non-square symbols undistorted;
+   vertical-align seats it on the text baseline next to adjacent digits. */
+.sf {
+  display: inline-block;
+  height: 0.85em;
+  width: calc(0.85em * var(--sf-aspect, 1));
+  vertical-align: -0.08em;
+  background: currentColor;
+  -webkit-mask: var(--sf-url) center / contain no-repeat;
+  mask: var(--sf-url) center / contain no-repeat;
+}
 /* The item-gap is the *space between* items, so apply it after every item
    except the last in each zone. flex `gap` would do this for us but breaks
    on the empty-item-hidden case in fullscreen-peek. */

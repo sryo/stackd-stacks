@@ -48,16 +48,16 @@ function recompute(refresh, output) {
   const label = isBuiltIn ? "" : trimPossessive(name);
 
   if (output.muted) {
-    cached = label ? `♪ ${label} muted` : "♪ muted";
+    cached = label ? `{sf:speaker.slash.fill} ${label} muted` : "{sf:speaker.slash.fill} muted";
     refresh(); return;
   }
   if (output.volume == null) {
-    cached = label ? `♪ ${label}` : "♪";
+    cached = label ? `{sf:speaker.wave.2.fill} ${label}` : "{sf:speaker.wave.2.fill}";
     refresh(); return;
   }
   // CoreAudio's virtual main volume is 0..1; show it as a percentage.
   const pct = Math.round(output.volume * 100);
-  cached = label ? `♪ ${label} ${pct}%` : `♪ ${pct}%`;
+  cached = label ? `{sf:speaker.wave.2.fill} ${label} ${pct}%` : `{sf:speaker.wave.2.fill} ${pct}%`;
   refresh();
 }
 

@@ -10,7 +10,7 @@ export default {
   setup(refresh) {
     sd.battery.subscribe((b) => {
       if (!b) { cached = ""; refresh(); return; }
-      const prefix = b.charging ? "▲ " : "";
+      const prefix = b.charging ? "{sf:bolt.fill} " : "";
       cached = `${prefix}${Math.round(b.percent)}%`;
       refresh();
     });

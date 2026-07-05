@@ -13,7 +13,7 @@ export default {
       const uuid = sd.screen.current && sd.screen.current.uuid;
       const here = displays.find((d) => d.uuid === uuid) || displays[0];
       if (!here || here.brightness == null) { cached = ""; refresh(); return; }
-      cached = `☀ ${Math.round(here.brightness * 100)}%`;
+      cached = `{sf:sun.max} ${Math.round(here.brightness * 100)}%`;
       refresh();
     });
   },

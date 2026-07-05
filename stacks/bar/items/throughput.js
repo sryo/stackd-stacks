@@ -20,7 +20,7 @@ export default {
     // polled 1s). We just format the rate and refresh the bar.
     unsub = sd.net.throughput.subscribe((t) => {
       if (!t) return;
-      const val = `↑ ${human(t.txBps)} ↓ ${human(t.rxBps)}`;
+      const val = `{sf:arrow.up} ${human(t.txBps)} {sf:arrow.down} ${human(t.rxBps)}`;
       if (val !== cached) { cached = val; refresh(); }
     });
   },

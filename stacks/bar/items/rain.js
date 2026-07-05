@@ -7,9 +7,9 @@ let cached = "";
 let pollHandle = null;
 
 function formatLead(hoursAhead) {
-  if (hoursAhead < 1) return "☔ now";
-  if (hoursAhead < 24) return `☔ ${Math.round(hoursAhead)}h`;
-  return `☔ ${Math.round(hoursAhead / 24)}d`;
+  if (hoursAhead < 1) return "{sf:umbrella.fill} now";
+  if (hoursAhead < 24) return `{sf:umbrella.fill} ${Math.round(hoursAhead)}h`;
+  return `{sf:umbrella.fill} ${Math.round(hoursAhead / 24)}d`;
 }
 
 function nextRainHours(j) {

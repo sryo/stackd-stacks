@@ -55,6 +55,17 @@
   }
 
   const windowlessSince = new Map();   // bundle id → epoch seconds
+  const windowedPids    = new Set();   // pids seen with ≥1 window this session
+  const BOOT_S          = Math.floor(Date.now() / 1000);
+
+  // Loop-stop: an app killed repeatedly (a background service respawns it
+  // windowless faster than we monitor) is given up on for the session, so
+  // we stop fighting it. Session-only and deliberately separate from the
+  // persisted `ignored` allowlist — a safety valve, not a user decision.
+  const KILL_WINDOW_S = 15 * 60;
+  const KILL_LIMIT    = 3;
+  const killLog = new Map();           // bundle id → [epoch seconds, ...]
+  const gaveUp  = new Set();           // bundle ids we've stopped auto-closing
 
   // A real, killable app is a `.app` bundle. XPC service helpers live in
   // `.xpc` bundles (inside frameworks) and must never be auto-closed.
@@ -74,6 +85,14 @@
     const winCount = new Map();
     for (const w of wins) winCount.set(w.pid, (winCount.get(w.pid) || 0) + 1);
 
+    // Track which processes have ever presented a window this session, and
+    // forget dead pids. Only apps that showed a window are candidates for
+    // auto-close — a background respawn (new pid, never a window) is left
+    // alone, which is what stops the kill/respawn loop.
+    for (const pid of winCount.keys()) windowedPids.add(pid);
+    const livePids = new Set(apps.map((a) => a.pid));
+    for (const pid of windowedPids) if (!livePids.has(pid)) windowedPids.delete(pid);
+
     const now = Math.floor(Date.now() / 1000);
     const seen = new Set();
     for (const app of apps) {
@@ -91,7 +110,14 @@
       const count = winCount.get(app.pid) || 0;
       const isFrontmost = !!app.active;
 
-      if (count === 0 && !isFrontmost) {
+      // Candidates for auto-close: the process showed a window this session
+      // (user actually used it), OR it was already running before this stack
+      // booted (left over from before a restart — Preview sat windowless
+      // across several reloads and was never cleaned up). What stays gated:
+      // a process that LAUNCHED after boot and never presented a window —
+      // that's a background service respawn (the Claude kill-loop).
+      const preBoot = typeof app.launchedAt === "number" && app.launchedAt < BOOT_S;
+      if (count === 0 && !isFrontmost && (windowedPids.has(app.pid) || preBoot) && !gaveUp.has(app.bundleId)) {
         if (!windowlessSince.has(app.bundleId)) {
           windowlessSince.set(app.bundleId, now);
           console.log("apptimeout: monitoring", app.name);
@@ -102,6 +128,15 @@
           sd.bang("apptimeout.killed", { bundleId: app.bundleId, name: app.name });
           sd.apps.kill(app.bundleId);
           windowlessSince.delete(app.bundleId);
+          // Give up on an app we keep having to kill — something is
+          // respawning it, and fighting that is worse than leaving it.
+          const hits = (killLog.get(app.bundleId) || []).filter((t) => now - t < KILL_WINDOW_S);
+          hits.push(now);
+          killLog.set(app.bundleId, hits);
+          if (hits.length >= KILL_LIMIT) {
+            gaveUp.add(app.bundleId);
+            console.log("apptimeout: giving up on", app.name, "— killed", hits.length, "times this session");
+          }
         }
       } else if (windowlessSince.has(app.bundleId)) {
         windowlessSince.delete(app.bundleId);
@@ -121,7 +156,7 @@
   let pillLabel;
 
   function syncPill() {
-    const desired = windowlessSince.size ? `⌛ ${windowlessSince.size}` : null;
+    const desired = windowlessSince.size ? `{sf:hourglass} ${windowlessSince.size}` : null;
     if (desired === pillLabel) return;
     if (desired === null) {
       sd.bang("bar.unregister", { id: "apptimeout" });

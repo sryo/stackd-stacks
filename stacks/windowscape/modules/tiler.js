@@ -60,7 +60,25 @@ export function pruneStaleWeights() {
   }
 }
 
+// One-shot re-pass at offscreen-grace expiry. A pass that tiles a window
+// under the 1.5s grace may be the LAST pass any event triggers for minutes
+// — native fullscreen is the canonical case: the window moves to its own
+// space, the space-switch pass runs during grace and reserves its slot,
+// and the user stares at a hole where the app was. The re-pass runs just
+// after the earliest grace deadline so the layout heals on its own.
+let graceRepassTimer = null;
+function scheduleGraceRepass(deadline) {
+  if (graceRepassTimer) return;
+  const delay = Math.max(50, deadline - Date.now() + 100);
+  graceRepassTimer = setTimeout(() => {
+    graceRepassTimer = null;
+    state.tileReason = "grace-expiry";
+    tileWindows();
+  }, delay);
+}
+
 async function tileWindowsInternal(snap) {
+  let graceDeadline = Infinity;
   updateWindowOrder();
   for (const d of state.displays) {
     const space = activeSpaceOnDisplay(d.uuid);
@@ -98,6 +116,7 @@ async function tileWindowsInternal(snap) {
         if (!state.everOnscreen.has(+id)) continue;
         if (state.offscreenSince[id] == null) state.offscreenSince[id] = Date.now();
         if (Date.now() - state.offscreenSince[id] > 1500) continue;
+        graceDeadline = Math.min(graceDeadline, state.offscreenSince[id] + 1500);
       } else {
         delete state.offscreenSince[id];
       }
@@ -365,6 +384,7 @@ async function tileWindowsInternal(snap) {
       }
     }
   }
+  if (graceDeadline < Infinity) scheduleGraceRepass(graceDeadline);
 }
 
 // Post-animation refusal sweep — the animated branch's stand-in for PASS-2.

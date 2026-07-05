@@ -315,6 +315,14 @@ export function start() {
       if (w.isStandard === true && state.windowsById[w.id]?.isStandard !== true) {
         confirmedNew = true;
       }
+      // A window that just went offscreen may have changed spaces under us
+      // (native fullscreen moves it to its own space). Drop its space cache
+      // so the next refreshSpacesCache re-queries instead of keeping the
+      // pre-move space list alive in the old space's rotation.
+      const prev = state.windowsById[w.id];
+      if (prev && prev.onscreen !== false && w.onscreen === false) {
+        delete state.windowSpacesCache[w.id];
+      }
     }
     state.windowsById = next;
     if (confirmedNew) debouncedHandleWindowEvent();

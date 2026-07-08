@@ -7,7 +7,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow } from "./core.js";
-import { tileWeighted } from "./layouts.js";
+import { tileWeighted, resolvePinOversubscription, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
@@ -176,6 +176,20 @@ async function tileWindowsInternal(snap) {
     }
     state.lastTiledByDisplay[d.displayID] = [...screenWindows];
 
+    // Enforce single-display membership: purge these ids from every other
+    // display's list. An emptied display early-returns above without rewriting
+    // its frozen list, so a migrated window would otherwise linger there and
+    // make sourceDisplayIdFor report a stale source display — misclassifying an
+    // in-place resize as a cross-display drop.
+    const claimed = new Set(screenWindows.map((id) => +id));
+    for (const otherID in state.lastTiledByDisplay) {
+      if (+otherID === +d.displayID) continue;
+      const arr = state.lastTiledByDisplay[otherID];
+      if (!arr || arr.length === 0) continue;
+      const pruned = arr.filter((id) => !claimed.has(+id));
+      if (pruned.length !== arr.length) state.lastTiledByDisplay[otherID] = pruned;
+    }
+
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));
 
@@ -195,10 +209,8 @@ async function tileWindowsInternal(snap) {
     const horizontal = screenFrame.w > screenFrame.h;
 
     // Pin sanity clamp. Pins restored from sd.settings (restore.js) or
-    // accumulated at runtime can oversubscribe the work area — e.g. junk
-    // pins saved while a broken tiler variant flung windows to wrong
-    // sizes (2026-06-10: persisted pins summed to 2664px on a 2560px
-    // row). Oversized pins force distributePinned's scale-down to hand
+    // accumulated at runtime can oversubscribe the work area. Oversized
+    // pins force distributePinned's scale-down to hand
     // flex tiles widths below app minimums (TextEdit refuses < ~116px),
     // and sub-50px refusals are under the PASS-2 threshold — the overlap
     // never self-corrects. A pin set can't legitimately exceed the major
@@ -209,24 +221,19 @@ async function tileWindowsInternal(snap) {
     const pinIds = nonCollapsed.filter((id) => state.pinnedSizes[id] != null);
     const pinSum = pinIds.reduce((s, id) => s + state.pinnedSizes[id], 0);
     if (pinSum > majorAxis) {
-      // Two-stage shed: user pins first, refusal pins only if still over.
-      // A refusal pin encodes an app minimum the window will re-assert —
-      // dropping it just re-runs even-split → refuse → pin → clamp forever
-      // (the 2026-07-01 new-window storm that pushed tiles under the
-      // snapshots rail). The old "a pin set can't legitimately exceed the
-      // major axis" assumption fails when refusal sizes were captured
-      // while overlapping the rail's reserved strip.
-      const userPins = pinIds.filter((id) => !state.refusalPins.has(+id));
-      for (const id of userPins) delete state.pinnedSizes[id];
-      const stillPinned = pinIds.filter((id) => state.pinnedSizes[id] != null);
-      const stillSum = stillPinned.reduce((s, id) => s + state.pinnedSizes[id], 0);
-      if (stillSum > majorAxis) {
-        for (const id of stillPinned) {
-          delete state.pinnedSizes[id];
-          state.refusalPins.delete(+id);
-        }
+      // Pins can oversubscribe the axis when PASS-2 bumps a refused neighbor up
+      // to its app minimum. Resolve it (hold refusal minimums fixed, keep the
+      // window the user grabbed, shrink the other user pins to fit) and apply
+      // the result. Tier logic + tests: resolvePinOversubscription in layouts.js.
+      const sizes = Object.create(null);
+      for (const id of pinIds) sizes[id] = state.pinnedSizes[id];
+      const r = resolvePinOversubscription(sizes, state.refusalPins, state.lastPinPairId, majorAxis, PIN_MIN_PX);
+      for (const id of pinIds) {
+        if (r.pins[id] == null) delete state.pinnedSizes[id];
+        else state.pinnedSizes[id] = r.pins[id];
       }
-      log(`PIN-CLAMP display=${d.displayID} sum=${pinSum}px > workarea=${majorAxis}px — shed user=${JSON.stringify(userPins.map(id => +id))}${stillSum > majorAxis ? " + refusal=" + JSON.stringify(stillPinned.map(id => +id)) : ""}`);
+      for (const id of r.refusalDrop) state.refusalPins.delete(+id);
+      log(`PIN-CLAMP display=${d.displayID} tier=${r.tier} sum=${pinSum}px > workarea=${majorAxis}px${r.active != null ? ` keep=${r.active}@${r.pins[r.active]}px` : ""} pins=${JSON.stringify(pinIds.filter((id) => r.pins[id] != null).map((id) => ({ id: +id, px: r.pins[id] })))}`);
     }
 
     // Collapsed widgets get positioned at their current pixel size — the
@@ -259,7 +266,7 @@ async function tileWindowsInternal(snap) {
     };
     // PASS-1: apply each target, observe what AX actually accepted.
     // Live frames are read in PARALLEL up front (halves the per-pass
-    // round-trips vs the old serial read-then-apply loop).
+    // round-trips vs a serial read-then-apply loop).
     const actuals = Object.create(null);
     const lives = Object.create(null);
     await Promise.all(targets.map(async (t) => {
@@ -271,9 +278,7 @@ async function tileWindowsInternal(snap) {
       if (isCollapsed(+t.winId)) {
         // Collapsed widget (Sticky Notes, etc.) — pin rail Y AND the
         // justify-distributed X (layouts.tileWeighted spaces widgets
-        // evenly across the rail width; previously this branch only
-        // wrote Y, so the computed X was silently dropped and widgets
-        // stayed clumped wherever the app placed them). Width is still
+        // evenly across the rail width). Width is still
         // app-managed — Sticky Notes refuses width writes and forcing
         // them creates an overlap loop.
         const yDrift = live ? Math.abs(live.y - t.frame.y) : 0;
@@ -308,11 +313,10 @@ async function tileWindowsInternal(snap) {
       }
       pending.push(t);
     }
-    // Serial AX setFrameProbed per window. A batched variant
-    // (sd.windows.batch + parallel read-back) was tried 2026-06-10 and
-    // REVERTED same day: windows landed at wrong positions / offscreen
-    // (5/6 harness scenarios regressed). The SLS-transaction position path
-    // needs a daemon-side coordinate audit before the tiler can use it.
+    // Serial AX setFrameProbed per window. Batching writes (sd.windows.batch
+    // + parallel read-back) lands windows at wrong positions / offscreen —
+    // the SLS-transaction position path needs a daemon-side coordinate audit
+    // before the tiler can use it.
     for (const t of pending) {
       const probed = await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
       // actual:null means the daemon could NOT confirm where the window
@@ -348,10 +352,10 @@ async function tileWindowsInternal(snap) {
     // (dMajor <= 20): a deviation the echo filter won't swallow MUST be
     // contained here as a refusal pin, or it leaks to the out-of-bracket
     // resize path as a phantom user resize and ripples junk pins across
-    // the row. The old 50px threshold left a 20-50px dead zone — e.g.
-    // Terminal's min width refusing a 268px flex target by ~28px sat as
-    // a permanent overlap (under 50 → never pinned) AND fed the resize
-    // machinery (over 20 → not an echo). 2026-06-10 harness S6.
+    // the row. A higher threshold (e.g. 50px) leaves a 20-50px dead zone —
+    // Terminal's min width refusing a 268px flex target by ~28px sits as
+    // a permanent overlap (under 50 → never pinned) AND feeds the resize
+    // machinery (over 20 → not an echo).
     // The floor stays above grid-snap noise (Terminal rounds width to
     // character cells, ≤ ~7px) and PASS-1's 5px skip tolerance.
     const REFUSAL_PX = 20;
@@ -374,11 +378,10 @@ async function tileWindowsInternal(snap) {
       state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
       state.refusalPins.add(+id);
       // Update the recorded target to what the app actually accepted.
-      // Leaving the PASS-1 target in place made the out-of-bracket resize
+      // Leaving the PASS-1 target in place makes the out-of-bracket resize
       // path compare the live frame against a target the app already
-      // refused — >20px apart forever — so it re-ran PIN-PAIR as if the
-      // USER had resized, squeezing the innocent neighbor (the
-      // "Terminals stuck at 240px after QA churn" report, 2026-06-10).
+      // refused — >20px apart forever — so it re-runs PIN-PAIR as if the
+      // USER had resized, squeezing the innocent neighbor.
       state.lastTileTarget[+id] = { frame: { ...actuals[+id] }, ts: now };
     }
     log(`PASS2-PIN-REFUSED refused=${JSON.stringify(refused.map(id => ({id, px: state.pinnedSizes[id]})))}`);
@@ -401,12 +404,12 @@ async function tileWindowsInternal(snap) {
       flexFixes.push(t);
     }
     // Contain re-flow refusals in the SAME pass. The probe already reads
-    // back the actual frame — discarding it let a flex window that refused
+    // back the actual frame — discarding it lets a flex window that refused
     // its shrunken PASS-2 share (even split < its app minimum after a new
     // window joined) leak the mismatch to the out-of-bracket path, which
-    // pinned it as a phantom user resize and started the pin/clamp storm
-    // that left windows overlapping the snapshots rail (2026-07-01). No
-    // further re-flow here — the next pass absorbs the containment pin.
+    // pins it as a phantom user resize and cascades junk pins until windows
+    // overlap the snapshots rail. No further re-flow here — the next pass
+    // absorbs the containment pin.
     for (const t of flexFixes) {
       const probed = await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
       const a = probed && probed.actual;
@@ -428,7 +431,7 @@ async function tileWindowsInternal(snap) {
 // asynchronously over cfg.animationDuration), and a silent refuser gives the
 // out-of-bracket resize path nothing to wake on: an app that accepts the
 // position but refuses the size (System Settings pinned at its ~845px min
-// width, 2026-06-10) emits only `moved` bangs, which events.js ignores
+// width) emits only `moved` bangs, which events.js ignores
 // outside brackets — the overlap never self-corrected. So after the
 // animation window we do ONE live read per tile and pin anything still
 // >REFUSAL_PX off its current target, exactly like PASS-2, then re-tile

@@ -19,10 +19,14 @@ export const state = {
   // OOB containment) rather than a user resize. Refusal pins encode an
   // app's real minimum — the PIN-CLAMP oversubscription reset must shed
   // user pins first, because dropping a refusal pin just re-triggers the
-  // refusal on the next even split (the 2026-07-01 new-window/rail storm:
-  // clamp → even split → refuse → pin → clamp, forever). Entries whose pin
+  // refusal on the next even split (clamp → even split → refuse → pin →
+  // clamp, forever). Entries whose pin
   // is gone are harmless — consumers intersect with pinnedSizes.
   refusalPins:        new Set(),
+  // The window the user most recently resized (pinFromActualSize). PIN-CLAMP
+  // keeps this pin fixed and shrinks the others so a resize sticks. A stale id
+  // is harmless — PIN-CLAMP validates it against the live pin set.
+  lastPinPairId:      null,
   // A tile pass was skipped while a drag bracket was open; endDragBracket
   // (or its safety timeout) runs the deferred pass when the bracket closes.
   tileDeferred:       false,

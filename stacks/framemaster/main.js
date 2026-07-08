@@ -1,7 +1,5 @@
 // FrameMaster — port of ~/Documents/Spoons/FrameMaster.lua. Hot corners,
-// shift-modified alternates, hover tooltips. Supersedes the old framecorners
-// stack (which only covered the four click actions) and FittsQuit.lua (whose
-// corner-close behavior is FrameMaster's top-left action).
+// shift-modified alternates, hover tooltips.
 //
 // Corner map (mirror of FrameMaster.md):
 //   top-left      click → close window (Cmd+W); shift → kill9 + reopen prompt
@@ -15,9 +13,8 @@
 // Daemon-side gaps (faithful-as-possible, not faithful-to-the-letter):
 //   * Menu-bar edge consume + dock edge consume: the FrameMaster.lua approach
 //     consumed mouseMoved inside a position band along each screen edge.
-//     R1d removed the daemon's `inCornerBand` predicate and the current
-//     EventTapPredicate only matches on keyCode / flagsMask / flagsAny —
-//     there's no x/y zone match. A consuming eventtap with no `if` would
+//     The current EventTapPredicate only matches on keyCode / flagsMask /
+//     flagsAny — there's no x/y zone match. A consuming eventtap with no `if` would
 //     swallow every mouseMoved (cursor frozen), so this is deferred until
 //     the daemon ships a generic `inRect` predicate. `sd.menubar.suppress()`
 //     exists but it hides the bar entirely rather than blocking the hover-
@@ -29,9 +26,7 @@ import { sd } from "sd://runtime/api.js";
 
 const FLAGS = { shift: 0x020000 };
 // Width of the corner trigger band, in points. Matches FrameMaster.lua's
-// `cfg.buffer = 4`. The old framecorners stack used 2 — bumped to 4 here to
-// match the Spoon's default; bigger bands cause accidental fires near the
-// menu bar.
+// `cfg.buffer = 4`. Bigger bands cause accidental fires near the menu bar.
 const CORNER_BAND = 4;
 const TIP_HIDE_MS = 750;
 const TOOLTIP_MAX_LEN = 50;
@@ -89,9 +84,7 @@ sd.display.all.subscribe(list => {
   // Both the leftMouseDown consume tap (click→action) and the mouseMoved
   // observer tap (hover→enter/leave) gate on the same corner-band rects.
   // The mouseMoved tap is opted into emitLeave so it fires {phase:"enter"}
-  // when the cursor crosses INTO a corner and {phase:"leave"} on the way
-  // out — replaces the sd.mouse 30Hz poll the previous revision used to
-  // maintain per-corner enter/leave state in JS.
+  // when the cursor crosses INTO a corner and {phase:"leave"} on the way out.
   sd.events.setTapRects("click", rects);
   sd.events.setTapRects("hover", rects);
 });
@@ -124,8 +117,7 @@ function cornerForPoint(x, y) {
 
 // FrameMaster.lua's hasActionableWindow gates on subrole — only AXStandardWindow
 // and AXDialog get to be acted on. Curated reader sd.windows.subrole(id) saves
-// the round-trip through sd.ax.* that the old framecorners stack avoided by
-// just always-returning-true.
+// the round-trip through sd.ax.*.
 async function isActionableWindow(win) {
   if (!win || typeof win.id !== "number") return false;
   const subrole = await sd.windows.subrole(win.id);

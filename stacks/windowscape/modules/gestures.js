@@ -32,8 +32,8 @@ const RESIZE_MIN_PX  = 100; // matches operations.js PIN_MIN_PX
 // and freezes the focused window's frame as the scale origin; each step
 // re-scales the preview outline around that frame's center, clamped to the
 // display work area — so the rightmost window slides left instead of dying
-// against the screen edge (trailing-edge growth had no room to grow,
-// 2026-06-10). dragEnd commits the previewed frame and closes the bracket.
+// against the screen edge (trailing-edge growth has no room to grow).
+// dragEnd commits the previewed frame and closes the bracket.
 let gestureBracket = null; // { winId, origFrame, frame, horizontal, vf } while active
 
 // --- preview outline -------------------------------------------------------

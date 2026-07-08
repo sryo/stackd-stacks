@@ -16,7 +16,7 @@
 //   their tiles appear in the primary strip. (Primitive gap: sd.overlay
 //   attaches to windows, not free regions, so per-display strip canvases
 //   would need either a window-target hack or display:"all" — both have
-//   compromises documented in the port report.)
+//   compromises.)
 // - Zoom-in animation: lua used hs.canvas:frame timer interpolation. Here a
 //   CSS transition on transform/opacity inside the tile <div> does the same.
 // - Scroll eventtap: registered via stack.json `eventtap` manifest entry
@@ -270,8 +270,7 @@ const OVERLAY_CSS = `
 // GLOBAL rect. Mirrors the flexbox the DOM strip used — landscape → a right
 // column (tiles right-aligned, stacked top→bottom); portrait → a bottom row
 // (tiles bottom-aligned, left→right). Scroll offset is baked into positions
-// and clamped here so overflow scrolls the same way the old inner-transform
-// did. Returns null when the display has nothing to show.
+// and clamped here. Returns null when the display has nothing to show.
 function computeStrip(d, activeSet) {
   const reserved = getReservedArea(d);
   if (!reserved) return null;
@@ -893,8 +892,7 @@ async function refreshSnapshots() {
       if (snap && snap.dataURL && snap.dataURL !== data.image) {
         // Tiles live in the per-display region overlays (buildTilesHtml embeds
         // the dataURL inline in the tile HTML), so a fresh image repaints by
-        // re-running the overlay diff — NOT by mutating a DOM <img> (the old
-        // stripsByDisplay DOM map no longer exists post-overlay-migration).
+        // re-running the overlay diff — NOT by mutating a DOM <img>.
         // reconcileOverlays() below repaints only overlays whose HTML actually
         // changed (syncOverlay's html !== lastHtml gate), so this is cheap.
         data.image = snap.dataURL;
@@ -925,7 +923,7 @@ function stopRefreshTimer() {
 // Discrete per-event scroll step (px). The Bridge currently doesn't surface
 // scrollWheel deltas (see Bridge.swift fireEventTap), so each scrollWheel
 // event nudges by SCROLL_STEP and we rely on the user's scroll-wheel cadence
-// driving event rate. Documented in the port report as a primitive gap.
+// driving event rate. A primitive gap.
 const SCROLL_STEP = 30;
 
 export function onScrollWheelEvent(payload) {
@@ -1132,8 +1130,7 @@ async function loadPersistedSnapshots() {
     // live `w` MUST disqualify the persisted snapshot — otherwise the
     // tiler would reserve strip space for windows the user can actually
     // see, the strip would render thumbnails of visible windows, and the
-    // outline would land on shrunk-down tiled frames. Was the source of
-    // the "windows mis-tiled + outline mis-aligned" regression on reload.
+    // outline would land on shrunk-down tiled frames.
     const liveOrder = [];
     const liveSnapshots = Object.create(null);
     for (const id of candidateOrder) {

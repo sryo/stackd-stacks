@@ -53,8 +53,7 @@ let lastKnownFrames = Object.create(null); // id -> { app, frame }
 // STILL includes the just-closed id. Without suppression, the
 // all-subscriber overwrites our eager delete in windowsById and
 // handleWindowEvent's 30ms debounce sees no change vs lastKnownIds →
-// early returns → no retile until something else wakes the system (the
-// "few seconds" the user reported on 2→1 closes).
+// early returns → no retile until something else wakes the system.
 //
 // The entry also stashes the window's per-id state (weight/pin/tile
 // target/space cache) at destroy time: the destroy handler eagerly purges
@@ -80,9 +79,9 @@ async function refreshSpacesCache(ids) {
 // operations); the daemon's CGWindowIDs are stable across true tab
 // switches, so any destroy+create pair we see is real window churn.
 // Greedy one-to-one matching by ascending frame diff: same app, total
-// |Δx|+|Δy|+|Δw|+|Δh| < 50px. Returning pairs instead of a boolean fixes
-// the old bug where ONE matching pair suppressed the retile for every
-// unrelated window in the same debounce batch.
+// |Δx|+|Δy|+|Δw|+|Δh| < 50px. Returning pairs instead of a boolean keeps
+// one matching pair from suppressing the retile for every unrelated
+// window in the same debounce batch.
 function matchRecreationPairs(newIds, removedIds, currentData) {
   if (newIds.length === 0 || removedIds.length === 0) return [];
   const candidates = [];
@@ -169,13 +168,12 @@ async function handleWindowEvent() {
   }
 
   // Refresh cache for newcomers AND for any currently-eligible window
-  // whose cache entry is missing. The strict "only newIds" approach
-  // lost cache entries permanently whenever a window briefly dropped
-  // out of currentIds (e.g. transient displayForWindow=null while
-  // state.displays was still empty during boot, or a toggleExcluded
-  // round-trip): the removed-path purged the cache, but the rejoin-
-  // path only refreshes IDs that are "new since last tick" — windows
-  // present on both ticks but cache-missing fell through forever.
+  // whose cache entry is missing. A window can briefly drop out of
+  // currentIds (transient displayForWindow=null while state.displays is
+  // still empty during boot, or a toggleExcluded round-trip) — the
+  // removed-path purges its cache, and refreshing only IDs "new since
+  // last tick" would strand a window present on both ticks but
+  // cache-missing forever.
   const cacheMissing = [...currentIds].filter((id) => !state.windowSpacesCache[id]);
   await refreshSpacesCache(cacheMissing);
   for (const id of restRemoved) delete state.windowSpacesCache[id];
@@ -200,17 +198,15 @@ async function handleWindowEvent() {
 // and AX notifications trail the actual setFrame by up to several hundred
 // ms — long after tilingCount cooled down — carrying frames that differ
 // wildly from the pass's NEW targets. Trusting the bang payload here
-// produced a pin-from-echo feedback storm (junk pins at 100-ish px,
+// produces a pin-from-echo feedback loop (junk pins at 100-ish px,
 // retile, more bangs, more pins). So the bang is only a WAKE-UP: at fire
 // time we do ONE live AX read and compare against the CURRENT tile
 // target. A settled echo matches its target → no-op; a real external
-// resize persists at the foreign size → pin. Same comparison the old
-// 500ms drift poller did, but event-driven.
-// PER-WINDOW debounce map — a single shared candidate slot let one
+// resize persists at the foreign size → pin.
+// PER-WINDOW debounce map — a single shared candidate slot lets one
 // window's trailing echo train stomp another window's REAL resize (B's
-// post-pass echoes overwrote A's candidacy and A's resize was silently
-// swallowed; same bug class as the service-window lastMovedId stomp
-// documented at the drag bracket).
+// post-pass echoes overwrite A's candidacy, silently swallowing A's
+// resize).
 const oobResize = new Map(); // id -> { timer, retries }
 function scheduleOutOfBracketResize(id) {
   const prev = oobResize.get(id);
@@ -226,9 +222,8 @@ function armOobResizeTimer(id, entry) {
     // isAnimating: with cfg.enableAnimations the window can still be in
     // transit AFTER tilingCount cools down (under load the final animation
     // tick lands late). A live read mid-flight is >20px off its target by
-    // construction — without this gate every animated pass risked phantom
-    // PIN-PAIRs on windows nobody resized (the S4 "non-adjacent-changed"
-    // storm, 2026-06-10).
+    // construction — without this gate every animated pass risks phantom
+    // PIN-PAIRs on windows nobody resized.
     if ((state.tilingCount > 0 || isAnimating(id)) && entry.retries < 5) {
       entry.retries++;
       armOobResizeTimer(id, entry);
@@ -236,14 +231,12 @@ function armOobResizeTimer(id, entry) {
     }
     // Apply-latency grace: a tile pass re-targeted this window moments ago
     // and apps apply setFrames asynchronously — a live read now can catch
-    // the PRE-apply frame and mint a phantom pin. That was the engine of
-    // the 2026-07-01 storm: each pass's pin transfer produced the next
-    // window's ±delta mismatch, phantom pins oversubscribed the row,
-    // PIN-CLAMP reset, repeat — with tiles left overlapping the snapshots
-    // rail between rounds. Wait out a fresh target (each retry re-checks,
-    // so back-to-back passes keep deferring); if it never ages, bail
-    // WITHOUT pinning — a real drift either re-bangs after the storm or
-    // is contained by the next pass's PASS-2.
+    // the PRE-apply frame and mint a phantom pin, which cascades: each
+    // pass's pin transfer produces the next window's ±delta mismatch,
+    // phantom pins oversubscribe the row, PIN-CLAMP resets, repeat. Wait
+    // out a fresh target (each retry re-checks, so back-to-back passes keep
+    // deferring); if it never ages, bail WITHOUT pinning — a real drift
+    // either re-bangs later or is contained by the next pass's PASS-2.
     const tgtTs = state.lastTileTarget?.[id]?.ts;
     if (tgtTs != null && Date.now() - tgtTs < 1000) {
       if (entry.retries < 8) {
@@ -286,8 +279,8 @@ export function start() {
   // this channel ONLY to keep windowsById fresh (frame/title/app props for
   // the windows already in the rotation). We deliberately do NOT trigger
   // tile passes here — the daemon's sd.windows.all push refires on every
-  // focused-window title change (e.g. Terminal spinner), which used to
-  // produce 75+ no-op tile passes per second. Tile triggers now come from
+  // focused-window title change (e.g. Terminal spinner), which would
+  // otherwise produce 75+ no-op tile passes per second. Tile triggers come from
   // the lifecycle bangs below (created / destroyed / minimized /
   // deminimized) which only fire on actual layout-relevant transitions.
   sd.windows.all.subscribe(async (list) => {
@@ -452,8 +445,8 @@ export function start() {
     debouncedHandleWindowEvent();
   };
   window.onBang_sd_window_created = (detail) => {
-    // Seed the live index from the bang payload (daemon rework 2026-06:
-    // created bangs carry {id, pid, app, title, frame}). The daemon tries
+    // Seed the live index from the bang payload (created bangs carry
+    // {id, pid, app, title, frame}). The daemon tries
     // to land the sd.windows.all push BEFORE this bang, but on retry
     // exhaustion the bang can still win the race — seeding here makes
     // handleWindowEvent's diff see the window either way.
@@ -602,9 +595,8 @@ export function start() {
 // moved+resized AX pair — no distinct event, no isZooming observable — so
 // without detection the bracket-close / out-of-bracket handlers misread it
 // as a user drag-resize and pin the zoomed size (then the tiler fights the
-// zoom animation). Policy (user decision 2026-07-01): IGNORE the zoom —
-// suppress the pin and snap the window back to its tile slot once the
-// animation settles.
+// zoom animation). Policy: IGNORE the zoom — suppress the pin and snap
+// the window back to its tile slot once the animation settles.
 //
 // Detection: two mouse-downs within DOUBLE_CLICK_MS at (nearly) the same
 // point, landing in the top TITLEBAR_BAND_PX of a window we actually tile
@@ -668,7 +660,7 @@ function isZoomSuspect(id) {
 // animation settles (~350-500ms). No pin was written and lastTileTarget is
 // untouched, so the pass recomputes the identical tile frame and re-asserts
 // it; trailing bangs land in the fresh echo window (or read the settled
-// frame at the OOB live-read) — no feedback storm.
+// frame at the OOB live-read) — no feedback loop.
 function scheduleZoomSnapBack(id) {
   const prev = zoomSnapTimers.get(id);
   if (prev && prev.timer) clearTimeout(prev.timer);
@@ -843,6 +835,9 @@ export function pinFromActualSize(movedId) {
   const bId = onScreen[bIdx]; // exists: onScreen.length >= 2
 
   state.pinnedSizes[+movedId] = Math.max(50, Math.floor(actualSize));
+  // The window the user actively grabbed — PIN-CLAMP keeps this one fixed and
+  // shrinks the others so the resize sticks.
+  state.lastPinPairId = +movedId;
   // A user resize supersedes any refusal provenance — PIN-CLAMP may shed
   // this pin again.
   state.refusalPins.delete(+movedId);
@@ -864,7 +859,9 @@ export function pinFromActualSize(movedId) {
     log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → 50px (overflow not redistributed)`);
   }
   state.pinnedSizes[+bId] = Math.max(50, bWant);
-  state.refusalPins.delete(+bId);
+  // Only a transfer that GROWS B supersedes a refusal-min provenance; shrinking
+  // B toward its app minimum keeps the flag so PIN-CLAMP holds B fixed.
+  if (bWant >= bBase) state.refusalPins.delete(+bId);
   if (state.onLayoutChange) state.onLayoutChange();
   log(`PIN-PAIR ${horizontal ? "w" : "h"} edge=${leading ? "leading" : "trailing"} A=${movedId}→${state.pinnedSizes[+movedId]}px B=${bId}→${state.pinnedSizes[+bId]}px delta=${Math.round(delta)}`);
 }
@@ -890,7 +887,7 @@ export async function crossDisplayDrop(movedId, srcDisplayID, dest) {
   if (!moved || !moved.frame) return;
   evt(`DRAG-CROSS id=${movedId} (${moved.app}) src=${srcDisplayID} dest=${dest.displayID}`);
 
-  // Stale space cache is what used to drop the window from the destination
+  // A stale space cache would drop the window from the destination
   // order. Delete synchronously FIRST — an absent entry means "no info,
   // include optimistically" in updateWindowOrder's space filter, so no pass
   // that interleaves the await below can exclude the window.

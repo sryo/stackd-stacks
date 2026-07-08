@@ -8,10 +8,9 @@
   // Single-overlay architecture: one `sd.overlay.attach` call for the whole
   // session. On every focus change we call `setTarget(winId)` +
   // `eval('applyStyle(thickness, radius, color)')` to retarget and restyle
-  // the existing overlay. The prior detach+attach cycle raced on the daemon
-  // main thread and produced duplicate panels — one overlay accumulating per
-  // focus change in a rapid burst — until detach finally resolved.
-  // Architectural fix > tighter serialization.
+  // the existing overlay. A detach+attach-per-focus cycle races on the daemon
+  // main thread and accumulates duplicate panels until detach resolves — one
+  // overlay for the session avoids that.
   //
   // Subscribes to sd.windows.focusedChanged (the granular channel — the
   // sd.windows.focused union also refires on titleChanged, which would
@@ -47,30 +46,28 @@
   }
 
   // --- state --------------------------------------------------------------
-  // State-machine invariants (2026-06-09 wrong-window/invisible debugging —
-  // each clause earned its place by breaking on a real sequence):
+  // State-machine invariants:
   //
   //   1. `focusedWin` is the ONLY notion of "what is focused" (latest
   //      focusedChanged payload, null when nothing has focus). `currentWid`
   //      means strictly "the wid the DAEMON's overlay is targeted at" and is
-  //      only assigned after attach/setTarget CONFIRM. The old code reused
-  //      currentWid for both, so after a hide (palette focus, fullscreen
-  //      gate) currentWid still named the last *shown* window — and any
-  //      style refresh (spaces push, inclusion bang) resurrected the border
-  //      around that stale window while something else had focus. That was
-  //      the "border around the WRONG window" bug.
+  //      only assigned after attach/setTarget CONFIRM. Conflating the two
+  //      means that after a hide (palette focus, fullscreen gate) currentWid
+  //      still names the last *shown* window — and any style refresh (spaces
+  //      push, inclusion bang) resurrects the border around that stale window
+  //      while something else has focus.
   //
   //   2. All paths — including focus-lost (null) — run through one
-  //      serialized latest-wins drain. The old code hid directly from the
-  //      subscription while an applyForWin was mid-await; the in-flight
-  //      apply then finished and re-showed the border with nothing focused.
+  //      serialized latest-wins drain. Hiding directly from the subscription
+  //      while an applyForWin is mid-await lets the in-flight apply finish
+  //      and re-show the border with nothing focused.
   //
   //   3. A daemon `false` from setTarget/eval means the handle is dead
   //      (scope drained, daemon-side teardown). We invalidate ALL local
   //      claims (handle, currentWid, style cache) and re-attach once within
-  //      the same drain. The old code ignored the return value, so
-  //      currentWid claimed a target the daemon never accepted and the
-  //      style-key dedupe ate every later recovery attempt.
+  //      the same drain. Ignoring the return value lets currentWid claim a
+  //      target the daemon never accepted, and the style-key dedupe then eats
+  //      every later recovery attempt.
   //
   //   4. `lastStyleKey` is written only AFTER a successful eval, and reset
   //      whenever the panel is (re)attached — a fresh panel boots unstyled,

@@ -6,7 +6,7 @@ export const cfg = {
   collapsedWindowHeight: 12,
   exclusionMode:         true,
   eventDebounceSeconds:  0.03,
-  // OFF after live verification 2026-06-10. Two daemon-side blockers:
+  // OFF. Two daemon-side blockers:
   // (1) sd.windows.batch.begin returns false on EVERY call in the running
   // daemon — the per-tick atomic-transaction path animations were designed
   // around is dead, so the loop fell back to plain per-window setFrames;
@@ -14,15 +14,15 @@ export const cfg = {
   // thread under churn, and app min-width refusals (Terminal ~80col,
   // TextEdit ~115px) surface ASYNC as resized bangs that the out-of-
   // bracket path converts into pairwise-pin oscillations in crowded
-  // layouts. The snap path contains refusals synchronously in PASS-2 and
-  // stays 6/6. Re-enable only after the daemon batch path works live.
+  // layouts. The snap path contains refusals synchronously in PASS-2.
+  // Re-enable only after the daemon batch path works live.
   enableAnimations:      false,
   animationDuration:     0.15,
   // 30, not 60: every animation tick is one setFrame RPC per in-flight
   // window, each a synchronous AX write on the daemon main thread. At
   // 60fps a churn burst (7-9 windows, chained passes) saturated the
   // thread — focus pushes and the overlay vsync starved, borders lagged,
-  // convergence crawled (2026-06-10 harness regression). 5 frames over
+  // convergence crawled. 5 frames over
   // 0.15s still reads as motion.
   animationFPS:          30,
   debugLogging:          true,

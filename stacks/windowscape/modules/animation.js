@@ -50,14 +50,12 @@ async function tickOnce() {
     const finished = [];
 
     // Plain per-window setFrames, applied in parallel. Deliberately NOT
-    // sd.windows.batch: live verification 2026-06-10 found windows.batch.begin
-    // returns false on every call in the running daemon (animations silently
-    // applied nothing — see the session log around the first qa-windowscape
-    // run), and the batch path's split channels (AX size now / SLS position
-    // at commit) were the root of the misplacement bug anyway. The direct AX
-    // path is the same channel the non-animated tiler rides at 6/6. Cost:
-    // per-tick inter-window stagger instead of one compositor flip —
-    // imperceptible at this duration.
+    // sd.windows.batch: windows.batch.begin returns false on every call in
+    // the running daemon (batched animations apply nothing), and the batch
+    // path's split channels (AX size now / SLS position at commit) misplace
+    // windows. The direct AX path is the same channel the non-animated tiler
+    // rides. Cost: per-tick inter-window stagger instead of one compositor
+    // flip — imperceptible at this duration.
     const writes = [];
     for (const [winId, a] of active.entries()) {
       const t = Math.min((now - a.startTs) / duration, 1);

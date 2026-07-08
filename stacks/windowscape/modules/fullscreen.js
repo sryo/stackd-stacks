@@ -92,6 +92,14 @@ export async function enterSimulatedFullscreen(winId) {
     if (numericId === winId) continue;
     const peer = state.windowsById[id];
     if (!isPeerOnSameDisplaySpace(peer, d.displayID, spaceId)) continue;
+    // Only park windows the tiler would actually tile on this space. Without
+    // these gates, entering fullscreen flung excluded apps, non-standard
+    // helper windows, and already-minimized windows to the 1x1 corner — and
+    // the exit restore un-minimized the minimized ones.
+    if (!isAppIncluded(peer)) continue;
+    if (peer.isStandard !== true) continue;
+    if (peer.isMinimized === true) continue;
+    if (peer.addressable === false) continue;
     savedFrames[numericId] = { ...peer.frame };
     peerIds.push(numericId);
   }
@@ -156,11 +164,15 @@ export async function exitSimulatedFullscreen() {
   if (savedOrder && spaceId != null) {
     state.windowOrderBySpace[spaceId] = savedOrder;
   }
+  // Merge, not replace: a window opened during fullscreen has a live
+  // weight/pin entry that a blind assignment would drop. Saved entries win
+  // for ids that predate fullscreen (discarding any fullscreen-era change);
+  // ids that appeared since keep their current entry.
   if (savedWeights) {
-    state.windowWeights = savedWeights;
+    state.windowWeights = { ...state.windowWeights, ...savedWeights };
   }
   if (savedPinnedSizes) {
-    state.pinnedSizes = savedPinnedSizes;
+    state.pinnedSizes = { ...state.pinnedSizes, ...savedPinnedSizes };
   }
 
   // Re-park sweep — restore each saved frame for windows still alive.

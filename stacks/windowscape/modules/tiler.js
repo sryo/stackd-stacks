@@ -72,6 +72,17 @@ function scheduleGraceRepass(deadline) {
   const delay = Math.max(50, deadline - Date.now() + 100);
   graceRepassTimer = setTimeout(() => {
     graceRepassTimer = null;
+    // tileWindows() bails at its drag / simulated-fullscreen / snapshot
+    // guards without re-arming us. If the re-pass fires mid-guard it would be
+    // lost, and the reserved slot never evicts — native-fullscreen idle
+    // produces no further events to re-trigger a pass, which is the exact
+    // hole this re-pass exists to heal. Re-arm until the guard clears.
+    if (state.dragInFlight
+        || (state.fullscreenState && state.fullscreenState.active)
+        || (state.snapshotsState && state.snapshotsState.isCreating)) {
+      scheduleGraceRepass(Date.now() + 200);
+      return;
+    }
     state.tileReason = "grace-expiry";
     tileWindows();
   }, delay);
@@ -275,7 +286,13 @@ async function tileWindowsInternal(snap) {
         const correctedFrame = { x: t.frame.x, y: t.frame.y, w: live.w, h: live.h };
         state.lastTileTarget[+t.winId] = { frame: { ...correctedFrame }, ts: now };
         const probed = await sd.windows.setFrameProbed(t.winId, correctedFrame).catch(() => null);
-        actuals[+t.winId] = (probed && probed.actual) ? probed.actual : correctedFrame;
+        // actual:null = daemon couldn't confirm the landing (see the pending
+        // loop below for the two null sources). Don't record correctedFrame
+        // as though it stuck — fall back to the pre-write `live` frame we
+        // already read, the last size we actually observed. (Collapsed
+        // widgets are exempt from PASS-2 refusal detection, so this only
+        // keeps the bookkeeping honest; `live` is guaranteed non-null here.)
+        actuals[+t.winId] = (probed && probed.actual) ? probed.actual : live;
         continue;
       }
       // Always record the target so echo-suppression sees
@@ -298,7 +315,26 @@ async function tileWindowsInternal(snap) {
     // needs a daemon-side coordinate audit before the tiler can use it.
     for (const t of pending) {
       const probed = await sd.windows.setFrameProbed(t.winId, t.frame).catch(() => null);
-      actuals[+t.winId] = (probed && probed.actual) ? probed.actual : t.frame;
+      // actual:null means the daemon could NOT confirm where the window
+      // landed — the write was superseded (BridgeWindows setFrameProbed's
+      // .animated(false) branch) or cgBounds couldn't read the window back
+      // during settleProbe's 60ms wait (Windows.settleProbe). It does NOT
+      // mean "reached target": recording t.frame as the actual makes PASS-2
+      // compare target-against-target (dMajor = 0) and silently pass a
+      // refuser — System Settings pinned at its ~845px min width keeps
+      // overlapping and never gets pinned. Re-read the live frame so PASS-2
+      // still sees the refusal; if that read also fails we genuinely don't
+      // know, so leave actuals[id] unset (PASS-2's `!a` guard skips it) and
+      // let the next pass re-probe rather than pin a phantom.
+      let actual = probed && probed.actual;
+      if (!actual) {
+        actual = await sd.windows.frame(t.winId).catch(() => null);
+        // This path is otherwise silent — log it so the null case is
+        // observable; a reprobe far from target is a refuser PASS-2 is about
+        // to pin (a PASS2-PIN-REFUSED should follow).
+        log(`PASS1-UNCONFIRMED id=${t.winId} reprobe=${actual ? `${actual.w}x${actual.h}` : "failed"} target=${t.frame.w}x${t.frame.h}`);
+      }
+      if (actual) actuals[+t.winId] = actual;
     }
 
     // PASS-2: refusal handling. Any flex window that ended up more than

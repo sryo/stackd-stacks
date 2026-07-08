@@ -50,6 +50,16 @@ const ZOOM_HOVER_SCALE = 1.15;
 const ZOOM_HOVER_MS    = 120;
 const RESTORE_FADE_MS  = 180;
 
+// Consuming leftMouseDown tap (declared in stack.json as snapshotsTileClick,
+// requireRects): the daemon swallows clicks over the tile rects we push and
+// fires onTileClickEvent, so a tile click no longer falls THROUGH the
+// click-through overlay to the desktop. CRITICAL: install an EMPTY gate at
+// module load — an unset requireRects gate matches every click and consumes
+// everything. reconcileOverlays() repopulates it with the live tile rects on
+// every layout change.
+const TILE_TAP = "snapshotsTileClick";
+sd.events.setTapRects(TILE_TAP, []).catch(() => {});
+
 // Strip auto-resolution: only the display matching __sd_screen actually
 // renders DOM nodes. Recorded once during init().
 let myScreenInfo = null;     // { displayID, frame, ... }
@@ -217,6 +227,172 @@ export function screenForStripAt(x, y) {
     if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return d;
   }
   return null;
+}
+
+// ----------------------------------------------------------------------------
+// Per-display strip rendering — sd.overlay.region
+//
+// Each display that hosts snapshots gets its own free-region overlay (a
+// borderless click-through WebView the daemon places at an absolute GLOBAL
+// rect). The overlay sits exactly on that display's reserved strip band, so
+// the rail renders on the SAME display the window was minimized from — no
+// globalToLocal, no primary-only surface. Tile positions are computed
+// analytically here (computeStrip); the SAME geometry drives both the
+// rendered HTML and the eventtap hit-testing (tileAt), so a click can never
+// land where a tile isn't drawn. Overlays are ignoresMouseEvents=true, so all
+// interaction is eventtap-routed (see onLeftClick/onScroll/onRightClick).
+// ----------------------------------------------------------------------------
+
+// displayID -> { handle, inFlight, lastHtml, lastRect }
+const overlaysByDisplay = Object.create(null);
+
+const OVERLAY_CSS = `
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent;-webkit-user-select:none;user-select:none}
+  #ws-tiles{position:absolute;inset:0}
+  .ws-tile{
+    position:absolute; box-sizing:border-box;
+    background:rgba(40,40,40,0.85); border-radius:6px;
+    border:1px solid rgba(255,255,255,0.08); overflow:hidden;
+    box-shadow:0 4px 14px rgba(0,0,0,0.55);
+    opacity:0; transform:scale(0.5);
+    transition:opacity ${ZOOM_IN_MS}ms ease-out,
+               transform ${ZOOM_IN_MS}ms cubic-bezier(0.22,0.61,0.36,1);
+  }
+  .ws-tile.in{opacity:1; transform:scale(1)}
+  .ws-tile.leaving{opacity:0; transform:scale(0.4);
+    transition:opacity ${RESTORE_FADE_MS}ms ease-in, transform ${RESTORE_FADE_MS}ms ease-in}
+  .ws-tile img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+  .ws-close{position:absolute;top:4px;left:4px;width:12px;height:12px;border-radius:50%;
+    background:#ff5f57;border:0.5px solid #e0443e}
+`;
+
+// Analytic strip layout for a display: the reserved band plus each tile's
+// GLOBAL rect. Mirrors the flexbox the DOM strip used — landscape → a right
+// column (tiles right-aligned, stacked top→bottom); portrait → a bottom row
+// (tiles bottom-aligned, left→right). Scroll offset is baked into positions
+// and clamped here so overflow scrolls the same way the old inner-transform
+// did. Returns null when the display has nothing to show.
+function computeStrip(d, activeSet) {
+  const reserved = getReservedArea(d);
+  if (!reserved) return null;
+  const list = snapshotsOnDisplay(d.displayID, activeSet);
+  if (list.length === 0) return null;
+  const isLandscape = d.frame.w > d.frame.h;
+
+  let contentLen = 0;
+  for (let i = 0; i < list.length; i++) {
+    const ss = list[i].data.snapSize || getSnapshotSize();
+    contentLen += isLandscape ? ss.h : ss.w;
+    if (i > 0) contentLen += GAP;
+  }
+  const visibleLen = (isLandscape ? reserved.h : reserved.w) - PADDING * 2;
+  const maxOffset = Math.max(0, contentLen - visibleLen);
+  const offset = Math.max(0, Math.min(state.snapshotsState.stripScrollOffsets[d.displayID] || 0, maxOffset));
+  state.snapshotsState.stripScrollOffsets[d.displayID] = offset;
+
+  const tiles = [];
+  if (isLandscape) {
+    let cursor = reserved.y + PADDING - offset;
+    for (const { winId, data } of list) {
+      const ss = data.snapSize || getSnapshotSize();
+      tiles.push({ winId, data, gx: reserved.x + reserved.w - PADDING - ss.w, gy: cursor, gw: ss.w, gh: ss.h });
+      cursor += ss.h + GAP;
+    }
+  } else {
+    let cursor = reserved.x + PADDING - offset;
+    for (const { winId, data } of list) {
+      const ss = data.snapSize || getSnapshotSize();
+      tiles.push({ winId, data, gx: cursor, gy: reserved.y + reserved.h - PADDING - ss.h, gw: ss.w, gh: ss.h });
+      cursor += ss.w + GAP;
+    }
+  }
+  return { displayID: d.displayID, reserved, isLandscape, tiles };
+}
+
+function escAttr(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Tiles as absolutely-positioned HTML in the overlay's local space
+// (0,0 = strip top-left = reserved.{x,y} in global coords).
+function buildTilesHtml(strip) {
+  const origin = strip.isLandscape ? "right center" : "center bottom";
+  let html = "";
+  for (const t of strip.tiles) {
+    const lx = t.gx - strip.reserved.x;
+    const ly = t.gy - strip.reserved.y;
+    const img = t.data.image ? `<img src="${escAttr(t.data.image)}">` : "";
+    html += `<div class="ws-tile in" style="left:${lx}px;top:${ly}px;width:${t.gw}px;height:${t.gh}px;transform-origin:${origin}" data-win="${t.winId}">${img}<div class="ws-close"></div></div>`;
+  }
+  return html;
+}
+
+function removeOverlay(displayID) {
+  const e = overlaysByDisplay[displayID];
+  if (!e) return;
+  delete overlaysByDisplay[displayID];
+  if (e.handle) { try { e.handle.remove(); } catch (_) {} }
+}
+
+// Create (once) or reuse the region overlay for a display, then position it on
+// the reserved band and push the current tiles. `strips` is the live layout so
+// a fast retile flurry never strands a stale rect. Guards the create race:
+// if the display stopped hosting snapshots while the async create was in
+// flight, the freshly-minted panel is torn down immediately.
+async function syncOverlay(strip) {
+  const did = strip.displayID;
+  let e = overlaysByDisplay[did];
+  if (!e) {
+    e = overlaysByDisplay[did] = { handle: null, inFlight: true, lastHtml: null, lastRect: null };
+    let h = null;
+    try {
+      h = await sd.overlay.region({ rect: strip.reserved, html: `<div id="ws-tiles"></div>`, css: OVERLAY_CSS });
+    } catch (_) {}
+    if (overlaysByDisplay[did] !== e) { if (h) { try { h.remove(); } catch (_) {} } return; }
+    e.handle = h;
+    e.inFlight = false;
+  }
+  if (!e.handle) return;   // still creating on an earlier tick; a later pass paints it
+  const r = strip.reserved;
+  if (!e.lastRect || e.lastRect.x !== r.x || e.lastRect.y !== r.y || e.lastRect.w !== r.w || e.lastRect.h !== r.h) {
+    e.handle.setFrame(r);
+    e.lastRect = { ...r };
+  }
+  const html = buildTilesHtml(strip);
+  if (html !== e.lastHtml) {
+    e.lastHtml = html;
+    e.handle.eval(`(function(){var el=document.getElementById('ws-tiles');if(el)el.innerHTML=${JSON.stringify(html)};})();`);
+    log(`SNAP-RAIL d${did} rect=${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.w)}x${Math.round(r.h)} ${strip.isLandscape ? "column" : "row"} tiles=${strip.tiles.length}`);
+  }
+}
+
+// Snapshot of the current strip layout per display — cached for the eventtap
+// hit-testers (tileAt) so they don't recompute geometry on every mouse event.
+let stripsByDisplayCache = Object.create(null);
+
+function reconcileOverlays() {
+  const activeSet = activeSpaceIDSet();
+  const wanted = Object.create(null);
+  for (const d of state.displays) {
+    const strip = computeStrip(d, activeSet);
+    if (strip) wanted[d.displayID] = strip;
+  }
+  stripsByDisplayCache = wanted;
+  // Keep the consuming tap's rect gate in lockstep with the visible tiles:
+  // same computeStrip pass feeds the overlays, the hit-test cache, AND the
+  // daemon's consume gate, so all three agree. Empty ⇒ gate never matches ⇒
+  // no clicks consumed.
+  const tapRects = [];
+  for (const did of Object.keys(wanted))
+    for (const t of wanted[did].tiles)
+      tapRects.push({ x: t.gx, y: t.gy, w: t.gw, h: t.gh });
+  sd.events.setTapRects(TILE_TAP, tapRects).catch(() => {});
+  for (const idStr of Object.keys(overlaysByDisplay)) {
+    if (!wanted[+idStr]) removeOverlay(+idStr);
+  }
+  for (const idStr of Object.keys(wanted)) {
+    syncOverlay(wanted[idStr]);
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -389,236 +565,40 @@ function removeStripContainer(displayID) {
 // Render / re-render every tile to match snapshotsState. Port of
 // snapshots.lua updateLayout.
 export function updateLayout() {
-  // Strip containers + tiles only render in the primary WebView (the JS
-  // module is loaded once per stack instance). For multi-display visual
-  // rendering see the primitive-gap note at the top.
-  if (!stripsRoot) ensureStripsRoot();
-
-  // Reassign screenId for snapshots whose display went away.
+  // Re-host snapshots whose ORIGIN display went away so restore still targets a
+  // live display, and drop scroll offsets for displays that vanished. The strip
+  // itself now draws on each origin display via its own region overlay (see
+  // reconcileOverlays) — there's no primary-only container to manage here.
   const validDisplayIds = new Set(state.displays.map((d) => d.displayID));
   for (const did of Object.keys(state.snapshotsState.stripScrollOffsets)) {
-    if (!validDisplayIds.has(+did)) {
-      delete state.snapshotsState.stripScrollOffsets[did];
-    }
+    if (!validDisplayIds.has(+did)) delete state.snapshotsState.stripScrollOffsets[did];
   }
   for (const winId of state.snapshotsState.order) {
     const data = state.snapshotsState.snapshots[winId];
     if (!data) continue;
     if (data.displayID && !validDisplayIds.has(data.displayID)) {
-      // Re-host this snapshot onto whichever display contains the original
-      // frame center, falling back to the primary display.
       const of = data.frame || {};
       const cx = (of.x || 0) + (of.w || 0) / 2;
       const cy = (of.y || 0) + (of.h || 0) / 2;
       let found = null;
       for (const d of state.displays) {
         const f = d.frame;
-        if (cx >= f.x && cx < f.x + f.w && cy >= f.y && cy < f.y + f.h) {
-          found = d; break;
-        }
+        if (cx >= f.x && cx < f.x + f.w && cy >= f.y && cy < f.y + f.h) { found = d; break; }
       }
       data.displayID = (found || state.displays[0]) && (found || state.displays[0]).displayID;
     }
   }
 
-  // Group snapshots by display, keeping only those whose origin Space is
-  // active. Tiles for inactive-Space snapshots fall out of `list` below and
-  // get pruned by the liveIds cleanup, so they vanish when you switch desktops
-  // and re-appear when you switch back.
-  const activeSet = activeSpaceIDSet();
-  const byDisplay = Object.create(null);
-  for (const d of state.displays) {
-    const list = snapshotsOnDisplay(d.displayID, activeSet);
-    if (list.length) byDisplay[d.displayID] = list;
-  }
-
-  // Remove strip containers for displays that no longer have snapshots.
-  for (const dStr of Object.keys(stripsByDisplay)) {
-    const did = +dStr;
-    if (!byDisplay[did]) removeStripContainer(did);
-  }
-
-  // Render each strip.
-  for (const d of state.displays) {
-    const list = byDisplay[d.displayID];
-    if (!list || list.length === 0) continue;
-
-    const entry = ensureStripContainer(d);
-    const reserved = getReservedArea(d);
-    if (!reserved) continue;
-
-    // Position the strip container in local WebView coords; apply the
-    // orientation class so the flex-direction switches between row (bottom
-    // strip on portrait) and column (right rail on landscape).
-    const isLandscape = d.frame.w > d.frame.h;
-    entry.container.classList.toggle("vertical",   isLandscape);
-    entry.container.classList.toggle("horizontal", !isLandscape);
-    const local = globalToLocal(reserved);
-    Object.assign(entry.container.style, {
-      left:   `${local.x}px`,
-      top:    `${local.y}px`,
-      width:  `${local.w}px`,
-      height: `${local.h}px`
-    });
-
-    // Total inner content length along the strip axis (for scroll clamp).
-    let contentLen = 0;
-    for (let i = 0; i < list.length; i++) {
-      const snapSize = list[i].data.snapSize || getSnapshotSize();
-      contentLen += isLandscape ? snapSize.h : snapSize.w;
-      if (i > 0) contentLen += GAP;
-    }
-    const visibleLen = (isLandscape ? local.h : local.w) - PADDING * 2;
-    const maxOffset = Math.max(0, contentLen - visibleLen);
-    const cur = state.snapshotsState.stripScrollOffsets[d.displayID] || 0;
-    const clamped = Math.max(0, Math.min(cur, maxOffset));
-    state.snapshotsState.stripScrollOffsets[d.displayID] = clamped;
-    entry.inner.style.transform = isLandscape
-      ? `translateY(${-clamped}px)`
-      : `translateX(${-clamped}px)`;
-
-    // Drop tiles whose snapshots are gone.
-    const liveIds = new Set(list.map((x) => x.winId));
-    for (const [winId, el] of [...entry.tiles.entries()]) {
-      if (!liveIds.has(winId)) {
-        el.remove();
-        entry.tiles.delete(winId);
-      }
-    }
-
-    // Render tiles in order.
-    for (const { winId, data } of list) {
-      let tile = entry.tiles.get(winId);
-      if (!tile) {
-        tile = makeTile(winId, data);
-        entry.tiles.set(winId, tile);
-        entry.inner.appendChild(tile);
-        // Trigger zoom-in animation on next frame.
-        requestAnimationFrame(() => requestAnimationFrame(() => tile.classList.add("in")));
-      } else {
-        // Update size + image if changed.
-        const snapSize = data.snapSize || getSnapshotSize();
-        tile.style.width  = `${snapSize.w}px`;
-        tile.style.height = `${snapSize.h}px`;
-        const img = tile.querySelector("img.ws-img");
-        if (img && data.image && img.src !== data.image) img.src = data.image;
-      }
-    }
-
-    // Reorder DOM children to match list order (insertion order).
-    let prev = null;
-    for (const { winId } of list) {
-      const el = entry.tiles.get(winId);
-      if (!el) continue;
-      if (prev) {
-        if (prev.nextSibling !== el) entry.inner.insertBefore(el, prev.nextSibling);
-      } else {
-        if (entry.inner.firstChild !== el) entry.inner.insertBefore(el, entry.inner.firstChild);
-      }
-      prev = el;
-    }
-  }
-  // DOM layout changed — recompute per-tile screen rects so the cursor-gate
-  // knows about the current layout. requestAnimationFrame waits for layout
-  // to settle (tile sizes/positions) before measuring.
-  requestAnimationFrame(refreshTileScreenRects);
+  reconcileOverlays();
 }
 
-// ----------------------------------------------------------------------------
-// Click-through gate
-//
-// The window is clickThrough:true by default, so empty screen passes through
-// to the underlying app. We flip it to false dynamically while the cursor is
-// over a tile rect — the WebView then receives the click and the tile's DOM
-// mousedown handler (see makeTile / onTileMouseDown) fires. Mirrors the
-// bar/core.js item-rect flip pattern: rects exist only for the binary gate
-// decision; the click action itself is plain DOM dispatch on the tile.
-// ----------------------------------------------------------------------------
-
-let tileScreenRects = [];
-let clickThroughCurrent = true;     // matches the manifest default
-
-function refreshTileScreenRects() {
-  tileScreenRects.length = 0;
-  const my = myScreenInfo && myScreenInfo.frame;
-  if (!my) return;
-  for (const did of Object.keys(stripsByDisplay)) {
-    const entry = stripsByDisplay[did];
-    for (const el of entry.tiles.values()) {
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) continue;
-      tileScreenRects.push({
-        x: my.x + r.left,
-        y: my.y + r.top,
-        w: r.width,
-        h: r.height
-      });
-    }
-  }
-}
-
-function isOverAnyTile(mx, my) {
-  for (const r of tileScreenRects) {
-    if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) return true;
-  }
-  return false;
-}
-
-async function updateClickThrough(over) {
-  const want = !over;
-  if (want === clickThroughCurrent) return;
-  clickThroughCurrent = want;
-  await sd.window.setClickThrough(want);
-}
-
-sd.mouse.subscribe((m) => {
-  if (!m) return;
-  updateClickThrough(isOverAnyTile(m.x, m.y));
-});
-
-function makeTile(winId, data) {
-  const snapSize = data.snapSize || getSnapshotSize();
-  const el = document.createElement("div");
-  el.className = "ws-tile";
-  el.style.width  = `${snapSize.w}px`;
-  el.style.height = `${snapSize.h}px`;
-  el.dataset.winId = String(winId);
-
-  if (data.image) {
-    const img = document.createElement("img");
-    img.className = "ws-img";
-    img.src = data.image;
-    el.appendChild(img);
-  }
-
-  const closeDot = document.createElement("div");
-  closeDot.className = "ws-close";
-  el.appendChild(closeDot);
-
-  // Tile owns its click. Panel is clickThrough:false + body pointer-events:
-  // none, so empty screen passes through to the underlying app while tiles
-  // (pointer-events:auto in STRIP_CSS) capture their own events.
-  el.addEventListener("mousedown", (e) => onTileMouseDown(winId, e));
-  return el;
-}
-
-function onTileMouseDown(winId, e) {
-  if (e.button !== 0) return;
-  e.preventDefault();
-  e.stopPropagation();
-  // Close-dot zone (top-left 14×14 px) — matches lua SNAPSHOT_CLOSE_SIZE.
-  if (e.offsetX < 14 && e.offsetY < 14) {
-    closeFromSnapshot(winId);
-    return;
-  }
-  // Shift-click → drop snapshot without restoring.
-  if (e.shiftKey) {
-    cleanupResources(winId);
-    updateLayout();
-    return;
-  }
-  restoreFromSnapshot(winId);
-}
+// Tile clicks are NOT handled with DOM listeners: tiles live in per-display
+// region overlays (buildTilesHtml), which are click-through panels the
+// WebView never gets native events from. Restore/drop is dispatched from the
+// leftMouseDown eventtap by hit-testing the live layout — see onLeftClickEvent.
+// The stack's own panel therefore stays clickThrough:true (no setClickThrough
+// flip); the context menu it hosts is likewise eventtap-dispatched via
+// tryMenuClickAt.
 
 // ----------------------------------------------------------------------------
 // Tooltip — port of snapshots.lua initTooltip/showTooltip/hideTooltip.
@@ -904,24 +884,28 @@ async function refreshSnapshots() {
   if (state.snapshotsState.isCreating) return;
   const ids = [...state.snapshotsState.order];
   if (ids.length === 0) return;
+  let anyChanged = false;
   for (const winId of ids) {
     const data = state.snapshotsState.snapshots[winId];
     if (!data) continue;
     try {
       const snap = await sd.windows.snapshot(winId, { format: "jpeg", quality: 0.7 });
-      if (snap && snap.dataURL) {
+      if (snap && snap.dataURL && snap.dataURL !== data.image) {
+        // Tiles live in the per-display region overlays (buildTilesHtml embeds
+        // the dataURL inline in the tile HTML), so a fresh image repaints by
+        // re-running the overlay diff — NOT by mutating a DOM <img> (the old
+        // stripsByDisplay DOM map no longer exists post-overlay-migration).
+        // reconcileOverlays() below repaints only overlays whose HTML actually
+        // changed (syncOverlay's html !== lastHtml gate), so this is cheap.
         data.image = snap.dataURL;
-        // Update the live <img> if present.
-        for (const did of Object.keys(stripsByDisplay)) {
-          const el = stripsByDisplay[did].tiles.get(winId);
-          if (!el) continue;
-          const img = el.querySelector("img.ws-img");
-          if (img) img.src = data.image;
-        }
+        anyChanged = true;
       }
     } catch (_) { /* window may be off-screen / unsnapshottable — skip */ }
   }
-  scheduleSnapshotSave();
+  if (anyChanged) {
+    reconcileOverlays();
+    scheduleSnapshotSave();
+  }
 }
 
 function startRefreshTimer() {
@@ -962,19 +946,16 @@ export function onScrollWheelEvent(payload) {
 }
 
 // Find which snapshot tile (if any) sits under a global (x, y). Walks the
-// per-display strips, projects local tile rects back to global coords via
-// the strip's getBoundingClientRect + myScreenInfo offset.
+// live per-display strip layout (stripsByDisplayCache, rebuilt on every
+// reconcileOverlays pass) whose tiles already carry global-space rects
+// (gx/gy/gw/gh) — exactly the coordinate space an OS-level eventtap reports,
+// so no per-tile getBoundingClientRect / myScreenInfo projection is needed.
 function tileAt(x, y) {
-  for (const did of Object.keys(stripsByDisplay)) {
-    const entry = stripsByDisplay[did];
-    for (const [winId, el] of entry.tiles.entries()) {
-      const r = el.getBoundingClientRect();
-      // Convert local DOM rect → global by adding myScreenInfo offset.
-      const myX = (myScreenInfo && myScreenInfo.frame && myScreenInfo.frame.x) || 0;
-      const myY = (myScreenInfo && myScreenInfo.frame && myScreenInfo.frame.y) || 0;
-      const gx = r.left + myX, gy = r.top + myY;
-      if (x >= gx && x < gx + r.width && y >= gy && y < gy + r.height) {
-        return { winId, el, localX: x - gx, localY: y - gy, displayID: +did };
+  for (const did of Object.keys(stripsByDisplayCache)) {
+    const strip = stripsByDisplayCache[did];
+    for (const t of strip.tiles) {
+      if (x >= t.gx && x < t.gx + t.gw && y >= t.gy && y < t.gy + t.gh) {
+        return { winId: t.winId, localX: x - t.gx, localY: y - t.gy, displayID: +did };
       }
     }
   }
@@ -982,14 +963,52 @@ function tileAt(x, y) {
 }
 
 // Left-click eventtap — fires on every leftMouseDown regardless of window
-// geometry (it's an OS-level tap). Tile clicks themselves are handled via
-// DOM mousedown on each .ws-tile (see makeTile + onTileMouseDown); this
-// callback only handles dismissing the open right-click menu when the user
-// clicks anywhere off it. Drag-bracket open is wired in main.js.
+// geometry (it's an OS-level tap). Tiles render as static HTML inside their
+// per-display region overlays (see buildTilesHtml), which are click-through
+// panels with no DOM handlers of their own — so the tile's click action is
+// dispatched HERE by hit-testing the live strip layout, mirroring the
+// right-click path. An open context menu takes precedence. Drag-bracket
+// open is wired in main.js.
+// Non-consuming leftMouseDown observer. The tile ACTION (restore/close/drop)
+// lives in onTileClickEvent, fired by the consuming snapshotsTileClick tap so
+// the click is swallowed (no fall-through to the desktop). Here we only (a)
+// dismiss an open context menu and (b) report whether the click hit a tile, so
+// main.js suppresses the drag bracket for tile clicks (a tile click is never a
+// window drag). Returns true when the click is a snapshot interaction.
 export function onLeftClickEvent(payload) {
   const { x, y } = payload || {};
+  if (x == null || y == null) return false;
+  if (menuEl) { tryMenuClickAt(x, y); return true; }
+  return tileAt(x, y) != null;
+}
+
+// Close-dot hit zone (tile-local px): the red .ws-close dot sits at (4,4) 12×12
+// in OVERLAY_CSS; a 20px top-left corner is its deliberate click target.
+const CLOSE_HIT_PX = 20;
+
+// Consuming leftMouseDown tap (stack.json snapshotsTileClick, requireRects).
+// The daemon only fires — and swallows — this when the cursor is over a tile
+// rect pushed by reconcileOverlays, so tile clicks act AND stop here instead of
+// falling through the click-through overlay to whatever is behind it.
+export function onTileClickEvent(payload) {
+  const { x, y } = payload || {};
   if (x == null || y == null) return;
-  if (menuEl) tryMenuClickAt(x, y);
+  const hit = tileAt(x, y);
+  if (!hit) return;   // rect gate should guarantee a hit; guard against drift
+  // Top-left close dot → close the underlying window (destructive; deliberate
+  // small target).
+  if (hit.localX < CLOSE_HIT_PX && hit.localY < CLOSE_HIT_PX) {
+    closeFromSnapshot(hit.winId);
+    return;
+  }
+  // Shift-click drops the snapshot without restoring. SHIFT_MASK = NX
+  // left-shift flag bit.
+  if (payload.flags && (payload.flags & (1 << 17))) {
+    cleanupResources(hit.winId);
+    updateLayout();
+    return;
+  }
+  restoreFromSnapshot(hit.winId);
 }
 
 // Mouse-moved eventtap — drives hover state on tiles. The CGEventTap fires
@@ -1167,9 +1186,8 @@ export async function init() {
     // Minimized: if WE drove it via captureAndMinimize, the snapshot entry
     // already exists — nothing to do. Otherwise the OS minimized the window
     // (yellow dot, Cmd+M, Dock right-click) and we capture the bitmap
-    // out-of-band — the buttons.js intercept can't reliably consume the
-    // yellow-dot click on Tahoe (WindowServer wins the race), so the
-    // lifecycle bang is the reliable trigger.
+    // out-of-band via this lifecycle bang, which fires reliably however the
+    // minimize was triggered.
     //
     // Eligibility mirrors what the tiler considers a "real" tile: app
     // included, non-collapsed, isStandard (set before the minimize moved

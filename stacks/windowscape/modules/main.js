@@ -12,9 +12,9 @@ import {
   updateLayout as updateSnapshotsLayout,
   onScrollWheelEvent,
   onRightClickEvent,
-  onLeftClickEvent
+  onLeftClickEvent,
+  onTileClickEvent
 } from "./snapshots.js";
-import { onButtonClick as onButtonClickEvent, refresh as refreshButtons } from "./buttons.js";
 
 async function init() {
   await loadList();
@@ -29,23 +29,27 @@ async function init() {
   // events natively.
   sd.events.on("snapshotsScroll",     onScrollWheelEvent);
   sd.events.on("snapshotsRightClick", onRightClickEvent);
-  // Traffic-light button intercept. Consuming tap registered in stack.json;
-  // the daemon's cursor-rect gate (sd.events.setTapRects, pushed by
-  // buttons.js refresh) decides whether to actually swallow the click. The
-  // callback below only fires after a consume — see modules/buttons.js.
-  sd.events.on("windowscapeButtonClick", onButtonClickEvent);
   // leftMouseDown does TWO things: (1) snapshots strip click-handling, and
   // (2) opens the drag bracket so the next leftMouseUp can close it and
   // we decide resize-vs-reorder ONCE per drag instead of once per intra-
   // drag synth-poll bang. Sharing the eventtap callback so the daemon
   // doesn't install two taps for the same event.
   sd.events.on("snapshotsLeftClick", (payload) => {
-    // Payload carries the global click point — the bracket uses it to
-    // detect titlebar double-clicks (macOS zoom) so the resulting resize
-    // isn't misread as a user drag-resize.
+    // Payload carries the global click point. If it landed on a snapshot tile,
+    // onLeftClickEvent handles it (restore/drop) and returns true — do NOT also
+    // open the drag bracket, whose deferred tile pass otherwise fights the
+    // restore (window deminimizes, then the bracket re-tiles it — logged as
+    // via=bracket-deferred). Only open the bracket for clicks that MISS the
+    // strip (real window drags), where it detects titlebar double-clicks
+    // (macOS zoom) vs a user drag-resize.
+    if (onLeftClickEvent(payload)) return;
     startDragBracket(payload);
-    onLeftClickEvent(payload);
   });
+  // Consuming tap: fires only when the click is over a snapshot tile rect
+  // (gate fed by snapshots.js reconcileOverlays) and swallows it, so the tile
+  // action runs without the click falling through to the desktop behind the
+  // click-through overlay.
+  sd.events.on("snapshotsTileClick", onTileClickEvent);
   sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
   // mouseMoved eventtap was firing the hover handler at ~120Hz, blocking
   // every other stack's sd.mouse / sd.windows.all push. The 30Hz sd.mouse
@@ -66,10 +70,6 @@ async function init() {
     // bangs so externally-driven minimize doesn't desync.
     await initSnapshots();
     await tileWindows();
-    // Prime the button-rect cache + daemon gate so the first click after
-    // boot is interceptable (without this, the cache is empty until the
-    // first focus change fires a refresh).
-    refreshButtons();
     // Push the focused window's inclusion verdict to overlay-border so it
     // can paint the right palette before its own first focusedChanged tick
     // resolves. Without this, the boot border briefly shows the default

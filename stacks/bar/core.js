@@ -393,7 +393,6 @@ sd.hotkey.on("toggleSystemMenubar", async () => {
 // order-independent (bar may load before or after the plugins).
 
 sd.bang.declare('bar.register').on((detail) => {
-  console.log("[bar] register fired", JSON.stringify(detail));
   if (!detail || !detail.id) return;
   const itemSpec = {
     id:        String(detail.id),

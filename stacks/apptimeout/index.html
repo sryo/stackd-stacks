@@ -1,6 +1,6 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<head><meta charset="utf-8"></head>
 <body>
 <script type="module">
   // AppTimeout — port of AppTimeout.lua.
@@ -245,7 +245,10 @@
   });
 
   await loadIgnored();
-  setInterval(check, CHECK_INTERVAL_MS);
+  // sd.timer.interval (not raw setInterval) so the loop is cleared on
+  // hot-reload — a surviving ghost loop would keep running the app-killer
+  // against a stale protect-list.
+  sd.timer.interval(check, CHECK_INTERVAL_MS);
   check();
 </script>
 </body>

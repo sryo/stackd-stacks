@@ -394,6 +394,7 @@ sd.events.on("click", async () => {
 });
 
 sd.events.on("flags", (e) => {
+  if (!e) return;
   lastFlags = e.flags;
   if (armed && armedPoint) showTip(armed, armedPoint.x, armedPoint.y);
 });

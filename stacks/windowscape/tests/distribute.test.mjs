@@ -49,3 +49,21 @@ test("reorder-stable: filled pins give each window the same width regardless of 
   assert.equal(ab[0], ba[1], "window 1 keeps its width when moved");
   assert.equal(ab[1], ba[0], "window 2 keeps its width when moved");
 });
+
+test("growth: adding a window against pinned peers gives newcomers their fair share", () => {
+  // The log case: Terminal + Claude pinned (856 + 853), Arc + a new Terminal join.
+  // On growth the two flex tiles must get ~their fair share (2560/4 = 640), not the
+  // 425 leftover that lands them under an app minimum; pins shrink pro-rata.
+  const pins = pinOf({ T: 856, C: 853 });
+  const out = distributePinned(2560, 0, ["T", "C", "A", "N"], w, pins, true);
+  assert.equal(out.reduce((s, v) => s + v, 0), 2560, "row stays filled — no gap");
+  assert.ok(out[2] >= 600 && out[3] >= 600, `flex tiles get ~fair share, got ${out[2]}/${out[3]}`);
+  assert.ok(Math.abs(out[0] / out[1] - 856 / 853) < 0.02, "pin proportions preserved");
+});
+
+test("steady-state (no growth): the same crammed flex is left alone — pins stay sticky", () => {
+  // Identical inputs, growth=false (a manual resize or close, not an add): the
+  // deliberate pins persist even though flex lands at 425 (> the 400 floor).
+  const out = distributePinned(2560, 0, ["T", "C", "A", "N"], w, pinOf({ T: 856, C: 853 }));
+  assert.deepEqual(out, [856, 853, 425, 426], "pins stay sticky when the set didn't grow");
+});

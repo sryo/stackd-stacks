@@ -7,7 +7,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow } from "./core.js";
-import { tileWeighted, resolvePinOversubscription, scalePinsToFill, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, specFromState } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
@@ -208,57 +208,25 @@ async function tileWindowsInternal(snap) {
     const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
     const horizontal = screenFrame.w > screenFrame.h;
 
-    // Pin sanity clamp. Pins restored from sd.settings (restore.js) or
-    // accumulated at runtime can oversubscribe the work area. Oversized
-    // pins force distributePinned's scale-down to hand
-    // flex tiles widths below app minimums (TextEdit refuses < ~116px),
-    // and sub-50px refusals are under the PASS-2 threshold — the overlap
-    // never self-corrects. A pin set can't legitimately exceed the major
-    // axis (every pin was captured from a real on-screen size), so drop
-    // ALL pins on this display and fall back to weighted flex; honest
-    // pins re-establish on the next user resize.
-    const majorAxis = horizontal ? screenFrame.w : screenFrame.h;
-    const pinIds = nonCollapsed.filter((id) => state.pinnedSizes[id] != null);
-    const pinSum = pinIds.reduce((s, id) => s + state.pinnedSizes[id], 0);
-    if (pinSum > majorAxis) {
-      // Pins can oversubscribe the axis when PASS-2 bumps a refused neighbor up
-      // to its app minimum. Resolve it (hold refusal minimums fixed, keep the
-      // window the user grabbed, shrink the other user pins to fit) and apply
-      // the result. Tier logic + tests: resolvePinOversubscription in layouts.js.
-      const sizes = Object.create(null);
-      for (const id of pinIds) sizes[id] = state.pinnedSizes[id];
-      const r = resolvePinOversubscription(sizes, state.refusalPins, state.lastPinPairId, majorAxis, PIN_MIN_PX);
-      for (const id of pinIds) {
-        if (r.pins[id] == null) delete state.pinnedSizes[id];
-        else state.pinnedSizes[id] = r.pins[id];
-      }
-      for (const id of r.refusalDrop) state.refusalPins.delete(+id);
-      log(`PIN-CLAMP display=${d.displayID} tier=${r.tier} sum=${pinSum}px > workarea=${majorAxis}px${r.active != null ? ` keep=${r.active}@${r.pins[r.active]}px` : ""} pins=${JSON.stringify(pinIds.filter((id) => r.pins[id] != null).map((id) => ({ id: +id, px: r.pins[id] })))}`);
-    } else if (pinIds.length === nonCollapsed.length && pinSum > 0 && majorAxis - pinSum > 2) {
-      // Every tile is pinned but they sum SHORT of the row (a close or refusal
-      // shed left slack). Renormalize them to fill it pro-rata so each tile's
-      // width is its ratio × the row, independent of order — otherwise the
-      // last-in-order tile absorbs all the slack and reordering shuffles the
-      // widths. One-shot: the next pass sees pinSum == majorAxis and skips.
-      const sizes = Object.create(null);
-      for (const id of pinIds) sizes[id] = state.pinnedSizes[id];
-      const filled = scalePinsToFill(sizes, majorAxis);
-      for (const id of pinIds) state.pinnedSizes[id] = filled[id];
-      log(`PIN-FILL display=${d.displayID} sum=${pinSum}px → ${majorAxis}px pins=${JSON.stringify(pinIds.map((id) => ({ id: +id, px: filled[id] })))}`);
-    }
-
-    // Collapsed widgets get positioned at their current pixel size — the
-    // tiler doesn't force a width (Sticky Notes refuses width writes;
-    // forcing them creates an overlap loop). sizeOf returns the live
-    // width/height so the position cursor advances by the actual size.
+    // Collapsed widgets get positioned at their current pixel size — the tiler
+    // doesn't force a width (Sticky Notes refuses width writes; forcing them
+    // creates an overlap loop). sizeOf returns the live size so the position
+    // cursor advances by the actual size.
     const sizeOf = (id) => {
       const f = state.windowsById[id]?.frame;
       return f ? { w: f.w, h: f.h } : null;
     };
-    // Pinned tiles (state.pinnedSizes[id]) take their fixed px share; the
-    // rest distribute by weight. See layouts.distributePinned.
-    const pinnedSizeOf = (id) => state.pinnedSizes[id] ?? null;
-    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf);
+    // One resolveFlex call (inside tileWeighted) replaces the old PIN-CLAMP /
+    // PIN-FILL / weighted-split trio: a user pin → basis, an AX-refusal pin →
+    // min (the app's floor), else a flex weight; the last-grabbed pin is held
+    // under overflow. resolveFlex is pure — it never mutates the pin state.
+    const specOf = specFromState({
+      pins: state.pinnedSizes,
+      refusalSet: state.refusalPins,
+      weightOf: getWindowWeight,
+      lastId: state.lastPinPairId,
+    });
+    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
     log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
 
     if (cfg.enableAnimations && !snap) {
@@ -357,7 +325,7 @@ async function tileWindowsInternal(snap) {
     // Under the pin model we treat refusal exactly like a user resize:
     // write the actual size to state.pinnedSizes. The next layout pass
     // will respect it; flex siblings absorb the freed space naturally
-    // via distributePinned.
+    // via resolveFlex.
     //
     // REFUSAL_PX must equal the settled-echo cutoff in events.js
     // (dMajor <= 20): a deviation the echo filter won't swallow MUST be
@@ -399,8 +367,8 @@ async function tileWindowsInternal(snap) {
 
     // Re-flow with refused windows now pinned. Refused tiles are already at
     // their actual size from the PASS-1 setFrame; only flex tiles need a
-    // second setFrame. distributePinned will compute the new flex shares.
-    const targets2 = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf);
+    // second setFrame. resolveFlex will compute the new flex shares.
+    const targets2 = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
     const flexFixes = [];
     for (const t of targets2) {
       if (refused.includes(t.winId)) continue; // already at actual

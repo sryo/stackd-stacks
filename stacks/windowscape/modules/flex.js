@@ -117,9 +117,12 @@ export function resolveFlex(items, total, gap = 0) {
   // below its fair share → shrink pins pro-rata so newcomers get a fair share.
   // (A deliberate big pin with a still-usable remainder is left alone.)
   if (pinSum > 0 && perFlex < FLEX_USABLE_PX && perFlex < fairPer) {
-    const target = Math.max(0, inner - fairPer * flexCount);
-    const scale = target / pinSum;
-    for (const i of pinIdx) pinPx[i] = Math.max(floorAt(i), Math.floor(pinPx[i] * scale));
+    // Reserve each flex tile its fair share and shrink the pins to fit —
+    // holding the active (live-dragged) pin so a resize sticks, shrinking the
+    // others pro-rata. With no active pin (a plain add), all pins scale evenly.
+    const budget = Math.max(0, inner - fairPer * flexCount);
+    const shrunk = shrinkPins(pinIdx, (i) => pinPx[i], budget, activeIdx, floorAt);
+    for (const i of pinIdx) pinPx[i] = Math.max(floorAt(i), Math.floor(shrunk[i]));
     pinSum = pinIdx.reduce((s, i) => s + pinPx[i], 0);
   }
 

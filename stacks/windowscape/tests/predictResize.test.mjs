@@ -1,10 +1,10 @@
 // Pure unit tests for predictResizeFrame (windowscape gesture resize).
-// predictResizeFrame runs the REAL tiler math (pairwise pin → resolve → tile)
-// so the gesture preview equals the committed frame. Node >=22 auto-detects
-// ESM, so this imports the real module directly — no package.json needed.
+// predictResizeFrame runs the REAL tiler math (pairwise A/B basis → resolveFlex
+// → tileWeighted) so the gesture preview equals the committed frame.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { predictResizeFrame, tileWeighted, resolvePinOversubscription, PIN_MIN_PX } from "../modules/layouts.js";
+import { predictResizeFrame, PIN_MIN_PX } from "../modules/layouts.js";
+import { resolveFlex } from "../modules/flex.js";
 
 const SF = { x: 0, y: 0, w: 1000, h: 900 }; // vertical stack → major axis = height
 const weightOf = () => 1;
@@ -20,37 +20,33 @@ function predict(over) {
 
 test("middle window, drag up → grows upward, top edge moves, bottom fixed", () => {
   const r = predict({ activeId: 2, neighborId: 1, edge: "leading", requestedSize: 400 });
-  // top 300→200 (up by Δ=100), bottom stays at 600; neighbor above shrinks
   assert.deepEqual(r.frame, { x: 0, y: 200, w: 1000, h: 400 });
   assert.equal(r.bId, 1);
 });
 
 test("middle window, drag down → grows downward into the lower neighbor", () => {
   const r = predict({ activeId: 2, neighborId: 3, edge: "trailing", requestedSize: 400 });
-  // top stays at 300, bottom 600→700 (down by Δ=100)
   assert.deepEqual(r.frame, { x: 0, y: 300, w: 1000, h: 400 });
   assert.equal(r.bId, 3);
 });
 
 test("shrink is the mirror of grow (conservation with the neighbor)", () => {
   const r = predict({ activeId: 2, neighborId: 3, edge: "trailing", requestedSize: 200 });
-  // Δ=−100: window shrinks, lower neighbor grows back; total row unchanged
   assert.deepEqual(r.frame, { x: 0, y: 300, w: 1000, h: 200 });
 });
 
 test("edge window keeps its screen edge pinned, grows inward", () => {
   const r = predict({ activeId: 1, neighborId: 2, edge: "trailing", requestedSize: 400 });
-  assert.deepEqual(r.frame, { x: 0, y: 0, w: 1000, h: 400 }); // y=0 (screen edge) fixed
+  assert.deepEqual(r.frame, { x: 0, y: 0, w: 1000, h: 400 });
 });
 
-test("preview == commit: the returned frame equals the tiler's own recipe", () => {
+test("preview == commit: the frame equals a from-scratch resolveFlex layout", () => {
   const r = predict({ activeId: 2, neighborId: 1, edge: "leading", requestedSize: 400 });
-  // Independently replicate what tiler.js does with the committed pins.
-  const pins = { 2: 400, 1: 200 };
-  const resolved = resolvePinOversubscription(pins, new Set(), 2, SF.h, PIN_MIN_PX);
-  const targets = tileWeighted(SF, [1, 2, 3], [], false, weightOf, sizeOf, (id) => resolved.pins[id] ?? null);
-  const committed = targets.find((t) => +t.winId === 2).frame;
-  assert.deepEqual(r.frame, committed);
+  // Independently: pin A=2 at 400, B=1 at 200 (net zero), tile 3 flex.
+  const sizes = resolveFlex([{ basis: 200 }, { basis: 400, active: true }, { weight: 1 }], SF.h, 0);
+  let y = 0; const frames = {};
+  [1, 2, 3].forEach((id, i) => { frames[id] = { x: 0, y, w: 1000, h: sizes[i] }; y += sizes[i]; });
+  assert.deepEqual(r.frame, frames[2]);
 });
 
 test("collapsed strip present → heights use mainH, no overgrowth into the rail", () => {
@@ -63,14 +59,14 @@ test("collapsed strip present → heights use mainH, no overgrowth into the rail
   assert.ok(r.frame.y + r.frame.h <= 888, "must not grow into the collapsed rail");
 });
 
-test("oversubscription: active window preserved, resolved pins fit the axis", () => {
+test("oversubscription: the active window is held; the row still fills exactly", () => {
   const r = predict({
     activeId: 2, neighborId: 1, edge: "leading", requestedSize: 300,
     aBase: 100, bBase: 100, nonCollapsed: [1, 2, 3, 4], pins: { 4: 600 },
   });
   const total = Object.values(r.pins).reduce((s, v) => s + v, 0);
-  assert.equal(r.pins[2], 300, "the dragged window keeps its size (tier-1)");
-  assert.ok(total <= SF.h, `resolved pins ${total} must fit ${SF.h}`);
+  assert.equal(r.pins[2], 300, "the dragged window keeps its size");
+  assert.equal(total, SF.h, `row fills exactly (${total})`);
 });
 
 test("solo tile → no pairwise resize, returns the plain tiled frame", () => {

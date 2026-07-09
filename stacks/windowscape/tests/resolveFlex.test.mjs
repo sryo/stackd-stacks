@@ -105,6 +105,15 @@ test("oversubscription: the active pin keeps its size; others shrink to fit", ()
 });
 
 // ── pairwise transfer shape (locality): only A and B change ──────────────
+test("gate rebalance holds the active pin while the others shrink for a newcomer", () => {
+  // A flex window joins two pins filling the row; the active (dragged) pin keeps
+  // its size, the other pin yields, the newcomer gets a fair share.
+  const out = resolveFlex([pin(1300, { active: true }), pin(1260), flex()], 2560);
+  assert.equal(sum(out), 2560);
+  assert.equal(out[0], 1300, "active pin held during the rebalance");
+  assert.ok(out[2] >= 600, `newcomer gets a share, got ${out[2]}`);
+});
+
 test("pairwise: pinning A and its neighbour B leaves the other tiles untouched", () => {
   // 4 tiles, all flex, even = 250 each on 1000. Pin A=2 at 350, B=1 at 150
   // (net zero). Tiles 3 and 4 stay at 250.

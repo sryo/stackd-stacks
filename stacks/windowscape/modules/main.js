@@ -1,4 +1,4 @@
-// Bootloader — equivalent to init.lua. Wires the modules and starts watchers.
+// Bootloader. Wires the modules and starts watchers.
 
 import { sd } from "sd://runtime/api.js";
 import { state, loadList, updateWindowOrder, isAppIncluded } from "./core.js";

@@ -1,19 +1,18 @@
-// Frame animation — port of WindowScape/animation.lua.
+// Frame animation.
 //
-// Lua animation.lua interpolates win:frame() over cfg.animationDuration
+// Interpolates the window frame over cfg.animationDuration
 // with an easeOutCubic curve at cfg.animationFPS. Per-window cancellable;
 // near-no-op when source ≈ target. Without this every tile-driven setFrame
 // snaps instantly, which makes reorders/resizes jarring.
 //
-// Implementation notes vs lua:
+// Implementation notes:
 // - One shared rAF-style loop (setInterval at the configured FPS) rather
 //   than per-window timers; cheaper at high window count and keeps all
 //   active animations in sync so they all finish on the same tick.
 // - sd.windows.setFrame is RPC over IPC, ~1–2ms per call. Per-tick frames
 //   apply as parallel plain setFrames — see the note inside tickOnce for
 //   why sd.windows.batch is deliberately NOT used here.
-// - cfg.enableAnimations === false short-circuits to a direct setFrame;
-//   same exit as the lua's flag check.
+// - cfg.enableAnimations === false short-circuits to a direct setFrame.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
@@ -108,8 +107,7 @@ export function isAnimating(winId) {
 // Returns immediately; the animation runs on its own loop. Callers that
 // need synchronous completion can pass onComplete or await sleep.
 //
-// cfg.enableAnimations === false short-circuits to direct setFrame — same
-// exit point as lua animation.animatedSetFrame.
+// cfg.enableAnimations === false short-circuits to direct setFrame.
 export async function animatedSetFrame(winId, currentFrame, targetFrame, onComplete) {
   if (!winId || !targetFrame) return;
   // Record the FINAL target up front. The tiler's animated branch routes
@@ -125,8 +123,7 @@ export async function animatedSetFrame(winId, currentFrame, targetFrame, onCompl
     if (onComplete) onComplete();
     return;
   }
-  // Replace any prior in-flight animation for this window — last call wins,
-  // matches lua cancelAnimation(winId) at the top of animatedSetFrame.
+  // Replace any prior in-flight animation for this window — last call wins.
   active.set(+winId, {
     startFrame:  { ...currentFrame },
     targetFrame: { ...targetFrame },

@@ -1,4 +1,4 @@
-// WindowScape configuration — verbatim port of config.lua.
+// WindowScape configuration.
 // All knobs the user might want to tweak live here.
 
 export const cfg = {

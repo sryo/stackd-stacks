@@ -1,4 +1,4 @@
-// Tiling engine — port of tiler.lua, slimmed.
+// Tiling engine — slimmed.
 // One mental model: distribute by weight → setFrame each → if anyone
 // refused, write its weight to its actual size + renormalize siblings up
 // → re-apply the flexible windows ONCE. Refusal-driven convergence
@@ -94,9 +94,8 @@ async function tileWindowsInternal(snap) {
   for (const d of state.displays) {
     const space = activeSpaceOnDisplay(d.uuid);
     if (space == null) continue;
-    // Lua tiler.lua line 130: bail on fullscreen. Touching frames inside
-    // a fullscreen space pops the app out of fullscreen and is very
-    // disruptive.
+    // Bail on fullscreen. Touching frames inside a fullscreen space pops
+    // the app out of fullscreen and is very disruptive.
     const spaceInfo = state.spacesByDisplay[d.uuid];
     if (spaceInfo && spaceInfo.isFullscreen) {
       log(`skip tiling display ${d.displayID} — fullscreen space`);

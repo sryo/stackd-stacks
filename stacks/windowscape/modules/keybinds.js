@@ -1,4 +1,4 @@
-// Hotkey verb dispatch — port of keybinds.lua.
+// Hotkey verb dispatch.
 // Hotkeys are declared in stack.json; we hang named callbacks off the window
 // global so the bridge can invoke them.
 
@@ -76,8 +76,8 @@ export function bind() {
   sd.hotkey.on("focusNext",        () => focusAdjacentWindow("forward"));
   sd.hotkey.on("focusPrev",        () => focusAdjacentWindow("backward"));
   sd.hotkey.on("minimize",         minimizeFocused);
-  // Snapshot bulk verbs — port of snapshots.lua's context-menu Restore All /
-  // Close All / Clear All. Each operates on every tile in the strip.
+  // Snapshot bulk verbs — Restore All / Close All / Clear All. Each
+  // operates on every tile in the strip.
   sd.hotkey.on("snapshotsRestoreAll", snapshotsRestoreAll);
   sd.hotkey.on("snapshotsCloseAll",   snapshotsCloseAll);
   sd.hotkey.on("snapshotsClearAll",   snapshotsClearAll);

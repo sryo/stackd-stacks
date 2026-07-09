@@ -1,4 +1,4 @@
-// Snapshot capture helpers — JS port of WindowScape/snapshot_create.lua.
+// Snapshot capture helpers.
 //
 // Entry points:
 //   captureAndMinimize(winId)    — grab snapshot, AX-minimize the window,
@@ -13,16 +13,15 @@
 //                                  bitmap. Used by snapshots.js
 //                                  onBang_sd_window_minimized.
 //
-// Zoom-in animation: lua used hs.canvas:frame timer interpolation from the
-// window's original frame down to the strip slot. In JS, the tile element
-// is created with `transform: scale(0.5); opacity: 0` and the .in class
-// flips both to identity via a CSS transition (driven by snapshots.js's
-// updateLayout). The CSS animation duration matches lua's
-// ANIMATION_INTERVAL × ANIMATION_STEPS roughly.
+// Zoom-in animation: the tile element is created with `transform:
+// scale(0.5); opacity: 0` and the .in class flips both to identity via a
+// CSS transition (driven by snapshots.js's updateLayout). The CSS
+// animation duration roughly matches the original ANIMATION_INTERVAL ×
+// ANIMATION_STEPS.
 //
-// Ambient blur (snapshot_create.lua's appendElements blur layer): not
-// directly portable to a CSS transform on a single tile. We approximate
-// with a box-shadow + border that gives the tile a "frosted" presence.
+// Ambient blur: not directly portable to a CSS transform on a single
+// tile. We approximate with a box-shadow + border that gives the tile a
+// "frosted" presence.
 
 import { sd } from "sd://runtime/api.js";
 import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log } from "./core.js";
@@ -93,7 +92,7 @@ async function captureCore(winId) {
   return data;
 }
 
-// Port of snapshot_create.lua createSnapshot (default path, no restoreData).
+// Default capture path (no restoreData).
 // Grabs the snapshot, AX-minimizes, retiles. The CSS-driven zoom-in is
 // applied by snapshots.js updateLayout (tile is created with scale(0.5);
 // .in flips it to scale(1) via transition).
@@ -122,9 +121,8 @@ export async function captureAndMinimize(winId) {
     state.snapshotsState.isCreating = false;
   }
 
-  // Retile after a short delay so the just-minimized window has time to
-  // drop out of windowsById (lifecycle bang fires async). Lua used a
-  // 200ms timer for the same race.
+  // Retile after a 200ms delay so the just-minimized window has time to
+  // drop out of windowsById (lifecycle bang fires async).
   setTimeout(async () => {
     const tiler = await getTiler();
     await tiler.tileWindows();

@@ -1,6 +1,6 @@
-// Event plumbing — port of events.lua (slimmed: no AXObserver per-app yet,
-// no right-click eventtap for snapshots, no watchdog). The 1Hz lifecycle
-// poll + the windowsAll / focused signals drive everything here.
+// Event plumbing (slimmed: no AXObserver per-app yet, no right-click
+// eventtap for snapshots, no watchdog). The 1Hz lifecycle poll + the
+// windowsAll / focused signals drive everything here.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
@@ -23,7 +23,7 @@ function emitInclusionBang(w) {
   sd.bang.declare('overlay-border.inclusion').emit({ winId: w.id, included: isAppIncluded(w) });
 }
 
-// Spatial drop-position calculator — port of operations.lua calculateDropPosition.
+// Spatial drop-position calculator.
 // Returns the 0-based insertion index for a window dropped at `dropFrame`
 // among `screenWindows` (already filtered to same-display, non-collapsed).
 // Horizontal displays compare centers on x, vertical on y. This is what
@@ -74,8 +74,8 @@ async function refreshSpacesCache(ids) {
   }
 }
 
-// Same-slot recreation pairing — successor of the boolean isTabSwitch
-// (events.lua). A "tab switch" here is really an app destroying a window
+// Same-slot recreation pairing — successor of the boolean isTabSwitch.
+// A "tab switch" here is really an app destroying a window
 // and recreating it at a near-identical frame (Terminal does this on tab
 // operations); the daemon's CGWindowIDs are stable across true tab
 // switches, so any destroy+create pair we see is real window churn.
@@ -191,9 +191,9 @@ async function handleWindowEvent() {
 
 // Out-of-bracket resize debounce — replaces the removed 500ms drift-watch
 // poll. The daemon's per-window AX observers bang on every app/script-
-// driven resize now; we debounce 300ms (same shape as lua's
-// pendingReposition timer) so the last bang of a resize train wins, then
-// run the SAME pairwise pin + retile as a bracket-close resize.
+// driven resize now; we debounce 300ms so the last bang of a resize
+// train wins, then run the SAME pairwise pin + retile as a bracket-close
+// resize.
 //
 // Echo safety: our own tile-pass setFrames bounce back as resized bangs,
 // and AX notifications trail the actual setFrame by up to several hundred
@@ -364,10 +364,10 @@ export function start() {
 
   // Display geometry changes. macOS posts NSApplication.didChangeScreen­Parameters­
   // (which sd.display.all rides) BEFORE NSScreen metrics settle — reading
-  // visibleFrame inside this callback often returns the OLD frame. Lua
-  // events.lua line 705 debounces 250ms before re-tiling for this exact reason,
-  // and resets tilingCount + clears any in-flight cooldowns so the post-debounce
-  // tile pass isn't blocked. Port the same shape.
+  // visibleFrame inside this callback often returns the OLD frame. We
+  // debounce 250ms before re-tiling for this exact reason, and reset
+  // tilingCount + clear any in-flight cooldowns so the post-debounce tile
+  // pass isn't blocked.
   let displayDebounce = null;
   // Cache the geometry signature so we can skip retiles when the only
   // thing that changed was brightness (sd.display.all re-pushes on every
@@ -492,12 +492,12 @@ export function start() {
     tileWindows();
   };
 
-  // Spatial reorder on window-moved — port of events.lua handleWindowMoved.
+  // Spatial reorder on window-moved.
   // The daemon fires sd.window.moved for origin changes AND sd.window.resized
   // for size changes as SEPARATE bangs from per-window AX observers. A pure
   // right/bottom-edge resize changes size only → only `resized` fires; a
-  // top/left-edge resize changes both. Hammerspoon's window_filter coalesces
-  // these into one `windowMoved`; we have to subscribe to both and dedupe.
+  // top/left-edge resize changes both. They arrive as separate bangs, not
+  // one coalesced `windowMoved`; we have to subscribe to both and dedupe.
   //
   // Drag-bracket model: leftMouseDown opens the bracket (sets dragInFlight),
   // leftMouseUp closes it (after a 100ms grace for trailing bangs).

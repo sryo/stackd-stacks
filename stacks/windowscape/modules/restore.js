@@ -1,9 +1,9 @@
-// Session restore — port of restore.lua (layout only; snapshot rehydration
+// Session restore (layout only; snapshot rehydration
 // is deferred along with the snapshot system).
 //
 // Save shape:
 //   { spaces: { "<spaceId>": [{ bundleId, title, weight }, ...], ... } }
-// Saved/loaded via sd.settings; the Lua used hs.settings which maps cleanly.
+// Saved/loaded via sd.settings.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";

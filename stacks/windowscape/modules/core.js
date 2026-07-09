@@ -1,6 +1,5 @@
-// Shared state + utilities — port of core.lua.
-// State is a singleton; modules import and mutate it directly (mirrors the
-// way the Lua modules read core.windowOrderBySpace as a live ref).
+// Shared state + utilities.
+// State is a singleton; modules import and mutate it directly.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";

@@ -1,4 +1,4 @@
-// Simulated fullscreen — port of WindowScape/fullscreen.lua.
+// Simulated fullscreen.
 //
 // "Simulated" vs native: the focused window expands to fill its display's
 // visibleFrame, OTHER windows on the same display+space get parked off-screen
@@ -7,12 +7,12 @@
 // from `sd.windows.fullscreen` which sets kAXFullScreen and moves the window
 // out to its own Space.
 //
-// V1 cuts vs the lua source:
-// - No overlay buttons (the 510-line fullscreen_ui.lua canvas + AX titlebar
-//   measurement). Exit is keybind-only — the user toggles the same hotkey.
+// V1 cuts:
+// - No overlay buttons (would need a canvas + AX titlebar measurement).
+//   Exit is keybind-only — the user toggles the same hotkey.
 // - No expand/contract animation (cfg.enableAnimations applies to retiles,
 //   not to the fullscreen transition itself).
-// - No screen-config-change reframe loop (the lua's reframeToCurrentScreen).
+// - No screen-config-change reframe loop.
 //   Tier-2: re-anchor on display arrangement changes.
 //
 // State shape lives on state.fullscreenState in core.js — tiler.js reads
@@ -40,8 +40,8 @@ function isPeerOnSameDisplaySpace(peer, displayID, spaceId) {
   if (!wd || wd.displayID !== displayID) return false;
   const spaces = state.windowSpacesCache[peer.id] || [];
   // If the cache is empty (window never queried), fall back to allowing it —
-  // matches lua's behavior of including a window when windowSpaces returns
-  // nothing rather than excluding it.
+  // including a window when windowSpaces returns nothing rather than
+  // excluding it.
   if (spaces.length === 0) return true;
   return spaces.includes(spaceId);
 }
@@ -205,16 +205,15 @@ export async function exitSimulatedFullscreen() {
 
 // Exported keybind verb — flips between enter/exit based on current state.
 // If fullscreen is active on a DIFFERENT window than the focused one,
-// exit first then enter on the focused window (matches lua line 56-60
-// where enter() short-circuits to exit() if state.active is already true).
+// exit first then enter on the focused window.
 export async function toggleSimulatedFullscreen() {
   const f = sd.windows.focused.peek();
   const fs = state.fullscreenState;
 
   if (fs.active) {
     // Whether the focused window matches the fullscreened one or not,
-    // toggling exits — the lua behavior is "any toggle press leaves
-    // fullscreen". Tier-2 could swap fullscreen target instead.
+    // toggling exits — any toggle press leaves fullscreen. Tier-2 could
+    // swap fullscreen target instead.
     await exitSimulatedFullscreen();
     return;
   }

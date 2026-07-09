@@ -1,4 +1,4 @@
-// Window movement + focus + weight verbs — port of operations.lua.
+// Window movement + focus + weight verbs.
 // Each verb is invoked from a keybind; the focused-window resolution comes
 // from sd.windows.focused (which now carries .id thanks to the new SPI).
 
@@ -49,7 +49,7 @@ export function grow()   { adjustFocusedPin(GROW_STEP_PX); }
 export function shrink() { adjustFocusedPin(-GROW_STEP_PX); }
 
 // Clear the focused tile's pin AND weight — it rejoins the flex pool with
-// the default weight. "Cycle" name preserved from the Lua original; the
+// the default weight. "Cycle" name preserved from the original; the
 // effect now is "reset this tile to default flex behavior."
 export function cycleWidth() {
   const w = focusedWin();
@@ -79,7 +79,7 @@ export function forceRetile() {
 // the snapshot subsystem — captureAndMinimize grabs the window image,
 // AX-minimizes, and the strip's CSS-driven zoom-in animation renders.
 //
-// Sibling selection mirrors the lua: prefer the most recent entry in
+// Sibling selection: prefer the most recent entry in
 // focusHistory whose window is still alive AND not the one being
 // minimized AND not minimized itself; fall back to the next non-collapsed
 // window in windowOrderBySpace on the same display.
@@ -162,9 +162,9 @@ export function moveWindowInOrder(direction) {
   [sorted[idx], sorted[target]] = [sorted[target], sorted[idx]];
 
   // Splice the new sorted order back into the full per-space order list,
-  // keeping off-display + collapsed + non-tiled entries in place. Same as
-  // operations.lua. Slot conditions MUST mirror the `sorted` filters above,
-  // or sIdx runs past the end of sorted.
+  // keeping off-display + collapsed + non-tiled entries in place. Slot
+  // conditions MUST mirror the `sorted` filters above, or sIdx runs past
+  // the end of sorted.
   const newOrder = [];
   let sIdx = 0;
   for (const id of order) {
@@ -183,7 +183,7 @@ export function moveWindowInOrder(direction) {
   state.windowOrderBySpace[space] = newOrder;
 
   // Capture the BEFORE frame and the mouse position so we can drag the
-  // cursor along with the window — port-of operations.lua moveMouseWithWindow.
+  // cursor along with the window.
   // Without this the mouse stays in place while the window slides out from
   // under it, which is disorienting during keyboard-driven reorders.
   const oldFrame = { ...w.frame };
@@ -233,9 +233,9 @@ export function focusAdjacentWindow(direction) {
   if (target < 0 || target >= onScreen.length) return;
   const targetId = onScreen[target];
   sd.windows.focus(targetId);
-  // Center the mouse on the newly focused window — port-of operations.lua
-  // line 170-173. Without this, focus jumps but the cursor stays behind,
-  // which makes keyboard-driven focus cycling feel disconnected.
+  // Center the mouse on the newly focused window. Without this, focus jumps
+  // but the cursor stays behind, which makes keyboard-driven focus cycling
+  // feel disconnected.
   const targetWin = state.windowsById[targetId];
   if (targetWin && targetWin.frame) {
     const f = targetWin.frame;
@@ -263,8 +263,7 @@ export async function moveWindowToAdjacentScreen(direction) {
   const relW = w.frame.w / d.frame.w;
   const relH = w.frame.h / d.frame.h;
 
-  // Same mouse-follow-window pattern as moveWindowInOrder, port-of
-  // operations.lua line 247 moveMouseWithWindow(oldFrame, finalFrame).
+  // Same mouse-follow-window pattern as moveWindowInOrder.
   const oldFrame = { ...w.frame };
   const mousePos = sd.mouse.peek();
   const mouseWasInside = mousePos &&

@@ -1,46 +1,44 @@
-// Window snapshot (minimize) system — JS port of WindowScape/snapshots.lua.
+// Window snapshot (minimize) system.
 //
-// Maintains a per-display strip of window thumbnails: a right-side column
-// on landscape displays, a bottom row on portrait displays (matches lua).
-// Capturing a window grabs its CGSHWCaptureWindowList image via
-// sd.windows.snapshot(id) and AX-minimizes the window; the thumbnail tile
-// sits in the strip until the user clicks it to restore (or closeAll/
-// restoreAll/clearAll bulk-acts).
+// Maintains a per-display strip of window thumbnails: a right-side column on
+// landscape displays, a bottom row on portrait displays. Capturing a window
+// grabs its CGSHWCaptureWindowList image via sd.windows.snapshot(id) and
+// AX-minimizes the window; the thumbnail tile sits in the strip until the user
+// clicks it to restore (or closeAll/restoreAll/clearAll bulk-acts).
 //
-// Architecture vs lua:
-// - Rendering: lua used hs.canvas (one canvas per tile + one tooltip canvas).
-//   Here we render into the stack's own fullscreen WebView via DOM nodes. The
-//   stack's manifest stays display:"primary" — the strip + tiles render only
-//   on the primary display's WebView surface. Snapshots originating on other
-//   displays are still tracked, restored, and reserved-frame-adjusted, but
-//   their tiles appear in the primary strip. (Primitive gap: sd.overlay
-//   attaches to windows, not free regions, so per-display strip canvases
-//   would need either a window-target hack or display:"all" — both have
-//   compromises.)
-// - Zoom-in animation: lua used hs.canvas:frame timer interpolation. Here a
-//   CSS transition on transform/opacity inside the tile <div> does the same.
-// - Scroll eventtap: registered via stack.json `eventtap` manifest entry
+// Architecture:
+// - Rendering: DOM nodes in the stack's own fullscreen WebView — one tile
+//   <div> per snapshot plus a tooltip <div>. The manifest stays
+//   display:"primary", so the strip + tiles render only on the primary
+//   display's WebView surface. Snapshots originating on other displays are
+//   still tracked, restored, and reserved-frame-adjusted, but their tiles
+//   appear in the primary strip. (Primitive gap: sd.overlay attaches to
+//   windows, not free regions, so per-display strips would need either a
+//   window-target hack or display:"all" — both have compromises.)
+// - Zoom-in animation: a CSS transition on transform/opacity inside the tile
+//   <div>.
+// - Scroll eventtap: registered via the stack.json `eventtap` manifest entry
 //   (scrollWheel). The Bridge currently doesn't propagate scrollWheel delta
 //   fields (mouseEventDeltaX/Y is only attached to drag/move events), so we
-//   fall back to a per-tick discrete scroll step keyed off the modifier
-//   flags + x/y location. Documented as a primitive gap.
-// - Refresh timer: setInterval polls sd.windows.snapshot(id) every 5s for
-//   each tracked window, replacing the cached image so the preview stays
-//   current as the underlying window changes off-screen.
-// - Right-click context menu: registered via stack.json `eventtap`
-//   (rightMouseDown). Only fires when the cursor is on an existing
-//   snapshot tile — otherwise passthrough. Matches lua rightClickTap.
+//   fall back to a per-tick discrete scroll step keyed off the modifier flags
+//   + x/y location. Documented as a primitive gap.
+// - Refresh timer: setInterval polls sd.windows.snapshot(id) every 5s for each
+//   tracked window, replacing the cached image so the preview stays current as
+//   the underlying window changes off-screen.
+// - Right-click context menu: registered via the stack.json `eventtap`
+//   (rightMouseDown). Only fires when the cursor is on an existing snapshot
+//   tile — otherwise passthrough.
 // - State persistence: sd.settings.set/get. Image dataURLs persist directly.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, log, isAppIncluded } from "./core.js";
 
-// Layout constants — same as snapshots.lua.
+// Layout constants.
 export const PADDING       = 8;
 export const GAP           = 4;
 export const COLUMN_WIDTH  = 140;
-export const REFRESH_INTERVAL = 5000;     // ms — slow refresh (lua used 0.5s w/ skip)
+export const REFRESH_INTERVAL = 5000;     // ms — slow refresh
 export const MIN_TILE_HEIGHT = 30;
 export const MAX_TILE_HEIGHT = 200;
 
@@ -84,12 +82,10 @@ async function getTiler() {
 // ----------------------------------------------------------------------------
 
 // True if a window is currently snapshotted (kept in our state map).
-// Port of snapshots.lua isMinimized().
 export function isMinimized(winId) {
   return !!state.snapshotsState.snapshots[winId];
 }
 
-// Port of snapshots.lua getState().
 export function getState() {
   return state.snapshotsState;
 }
@@ -101,7 +97,6 @@ function truncateMiddle(input, maxLength) {
   return input.slice(0, partLen - 2) + "..." + input.slice(-partLen);
 }
 
-// Port of snapshots.lua getSnapshotSizeForWindow.
 export function getSnapshotSizeForWindow(winFrame) {
   const w = COLUMN_WIDTH - PADDING * 2;
   if (!winFrame || winFrame.w <= 0 || winFrame.h <= 0) {
@@ -113,7 +108,7 @@ export function getSnapshotSizeForWindow(winFrame) {
   return { w, h };
 }
 
-// Port of snapshots.lua getSnapshotSize (fallback).
+// Snapshot tile size (fallback).
 export function getSnapshotSize() {
   return { w: COLUMN_WIDTH - PADDING * 2, h: 80 };
 }
@@ -157,10 +152,9 @@ function snapshotsOnDisplay(displayID, activeSet) {
   return out;
 }
 
-// Port of snapshots.lua getReservedArea — returns the strip rectangle in
-// global screen coords for a given display, or null if no snapshots there.
-// Landscape → right-side column (COLUMN_WIDTH wide, full height). Portrait
-// → bottom row (full width, maxTileH + PADDING*2 tall). Mirrors lua exactly.
+// Returns the strip rectangle in global screen coords for a given display, or
+// null if no snapshots there. Landscape → right-side column (COLUMN_WIDTH wide,
+// full height); portrait → bottom row (full width, maxTileH + PADDING*2 tall).
 export function getReservedArea(d) {
   if (!d) return null;
   const list = snapshotsOnDisplay(d.displayID);
@@ -192,8 +186,8 @@ export function getReservedArea(d) {
   };
 }
 
-// Port of snapshots.lua getAdjustedScreenFrame — visibleFrame minus the
-// reserved strip. Landscape shrinks width (right column), portrait shrinks
+// visibleFrame minus the reserved strip. Landscape shrinks width (right
+// column), portrait shrinks
 // height (bottom row). tiler.js calls this so tiles don't draw under the
 // strip.
 export function adjustedFrameForDisplay(d) {
@@ -219,7 +213,6 @@ export function adjustedFrameForDisplay(d) {
 }
 
 // Returns the display whose strip reserved-area contains (x,y), or null.
-// Port of snapshots.lua screenForStripAt.
 export function screenForStripAt(x, y) {
   for (const d of state.displays) {
     const r = getReservedArea(d);
@@ -562,7 +555,6 @@ function removeStripContainer(displayID) {
 }
 
 // Render / re-render every tile to match snapshotsState. Port of
-// snapshots.lua updateLayout.
 export function updateLayout() {
   // Re-host snapshots whose ORIGIN display went away so restore still targets a
   // live display, and drop scroll offsets for displays that vanished. The strip
@@ -600,7 +592,7 @@ export function updateLayout() {
 // tryMenuClickAt.
 
 // ----------------------------------------------------------------------------
-// Tooltip — port of snapshots.lua initTooltip/showTooltip/hideTooltip.
+// Tooltip — init / show / hide.
 // ----------------------------------------------------------------------------
 
 function ensureTooltip() {
@@ -630,9 +622,9 @@ export function showTooltip(winId, tileEl) {
     tt.appendChild(document.createTextNode(lines[i]));
   }
 
-  // Lua positions the tooltip to the left of the tile on landscape (right
-  // rail) and above the tile on portrait (bottom row). Pick orientation
-  // from the parent strip's class.
+  // Position the tooltip to the left of the tile on landscape (right rail) and
+  // above the tile on portrait (bottom row). Pick orientation from the parent
+  // strip's class.
   const r = tileEl.getBoundingClientRect();
   tt.style.visibility = "hidden";
   tt.classList.add("visible");
@@ -661,7 +653,7 @@ export function hideTooltip() {
 }
 
 // ----------------------------------------------------------------------------
-// Context menu — DOM-only fallback (lua used hs.menubar.popupMenu).
+// Context menu — DOM-only.
 // ----------------------------------------------------------------------------
 
 let menuEl = null;
@@ -774,7 +766,6 @@ export const captureForOSMinimize = _captureForOSMinimize;
 // ----------------------------------------------------------------------------
 
 // Drop a single snapshot's resources (DOM tile, data entry, order entry).
-// Port of snapshots.lua cleanupResources.
 export function cleanupResources(winId) {
   const data = state.snapshotsState.snapshots[winId];
   if (!data) return;
@@ -796,8 +787,8 @@ export function cleanupResources(winId) {
 }
 
 // Restore a snapshot: un-minimize, focus, drop tile. Port of
-// snapshots.lua restoreFromSnapshot (sans the canvas zoom-out anim — CSS
-// transition on the leaving tile does the equivalent).
+// Restore a snapshot: un-minimize the window; a CSS transition on the leaving
+// tile plays the fade-out.
 //
 // Sentinel `restoringIds`: keeps the deminimize bang handler from snapping
 // the tile out of the DOM mid-fade. When WE drive the deminimize, we want
@@ -836,7 +827,7 @@ export function isRestoringInternally(winId) {
 }
 
 // Close the underlying window via AX, then drop the snapshot. Port of
-// snapshots.lua showContextMenu's "Close" item.
+// The context menu's "Close" item.
 export async function closeFromSnapshot(winId) {
   try { await sd.windows.close(winId); } catch (_) {}
   cleanupResources(winId);
@@ -845,7 +836,7 @@ export async function closeFromSnapshot(winId) {
   await tiler.tileWindows();
 }
 
-// Port of snapshots.lua clearAll — drop every tile without restoring.
+// Drop every tile without restoring.
 export function clearAll() {
   hideTooltip();
   const ids = [...state.snapshotsState.order];
@@ -853,7 +844,7 @@ export function clearAll() {
   updateLayout();
 }
 
-// Port of snapshots.lua restoreAll — un-minimize everything.
+// Un-minimize everything.
 // Fire-and-forget each restore in parallel; the per-tile fade + bottom-of-
 // queue tiler.tileWindows pass will settle once all the deminimizes land.
 export async function restoreAll() {
@@ -863,7 +854,7 @@ export async function restoreAll() {
   }
 }
 
-// Port of snapshots.lua closeAll — close every snapshotted window.
+// Close every snapshotted window.
 export async function closeAll() {
   const ids = [...state.snapshotsState.order];
   for (const id of ids) {
@@ -876,7 +867,7 @@ export async function closeAll() {
 }
 
 // ----------------------------------------------------------------------------
-// Refresh timer — port of snapshots.lua startRefreshTimer / refreshSnapshots.
+// Refresh timer.
 // ----------------------------------------------------------------------------
 
 async function refreshSnapshots() {
@@ -916,7 +907,7 @@ function stopRefreshTimer() {
 }
 
 // ----------------------------------------------------------------------------
-// Scroll handling — port of snapshots.lua startScrollEventtap.
+// Scroll handling.
 // Registered as `eventtap` in stack.json; the callback is wired by main.js.
 // ----------------------------------------------------------------------------
 
@@ -1072,10 +1063,9 @@ function findTileEl(winId) {
   return null;
 }
 
-// Right-click eventtap — port of events.lua rightClickTap: if the cursor
-// is on an existing snapshot tile, show the context menu (Restore / Close
-// / Restore All / Close All / Clear All); otherwise passthrough. The lua
-// version explicitly returns false on miss; we just do nothing.
+// Right-click eventtap: if the cursor is on an existing snapshot tile, show the
+// context menu (Restore / Close / Restore All / Close All / Clear All);
+// otherwise passthrough (do nothing on a miss).
 export async function onRightClickEvent(payload) {
   const { x, y } = payload || {};
   if (x == null || y == null) return;
@@ -1159,8 +1149,7 @@ async function loadPersistedSnapshots() {
 // Init / cleanup
 // ----------------------------------------------------------------------------
 
-// Port of snapshots.lua init(). Wires the refresh timer, loads persisted
-// state, paints the initial strips.
+// Wires the refresh timer, loads persisted state, paints the initial strips.
 export async function init() {
   myScreenInfo = (typeof window !== "undefined" && window.__sd_screen) || null;
   ensureStripsRoot();

@@ -258,10 +258,7 @@ async function tileWindowsInternal(snap) {
     // Pinned tiles (state.pinnedSizes[id]) take their fixed px share; the
     // rest distribute by weight. See layouts.distributePinned.
     const pinnedSizeOf = (id) => state.pinnedSizes[id] ?? null;
-    // `added.length > 0` = the tile set grew this pass (a window was added or
-    // restored). On growth, distributePinned gives newcomers their fair share
-    // instead of the pinned-leftover; steady-state passes keep pins sticky.
-    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf, added.length > 0);
+    const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, getWindowWeight, sizeOf, pinnedSizeOf);
     log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
 
     if (cfg.enableAnimations && !snap) {

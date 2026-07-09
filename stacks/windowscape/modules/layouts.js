@@ -20,7 +20,7 @@ import { cfg } from "./config.js";
 //   even share instead of being born under its app minimum and refusing.
 const FLEX_USABLE_PX = 400; // a flex tile narrower than this is likely under an app minimum
 export const PIN_MIN_PX = 50;
-export function distributePinned(total, gap, items, weightOf, pinnedSizeOf, growth = false) {
+export function distributePinned(total, gap, items, weightOf, pinnedSizeOf) {
   if (items.length === 0) return [];
   const avail = total - Math.max(items.length - 1, 0) * gap;
   if (items.length === 1) return [avail];
@@ -56,18 +56,16 @@ export function distributePinned(total, gap, items, weightOf, pinnedSizeOf, grow
     return out;
   }
 
-  // A flex tile squeezed below a fair share — a new window joining a
+  // A flex tile squeezed below a usable width — a new window joining a
   // fully-pinned row — would be born under its app minimum and refuse, storming
   // the pins. When that happens, reserve each flex tile its FAIR even share and
   // shrink the pins pro-rata (uniform scale → their proportions are preserved).
-  // In steady state this is gated on an absolute usable minimum, so a deliberate
-  // big pin with a still-usable flex remainder is left alone. But when the tile
-  // set just GREW (a window was added or restored), any below-fair flex tile is
-  // rebalanced, so the newcomer gets its fair share instead of the leftover.
+  // Gated on an absolute usable minimum AND on the flex tile being below fair,
+  // so a deliberate big pin with a still-usable flex remainder is left alone.
   const fairPer = Math.floor(avail / items.length);
   let flexAvail = avail - pinnedSum;
   const perFlex = flexAvail / flexCount;
-  if (pinnedSum > 0 && perFlex < fairPer && (perFlex < FLEX_USABLE_PX || growth)) {
+  if (pinnedSum > 0 && perFlex < FLEX_USABLE_PX && perFlex < fairPer) {
     const target = Math.max(0, avail - fairPer * flexCount);
     const scale = target / pinnedSum;
     pinnedSum = 0;
@@ -205,7 +203,7 @@ export function resolvePinOversubscription(sizes, refusalSet, activeId, majorAxi
 // because positions accumulate from `base` rather than the actual width
 // the app honors). For non-collapsed windows the weighted distribution
 // still drives width — those windows are the user-facing tile slots.
-export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, weightOf, sizeOf, pinnedSizeOf, growth = false) {
+export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, weightOf, sizeOf, pinnedSizeOf) {
   const out = [];
   const numCollapsed = collapsed.length;
   const numNon = nonCollapsed.length;
@@ -215,7 +213,7 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, w
     const mainH = screenFrame.h - collapsedH;
 
     if (numNon > 0) {
-      const widths = distributePinned(screenFrame.w, cfg.tileGap, nonCollapsed, weightOf, pinnedSizeOf, growth);
+      const widths = distributePinned(screenFrame.w, cfg.tileGap, nonCollapsed, weightOf, pinnedSizeOf);
       let x = screenFrame.x;
       for (let i = 0; i < nonCollapsed.length; i++) {
         out.push({ winId: nonCollapsed[i], frame: { x, y: screenFrame.y, w: widths[i], h: mainH } });
@@ -254,7 +252,7 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, w
     const mainH = screenFrame.h - collapsedH;
 
     if (numNon > 0) {
-      const heights = distributePinned(mainH, cfg.tileGap, nonCollapsed, weightOf, pinnedSizeOf, growth);
+      const heights = distributePinned(mainH, cfg.tileGap, nonCollapsed, weightOf, pinnedSizeOf);
       let y = screenFrame.y;
       for (let i = 0; i < nonCollapsed.length; i++) {
         out.push({ winId: nonCollapsed[i], frame: { x: screenFrame.x, y, w: screenFrame.w, h: heights[i] } });

@@ -18,7 +18,6 @@ import { cfg } from "./config.js";
 // - A flex tile squeezed below a usable width (a new window joining a
 //   fully-pinned row): pins scale down pro-rata so the flex tile gets its fair
 //   even share instead of being born under its app minimum and refusing.
-const FLEX_FLOOR_PX = 100;
 const FLEX_USABLE_PX = 400; // a flex tile narrower than this is likely under an app minimum
 export const PIN_MIN_PX = 50;
 export function distributePinned(total, gap, items, weightOf, pinnedSizeOf) {
@@ -280,8 +279,8 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, w
 // path — the pairwise pin transfer in events.pinFromActualSize, then the
 // PIN-CLAMP resolve, then tileWeighted — so the gesture preview equals the
 // committed frame (no jump). Pure: every input is passed in, none read from
-// state. Returns { frame, pins, bId, delta } (frame null only if activeId isn't
-// in the row).
+// state. Returns { frame, pins, bId } (frame null only if activeId isn't in
+// the row).
 export function predictResizeFrame({
   screenFrame, horizontal, nonCollapsed, collapsed,
   weightOf, sizeOf, pins, refusalSet,
@@ -294,12 +293,10 @@ export function predictResizeFrame({
     const hit = t.find((x) => +x.winId === A);
     return hit ? hit.frame : null;
   };
-  const carriedPins = (id) => (pins[id] != null ? pins[id] : null);
-
   // Solo / neighborless → no pairwise transfer; the tiler drops the pin and
   // fills the axis, so preview the plain tiled frame.
   if (nonCollapsed.indexOf(A) < 0 || nonCollapsed.length < 2 || neighborId == null) {
-    return { frame: frameFor(carriedPins), pins: { ...pins }, bId: null, delta: 0 };
+    return { frame: frameFor((id) => (pins[id] ?? null)), pins: { ...pins }, bId: null };
   }
 
   const B = +neighborId;
@@ -315,5 +312,5 @@ export function predictResizeFrame({
 
   const majorAxis = horizontal ? screenFrame.w : screenFrame.h;
   const resolved = resolvePinOversubscription(sizes, refusalSet, A, majorAxis, floor);
-  return { frame: frameFor((id) => (resolved.pins[id] ?? null)), pins: resolved.pins, bId: B, delta };
+  return { frame: frameFor((id) => (resolved.pins[id] ?? null)), pins: resolved.pins, bId: B };
 }

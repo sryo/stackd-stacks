@@ -137,9 +137,12 @@ function stepPreview(deltaPx) {
   // guess — refusal pins are unreliable minimums (they blocked legit shrinks);
   // a shrink past a real app min just snaps a little on commit, which the
   // self-contained commit keeps contained.
-  g.reqMajor += deltaPx;
-  const maxMajor = (g.bBase != null) ? (g.aBase + (g.bBase - PIN_MIN_PX)) : g.reqMajor;
-  g.reqMajor = Math.max(RESIZE_MIN_PX, Math.min(g.reqMajor, Math.max(RESIZE_MIN_PX, maxMajor)));
+  g.reqMajor = Math.max(RESIZE_MIN_PX, g.reqMajor + deltaPx);
+  if (g.bBase != null) {
+    // Ceiling: the neighbor can only shrink to PIN_MIN_PX, so the window can
+    // grow at most by what the neighbor gives up.
+    g.reqMajor = Math.min(g.reqMajor, Math.max(RESIZE_MIN_PX, g.aBase + g.bBase - PIN_MIN_PX));
+  }
 
   const sizeOf = (id) => { const fr = state.windowsById[id]?.frame; return fr ? { w: fr.w, h: fr.h } : null; };
   const r = predictResizeFrame({

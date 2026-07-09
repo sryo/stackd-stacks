@@ -9,6 +9,7 @@ import {
   migrateWindowId, activeSpaceOnDisplay
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
+import { PIN_MIN_PX } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating } from "./animation.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
@@ -853,7 +854,7 @@ export function pinFromActualSize(movedId, opts) {
     bId = onScreen[bIdx]; // exists: onScreen.length >= 2
   }
 
-  state.pinnedSizes[+movedId] = Math.max(50, Math.floor(actualSize));
+  state.pinnedSizes[+movedId] = Math.max(PIN_MIN_PX, Math.floor(actualSize));
   // The window the user actively grabbed — PIN-CLAMP keeps this one fixed and
   // shrinks the others so the resize sticks.
   state.lastPinPairId = +movedId;
@@ -873,11 +874,11 @@ export function pinFromActualSize(movedId, opts) {
     return;
   }
   const bWant = Math.floor(bBase - delta);
-  if (bWant < 50) {
+  if (bWant < PIN_MIN_PX) {
     // Clamp; do NOT push the overflow to a third tile — accepted imperfection.
-    log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → 50px (overflow not redistributed)`);
+    log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → ${PIN_MIN_PX}px (overflow not redistributed)`);
   }
-  state.pinnedSizes[+bId] = Math.max(50, bWant);
+  state.pinnedSizes[+bId] = Math.max(PIN_MIN_PX, bWant);
   // Only a transfer that GROWS B supersedes a refusal-min provenance; shrinking
   // B toward its app minimum keeps the flag so PIN-CLAMP holds B fixed.
   if (bWant >= bBase) state.refusalPins.delete(+bId);

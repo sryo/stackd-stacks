@@ -15,9 +15,11 @@ import { cfg } from "./config.js";
 // Edge cases:
 // - n == 1: single tile fills the full `total` regardless of pin.
 // - All pinned: pins scale down proportionally if their sum exceeds avail.
-// - Pins overflow leaving < 100px per flex cell: pins scale down so each
-//   flex tile gets at least 100px.
+// - A flex tile squeezed below a usable width (a new window joining a
+//   fully-pinned row): pins scale down pro-rata so the flex tile gets its fair
+//   even share instead of being born under its app minimum and refusing.
 const FLEX_FLOOR_PX = 100;
+const FLEX_USABLE_PX = 400; // a flex tile narrower than this is likely under an app minimum
 export const PIN_MIN_PX = 50;
 export function distributePinned(total, gap, items, weightOf, pinnedSizeOf) {
   if (items.length === 0) return [];
@@ -55,11 +57,17 @@ export function distributePinned(total, gap, items, weightOf, pinnedSizeOf) {
     return out;
   }
 
-  // Pins leave < 100px per flex cell — shrink pins to reserve flex floor.
-  const flexFloor = FLEX_FLOOR_PX * flexCount;
+  // A flex tile squeezed below a usable width — a new window joining a
+  // fully-pinned row — would be born under its app minimum and refuse, storming
+  // the pins. When that happens, reserve each flex tile its FAIR even share and
+  // shrink the pins pro-rata (uniform scale → their proportions are preserved).
+  // Gated on an absolute usable minimum AND on the flex tile being below fair,
+  // so a deliberate big pin with a still-usable flex remainder is left alone.
+  const fairPer = Math.floor(avail / items.length);
   let flexAvail = avail - pinnedSum;
-  if (flexAvail < flexFloor && pinnedSum > 0) {
-    const target = Math.max(0, avail - flexFloor);
+  const perFlex = flexAvail / flexCount;
+  if (pinnedSum > 0 && perFlex < FLEX_USABLE_PX && perFlex < fairPer) {
+    const target = Math.max(0, avail - fairPer * flexCount);
     const scale = target / pinnedSum;
     pinnedSum = 0;
     for (let i = 0; i < items.length; i++) {
@@ -95,6 +103,29 @@ export function distributePinned(total, gap, items, weightOf, pinnedSizeOf) {
       out[i] = Math.max(PIN_MIN_PX, share);
       flexAllocated += out[i];
     }
+  }
+  return out;
+}
+
+// Scale a pin map (id → px) so it sums EXACTLY to `majorAxis`, preserving the
+// pins' relative proportions; the last entry absorbs the rounding residual.
+// Pure. The tiler applies this to an all-pinned row that has drifted short of
+// the work area (after a close, refusal shed, etc.) so each tile's width is its
+// pin RATIO × the row, independent of order — otherwise the last-in-order tile
+// absorbs all the slack and reordering shuffles the visible widths.
+export function scalePinsToFill(sizes, majorAxis) {
+  const ids = Object.keys(sizes).map(Number);
+  const sum = ids.reduce((s, id) => s + sizes[id], 0);
+  if (sum <= 0 || ids.length === 0) return { ...sizes };
+  const scale = majorAxis / sum;
+  const out = Object.create(null);
+  let alloc = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    out[id] = (i === ids.length - 1)
+      ? Math.max(PIN_MIN_PX, majorAxis - alloc)
+      : Math.max(PIN_MIN_PX, Math.round(sizes[id] * scale));
+    alloc += out[id];
   }
   return out;
 }
@@ -242,4 +273,47 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, w
     }
   }
   return out;
+}
+
+// Predict the frame the tiler will assign to a window resized to `requestedSize`
+// against neighbor `neighborId`, WITHOUT mutating anything. Mirrors the commit
+// path — the pairwise pin transfer in events.pinFromActualSize, then the
+// PIN-CLAMP resolve, then tileWeighted — so the gesture preview equals the
+// committed frame (no jump). Pure: every input is passed in, none read from
+// state. Returns { frame, pins, bId, delta } (frame null only if activeId isn't
+// in the row).
+export function predictResizeFrame({
+  screenFrame, horizontal, nonCollapsed, collapsed,
+  weightOf, sizeOf, pins, refusalSet,
+  activeId, requestedSize, aBase, neighborId, bBase,
+  floor = PIN_MIN_PX,
+}) {
+  const A = +activeId;
+  const frameFor = (pinnedSizeOf) => {
+    const t = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, weightOf, sizeOf, pinnedSizeOf);
+    const hit = t.find((x) => +x.winId === A);
+    return hit ? hit.frame : null;
+  };
+  const carriedPins = (id) => (pins[id] != null ? pins[id] : null);
+
+  // Solo / neighborless → no pairwise transfer; the tiler drops the pin and
+  // fills the axis, so preview the plain tiled frame.
+  if (nonCollapsed.indexOf(A) < 0 || nonCollapsed.length < 2 || neighborId == null) {
+    return { frame: frameFor(carriedPins), pins: { ...pins }, bId: null, delta: 0 };
+  }
+
+  const B = +neighborId;
+  const reqA = Math.max(floor, Math.floor(requestedSize));
+  const delta = reqA - aBase;
+  const bWant = Math.max(floor, Math.floor(bBase - delta));
+
+  // Pin set = every pin already on the row, plus the pairwise A/B override.
+  const sizes = Object.create(null);
+  for (const id of nonCollapsed) if (pins[id] != null) sizes[id] = pins[id];
+  sizes[A] = reqA;
+  sizes[B] = bWant;
+
+  const majorAxis = horizontal ? screenFrame.w : screenFrame.h;
+  const resolved = resolvePinOversubscription(sizes, refusalSet, A, majorAxis, floor);
+  return { frame: frameFor((id) => (resolved.pins[id] ?? null)), pins: resolved.pins, bId: B, delta };
 }

@@ -1,48 +1,43 @@
 // Trackpad gesture verbs — maps TTTaps bangs onto window operations.
 // The recognizer lives in the tttaps stack: a 3-finger drag fires one
-// axis-locked sd.tttap.dragStep per commit-threshold of travel, so the
-// user can step through positions/sizes and reverse without lifting.
+// axis-locked sd.tttap.dragStep per commit-threshold of travel, so the user
+// can step through sizes/positions and reverse without lifting.
 //
-// Horizontal steps route to the same reorder op the hotkeys use.
-// Vertical steps are PREVIEW-ONLY: the gesture scales an outline (a div in
-// windowscape's own fullscreen panel, styled like overlay-border's focus
-// ring) around the focused window's center — the window itself never moves
-// mid-gesture. On sd.tttap.dragEnd the final frame commits with ONE
-// setFrame and the drag bracket closes, which runs the one pairwise pin +
-// single retile, same as dropping a mouse resize.
+// Up/down steps resize the focused window — up grows it, down shrinks it,
+// consistently regardless of slot; left/right steps reorder. The space comes
+// from ONE neighbor, fixed at bracket-open (the next tile, or the previous at
+// the row's end). The preview outline renders the tiler's PREDICTED landing
+// frame, so lifting commits with no jump: on dragEnd the predicted frame
+// commits with one setFrame and the same pairwise pin the preview was built on.
 
 import { sd } from "sd://runtime/api.js";
 import { state, log, displayForWindow } from "./core.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 import { isFullscreenActive } from "./fullscreen.js";
 import { moveWindowInOrder } from "./operations.js";
-import { startDragBracket, endDragBracket } from "./events.js";
+import { startDragBracket, clearDragBracket, pinFromActualSize } from "./events.js";
 import { cancelAnimation } from "./animation.js";
+import { predictResizeFrame, PIN_MIN_PX } from "./layouts.js";
+import { getWindowWeight, getCollapsedWindows, tileWindows } from "./tiler.js";
 
 // Resize feel: vertical steps commit every 0.035 of trackpad travel (see
-// tttaps CFG.dragStepCommitThresholdV) at 40px each — finer than the
-// hotkeys' 100px GROW_STEP_PX so a drag reads as continuous growth. Steps
-// only touch the preview DOM (no RPCs), so no coalescing is needed.
+// tttaps CFG.dragStepCommitThresholdV) at 40px each — finer than the hotkeys'
+// 100px GROW_STEP_PX so a drag reads as continuous growth.
 const RESIZE_STEP_PX = 40;
-const RESIZE_MIN_PX  = 100; // matches operations.js PIN_MIN_PX
+const RESIZE_MIN_PX  = 100; // smallest the focused window may shrink to via gesture
 
-// Gesture-resize bracket. The vertical 3-finger drag rides the SAME
-// bracket as a mouse drag (events.startDragBracket / endDragBracket): the
-// first vertical step opens it (tile passes auto-defer while dragInFlight)
-// and freezes the focused window's frame as the scale origin; each step
-// re-scales the preview outline around that frame's center, clamped to the
-// display work area — so the rightmost window slides left instead of dying
-// against the screen edge (trailing-edge growth has no room to grow).
-// dragEnd commits the previewed frame and closes the bracket.
-let gestureBracket = null; // { winId, origFrame, frame, horizontal, vf } while active
+// Gesture-resize bracket. The resize drag rides the SAME bracket as a mouse
+// drag (events.startDragBracket / endDragBracket): the first step opens it
+// (tile passes auto-defer while dragInFlight) and freezes the row context;
+// each step re-predicts the focused window's landing frame and repaints the
+// preview outline. dragEnd commits the predicted frame and closes the bracket.
+let gestureBracket = null;
 
 // --- preview outline -------------------------------------------------------
 // Drawn via a daemon free-region overlay (sd.overlay.region) at the preview's
-// GLOBAL rect, so it lands on whichever display holds the focused window —
-// windowscape's own panel is display:"primary" and couldn't render it on
-// other displays (the outline/topbar appear there via their own stacks).
-// Styled to read as overlay-border's ring (8px blue, 16px radius); the
-// overlay panel IS the rect, so .ring fills it (inset:0).
+// GLOBAL rect, so it lands on whichever display holds the focused window.
+// Styled to read as overlay-border's ring (8px blue, 16px radius); the overlay
+// panel IS the rect, so .ring fills it (inset:0).
 let previewHandle = null;
 const PREVIEW_HTML = `<div class="ring"></div>`;
 const PREVIEW_CSS = [
@@ -60,66 +55,106 @@ function openGestureBracket() {
   const w = f && f.id != null ? state.windowsById[f.id] : null;
   if (!w || !w.frame) return null;
   const d = displayForWindow(w);
-  // A tile animation still converging on this window would make the frozen
-  // scale origin stale — settle it where it stands.
+  // A tile animation still converging on this window would make the frozen row
+  // context stale — settle it where it stands.
   cancelAnimation(w.id);
+  // Clamp/axis against the snapshot-rail-adjusted work area, matching the tiler
+  // (a gesture-grow must not extend under the strip).
+  const vf = (d && (adjustedFrameForDisplay(d) || d.visibleFrame || d.frame)) || null;
+  const horizontal = vf ? vf.w > vf.h : (d ? d.frame.w > d.frame.h : true);
+
+  // Frozen row context — tile passes defer while the bracket is open, so the
+  // membership/order the preview predicts against is the one the commit uses.
+  const tiled = (d && state.lastTiledByDisplay[d.displayID]) || [];
+  const collapsed = getCollapsedWindows(tiled);
+  const collapsedSet = new Set(collapsed.map((id) => +id));
+  const nonCollapsed = tiled.filter((id) => !collapsedSet.has(+id));
+  const focusedIdx = nonCollapsed.indexOf(+w.id);
+
+  const major = (fr) => (horizontal ? fr.w : fr.h);
+  const tgt = state.lastTileTarget?.[+w.id]?.frame;
+  const aBase = state.pinnedSizes[+w.id] ?? (tgt ? major(tgt) : major(w.frame));
+
+  // Neighbor that gives/takes the space: the next tile (trailing), falling back
+  // to the previous tile at the row's end. Fixed for the whole gesture — up
+  // grows the focused window into it, down shrinks and hands it back — so the
+  // resize direction is consistent regardless of the window's slot.
+  let edge = null, neighborId = null, bBase = null;
+  if (focusedIdx >= 0 && nonCollapsed.length >= 2) {
+    let nIdx = focusedIdx + 1;
+    if (nIdx >= nonCollapsed.length) nIdx = focusedIdx - 1;
+    neighborId = nonCollapsed[nIdx];
+    edge = nIdx > focusedIdx ? "trailing" : "leading";
+    const bTgt = state.lastTileTarget?.[+neighborId]?.frame;
+    const bLive = state.windowsById[neighborId]?.frame;
+    bBase = state.pinnedSizes[+neighborId]
+      ?? (bTgt ? major(bTgt) : null)
+      ?? (bLive ? major(bLive) : null);
+  }
+
   startDragBracket();
   gestureBracket = {
     winId: w.id,
-    origFrame: { ...w.frame },
-    frame: { ...w.frame },
-    horizontal: d ? d.frame.w > d.frame.h : true,
-    // Clamp against the snapshot-rail-adjusted work area, not the raw
-    // visibleFrame — a gesture-grow of the rightmost window would
-    // otherwise legally extend under the strip.
-    vf: (d && (adjustedFrameForDisplay(d) || d.visibleFrame || d.frame)) || null
+    horizontal,
+    vf,
+    nonCollapsed,
+    collapsed,
+    aBase,
+    reqMajor: aBase,
+    edge,
+    neighborId,
+    bBase,
+    predicted: { ...w.frame }
   };
-  // Create the preview overlay at the frozen frame (GLOBAL coords, so the
-  // daemon places it on the focused window's display). Async: the first few
-  // steps may land before it resolves — setFrame guards on the handle and the
-  // next step re-sends the latest frame, so nothing visible is lost. If the
-  // bracket already closed by the time create resolves, drop the orphan.
+  // Create the preview overlay at the frozen frame (GLOBAL coords). Async: the
+  // first few steps may land before it resolves — the handle guard below and
+  // the next step's setFrame cover the gap. If the bracket already closed by
+  // the time create resolves, drop the orphan.
   sd.overlay.region({ rect: { ...w.frame }, html: PREVIEW_HTML, css: PREVIEW_CSS })
     .then((h) => {
-      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.frame); }
+      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.predicted); }
       else if (h) h.remove();
     });
   log(`GESTURE bracket-open id=${w.id}`);
   return gestureBracket;
 }
 
+// One resize step: deltaPx > 0 grows the focused window (up), < 0 shrinks it
+// (down). The neighbor that gives/takes the space is fixed at bracket-open, so
+// the direction is consistent regardless of the window's slot.
 function stepPreview(deltaPx) {
-  // Open on the first vertical step; re-arm if the bracket's 5s safety
-  // timeout cleared dragInFlight mid-gesture (very long drags) — keep the
-  // accumulated frame, just re-raise the tile gate.
   if (!gestureBracket) {
     if (!openGestureBracket()) return;
   } else if (!state.dragInFlight) {
+    // The bracket's 5s safety timeout cleared dragInFlight mid-gesture; keep the
+    // accumulated state, just re-raise the tile gate.
     startDragBracket();
   }
   const g = gestureBracket;
-  // Scale around the ORIGINAL frame's center on the major axis, clamped to
-  // the display work area (grow at an edge slides inward, never offscreen).
-  if (g.horizontal) {
-    const cx = g.origFrame.x + g.origFrame.w / 2;
-    g.frame.w = Math.max(RESIZE_MIN_PX, g.frame.w + deltaPx);
-    if (g.vf) g.frame.w = Math.min(g.frame.w, g.vf.w);
-    g.frame.x = cx - g.frame.w / 2;
-    if (g.vf) {
-      if (g.frame.x < g.vf.x) g.frame.x = g.vf.x;
-      if (g.frame.x + g.frame.w > g.vf.x + g.vf.w) g.frame.x = g.vf.x + g.vf.w - g.frame.w;
-    }
-  } else {
-    const cy = g.origFrame.y + g.origFrame.h / 2;
-    g.frame.h = Math.max(RESIZE_MIN_PX, g.frame.h + deltaPx);
-    if (g.vf) g.frame.h = Math.min(g.frame.h, g.vf.h);
-    g.frame.y = cy - g.frame.h / 2;
-    if (g.vf) {
-      if (g.frame.y < g.vf.y) g.frame.y = g.vf.y;
-      if (g.frame.y + g.frame.h > g.vf.y + g.vf.h) g.frame.y = g.vf.y + g.vf.h - g.frame.h;
-    }
+  if (!g.vf || g.neighborId == null) return; // solo/unknown: nothing to resize
+
+  // Clamp: window >= RESIZE_MIN_PX, neighbor >= PIN_MIN_PX. No app-minimum
+  // guess — refusal pins are unreliable minimums (they blocked legit shrinks);
+  // a shrink past a real app min just snaps a little on commit, which the
+  // self-contained commit keeps contained.
+  g.reqMajor += deltaPx;
+  const maxMajor = (g.bBase != null) ? (g.aBase + (g.bBase - PIN_MIN_PX)) : g.reqMajor;
+  g.reqMajor = Math.max(RESIZE_MIN_PX, Math.min(g.reqMajor, Math.max(RESIZE_MIN_PX, maxMajor)));
+
+  const sizeOf = (id) => { const fr = state.windowsById[id]?.frame; return fr ? { w: fr.w, h: fr.h } : null; };
+  const r = predictResizeFrame({
+    screenFrame: g.vf, horizontal: g.horizontal,
+    nonCollapsed: g.nonCollapsed, collapsed: g.collapsed,
+    weightOf: getWindowWeight, sizeOf,
+    pins: state.pinnedSizes, refusalSet: state.refusalPins,
+    activeId: g.winId, requestedSize: g.reqMajor, aBase: g.aBase,
+    neighborId: g.neighborId, bBase: g.bBase,
+    floor: PIN_MIN_PX
+  });
+  if (r.frame) {
+    g.predicted = r.frame;
+    if (previewHandle) previewHandle.setFrame(g.predicted);
   }
-  if (previewHandle) previewHandle.setFrame(g.frame);
 }
 
 export function bind() {
@@ -134,43 +169,44 @@ export function bind() {
     // a step would retile under the cursor.
     if (state.dragInFlight && !gestureBracket) return;
     log(`GESTURE dragStep ${detail.direction}`);
-    switch (detail.direction) {
-      case "left":
-      case "right":
-        // Reorders retile immediately; don't run one inside an open
-        // gesture-resize bracket (the recognizer's axis lock makes a mixed
-        // stream near-impossible, this is the belt to its suspenders).
-        if (gestureBracket) return;
-        moveWindowInOrder(detail.direction === "left" ? "backward" : "forward");
-        break;
-      case "up":    stepPreview(RESIZE_STEP_PX);  break;
-      case "down":  stepPreview(-RESIZE_STEP_PX); break;
+
+    // Up grows the focused window, down shrinks it; left/right reorder.
+    // Orientation-independent — the resize MATH still reads the display axis
+    // from the bracket (width on a row, height on a column).
+    const dir = detail.direction;
+    if (dir === "up" || dir === "down") {
+      stepPreview(dir === "up" ? RESIZE_STEP_PX : -RESIZE_STEP_PX);
+    } else {
+      // Reorder — never inside an open resize bracket (the recognizer's axis
+      // lock makes a mixed stream near-impossible; belt to its suspenders).
+      if (gestureBracket) return;
+      moveWindowInOrder(dir === "left" ? "backward" : "forward");
     }
   });
 
-  // Fingers lifted after a drag-active gesture. Only meaningful when WE
-  // opened the bracket; mouse brackets close via the leftMouseUp eventtap.
+  // Fingers lifted after a drag-active gesture. Only meaningful when WE opened
+  // the bracket; mouse brackets close via the leftMouseUp eventtap.
   sd.bang.declare("sd.tttap.dragEnd").on(() => {
     if (!gestureBracket) return;
     const g = gestureBracket;
     gestureBracket = null;
     if (previewHandle) { previewHandle.remove(); previewHandle = null; }
-    const dMajor = g.horizontal
-      ? Math.abs(g.frame.w - g.origFrame.w)
-      : Math.abs(g.frame.h - g.origFrame.h);
-    if (dMajor >= 1) {
-      // Commit the previewed frame with ONE setFrame. Seed the bracket's
-      // candidate + live frame ourselves: the AX resized bang can trail
-      // past endDragBracket's 100ms grace, and the close decision needs
-      // both to run the pairwise pin (the trailing bang then re-records
-      // the same candidate — harmless).
-      sd.windows.setFrame(g.winId, { ...g.frame });
-      if (state.windowsById[g.winId]) state.windowsById[g.winId].frame = { ...g.frame };
-      state.dragCandidateId = g.winId;
-      log(`GESTURE commit id=${g.winId} ${g.horizontal ? "w" : "h"}=${Math.round(g.horizontal ? g.frame.w : g.frame.h)} → endDragBracket`);
+    const major = (fr) => (g.horizontal ? fr.w : fr.h);
+    const dMajor = g.predicted ? Math.abs(major(g.predicted) - g.aBase) : 0;
+    // Self-contained commit: tear the bracket down (dropping any stray candidate
+    // a foreign resize bang recorded mid-gesture) and pin + retile synchronously.
+    // Routing through the mouse-drag close would let that foreign candidate be
+    // reinterpreted as a cross-display drop and defer the retile 100ms (a gap).
+    clearDragBracket();
+    if (dMajor >= 1 && g.neighborId != null && g.predicted) {
+      sd.windows.setFrame(g.winId, { ...g.predicted });
+      if (state.windowsById[g.winId]) state.windowsById[g.winId].frame = { ...g.predicted };
+      pinFromActualSize(g.winId, { edge: g.edge, neighborId: g.neighborId });
+      state.snapNextTile = true;
+      log(`GESTURE commit id=${g.winId} ${g.horizontal ? "w" : "h"}=${Math.round(major(g.predicted))} edge=${g.edge}`);
     } else {
-      log("GESTURE bracket-close (no net change) → endDragBracket");
+      log("GESTURE bracket-close (no net change)");
     }
-    endDragBracket();
+    tileWindows();
   });
 }

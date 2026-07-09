@@ -715,6 +715,18 @@ export function startDragBracket(payload) {
   }, 5000);
 }
 
+// Tear the drag bracket down synchronously without processing a candidate.
+// The gesture-resize path uses this instead of endDragBracket: it commits its
+// own frame directly, so it must NOT let the mouse-drag close reinterpret a
+// stray resize/move bang recorded mid-gesture (an unrelated window refusing an
+// app-minimum) as a cross-display drop or reorder.
+export function clearDragBracket() {
+  if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
+  if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
+  state.dragInFlight = false;
+  state.dragCandidateId = null;
+}
+
 export function endDragBracket(payload) {
   if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
   if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
@@ -802,7 +814,7 @@ export function endDragBracket(payload) {
 // display order; otherwise the TRAILING edge → next tile. A missing
 // neighbor (A at the row end) falls back to the other side; a solo tile
 // stays unpinned.
-export function pinFromActualSize(movedId) {
+export function pinFromActualSize(movedId, opts) {
   const w = state.windowsById[movedId];
   if (!w || !w.frame) return;
   const d = displayForWindow(w);
@@ -827,12 +839,19 @@ export function pinFromActualSize(movedId) {
   const delta = actualSize - aBase;
   if (Math.abs(delta) < 20) return;
 
-  // Which edge moved? Origin drift on the major axis = leading-edge drag.
-  const originDrift = Math.abs(horizontal ? w.frame.x - tgt.x : w.frame.y - tgt.y);
-  const leading = originDrift > 5;
-  let bIdx = leading ? idx - 1 : idx + 1;
-  if (bIdx < 0 || bIdx >= onScreen.length) bIdx = leading ? idx + 1 : idx - 1;
-  const bId = onScreen[bIdx]; // exists: onScreen.length >= 2
+  // Which edge moved? A gesture commit passes the fence it previewed against;
+  // otherwise infer it from major-axis origin drift (mouse / AX resize).
+  let leading, bId;
+  if (opts && opts.neighborId != null && onScreen.includes(+opts.neighborId)) {
+    bId = +opts.neighborId;
+    leading = opts.edge === "leading";
+  } else {
+    const originDrift = Math.abs(horizontal ? w.frame.x - tgt.x : w.frame.y - tgt.y);
+    leading = originDrift > 5;
+    let bIdx = leading ? idx - 1 : idx + 1;
+    if (bIdx < 0 || bIdx >= onScreen.length) bIdx = leading ? idx + 1 : idx - 1;
+    bId = onScreen[bIdx]; // exists: onScreen.length >= 2
+  }
 
   state.pinnedSizes[+movedId] = Math.max(50, Math.floor(actualSize));
   // The window the user actively grabbed — PIN-CLAMP keeps this one fixed and

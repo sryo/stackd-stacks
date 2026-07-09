@@ -7,7 +7,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow } from "./core.js";
-import { tileWeighted, resolvePinOversubscription, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, resolvePinOversubscription, scalePinsToFill, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
@@ -234,6 +234,17 @@ async function tileWindowsInternal(snap) {
       }
       for (const id of r.refusalDrop) state.refusalPins.delete(+id);
       log(`PIN-CLAMP display=${d.displayID} tier=${r.tier} sum=${pinSum}px > workarea=${majorAxis}px${r.active != null ? ` keep=${r.active}@${r.pins[r.active]}px` : ""} pins=${JSON.stringify(pinIds.filter((id) => r.pins[id] != null).map((id) => ({ id: +id, px: r.pins[id] })))}`);
+    } else if (pinIds.length === nonCollapsed.length && pinSum > 0 && majorAxis - pinSum > 2) {
+      // Every tile is pinned but they sum SHORT of the row (a close or refusal
+      // shed left slack). Renormalize them to fill it pro-rata so each tile's
+      // width is its ratio × the row, independent of order — otherwise the
+      // last-in-order tile absorbs all the slack and reordering shuffles the
+      // widths. One-shot: the next pass sees pinSum == majorAxis and skips.
+      const sizes = Object.create(null);
+      for (const id of pinIds) sizes[id] = state.pinnedSizes[id];
+      const filled = scalePinsToFill(sizes, majorAxis);
+      for (const id of pinIds) state.pinnedSizes[id] = filled[id];
+      log(`PIN-FILL display=${d.displayID} sum=${pinSum}px → ${majorAxis}px pins=${JSON.stringify(pinIds.map((id) => ({ id: +id, px: filled[id] })))}`);
     }
 
     // Collapsed widgets get positioned at their current pixel size — the

@@ -551,15 +551,14 @@ export function start() {
     }
     const app = state.windowsById[detail.id]?.app?.slice(0, 12);
     const tgt = state.lastTileTarget && state.lastTileTarget[+detail.id];
-    if (tgt && tgt.frame && tgt.ts != null && detail.frame) {
-      const f = detail.frame;
-      const ageMs = Date.now() - tgt.ts;
-      if (ageMs <= 600 &&
-          Math.abs(f.x - tgt.frame.x) <= 5 && Math.abs(f.y - tgt.frame.y) <= 5 &&
-          Math.abs(f.w - tgt.frame.w) <= 5 && Math.abs(f.h - tgt.frame.h) <= 5) {
-        log(`DRAG-IGNORED echo id=${detail.id} (${app}) age=${ageMs}ms`);
-        return;
-      }
+    // Echo suppression: the daemon classifies each moved/resized bang against
+    // its own write ledger (FrameLedger, 20px/1.5s) and ships the verdict as
+    // detail.self — authoritative, since the daemon knows exactly what it wrote.
+    // Trust it instead of reconstructing the echo test client-side from
+    // lastTileTarget (retires the old 600ms/5px heuristic).
+    if (detail.self) {
+      log(`DRAG-IGNORED echo id=${detail.id} (${app}) (daemon self)`);
+      return;
     }
 
     // If a drag bracket is open (between leftMouseDown and leftMouseUp), record

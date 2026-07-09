@@ -1212,7 +1212,7 @@
     // External entry: any stack can fire `sd.bang('palette.open', { under: 'bar' })`
     // — Rebar's frontmost-app item does this on click so the palette drops
     // directly below the menubar instead of jumping to the cursor.
-    window.onBang_palette_open = (detail) => open(detail || {});
+    sd.bang.declare("palette.open").on((detail) => open(detail || {}));
 
     // Close on focus-loss — two paths, both equivalent to init.lua's
     // dismissTap closing the palette when a click lands outside its frame:

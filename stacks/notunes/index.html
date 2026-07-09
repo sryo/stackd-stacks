@@ -36,7 +36,9 @@
       // before launchOrFocus, otherwise the launch can race the death and
       // re-open Music briefly.
       setTimeout(() => {
-        const running = apps.find(a => a.bundleId === SPOTIFY);
+        // Re-read live state — the `apps` snapshot is ~100ms stale by now,
+        // so Spotify may already be running (avoids a redundant relaunch).
+        const running = (sd.apps.running.peek() || []).some(a => a.bundleId === SPOTIFY);
         if (!running) sd.apps.launch(SPOTIFY);
       }, 100);
     }

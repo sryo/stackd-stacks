@@ -214,7 +214,7 @@
       captureTimer = setTimeout(captureFinderPath, 200);
     });
 
-    window.onBang_sd_window_destroyed = (detail) => {
+    sd.windows.destroyed.subscribe((detail) => {
       if (!detail) return;
       if (detail.app === "Finder" && lastFinderPath) {
         const path = lastFinderPath;
@@ -224,7 +224,7 @@
           await sd.proc.exec("/usr/bin/open", [path]);
         });
       }
-    };
+    });
   </script>
 </body>
 </html>

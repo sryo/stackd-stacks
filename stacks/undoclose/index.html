@@ -160,6 +160,13 @@
     let prevApps = new Map();   // bundleId → name
     sd.apps.running.subscribe((apps) => {
       if (!apps) return;
+      // Prune pids whose process has exited — keeps bidsWithWindows from
+      // growing unbounded over a long session, and stops a reused pid from
+      // inheriting a dead process's "had a window" verdict.
+      const livePids = new Set(apps.map(a => a.pid));
+      for (const pid of bidsWithWindows) {
+        if (!livePids.has(pid)) bidsWithWindows.delete(pid);
+      }
       const now = new Map();
       for (const a of apps) {
         if (!a.bundleId) continue;

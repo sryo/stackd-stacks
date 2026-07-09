@@ -45,7 +45,7 @@
         const target = displays.find(d => d.builtin)
                     || displays.find(d => nameRx.test(d.name || ""))
                     || displays[0];
-        return sd.display.setBrightness(target.displayID, level);
+        return sd.display.setBrightness(level, { displayId: target.displayID });
       }
     }
   };

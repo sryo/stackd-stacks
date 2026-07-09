@@ -6,10 +6,10 @@
   "material": "glass",
   "cornerRadius": 12,
   "padding": 0,
-  "level": "high",
+  "level": "tooltip",
   "clickThrough": true,
   "permissions": [],
-  "handles": ["sd.window.destroyed", "sd.window.focused", "apptimeout.killed"],
+  "handles": ["sd.window.destroyed", "apptimeout.killed"],
   "hotkeys": [
     { "key": "cmd+alt+z", "callback": "undo" },
     { "key": "cmd+alt+p", "callback": "protect" }

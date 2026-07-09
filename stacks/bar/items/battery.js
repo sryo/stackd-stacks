@@ -6,7 +6,7 @@ export default {
   id: "battery",
   side: "right",
   order: 50,
-  interval: 60,
+  interval: 0,
   setup(refresh) {
     sd.battery.subscribe((b) => {
       if (!b) { cached = ""; refresh(); return; }

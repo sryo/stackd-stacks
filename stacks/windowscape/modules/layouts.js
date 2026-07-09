@@ -82,15 +82,17 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, s
 // `basis`, an AX-refusal pin → `min` (the app's floor), else a flex `weight`.
 // The last-grabbed pin (`lastId`) is marked active so it's held under overflow.
 // Shared by the tiler (commit) and predictResizeFrame (preview) so the two agree.
-export function specFromState({ pins, refusalSet, weightOf, lastId }) {
+export function specFromState({ pins, refusalSet, weightOf, lastId, appMinOf }) {
   const A = lastId != null ? +lastId : null;
   return (id) => {
     const p = pins[id];
     const refusal = refusalSet && refusalSet.has(+id);
+    const perWindowMin = (p != null && refusal) ? p : 0;
+    const appMin = appMinOf ? (appMinOf(id) || 0) : 0;
     return {
       weight: weightOf(id),
       basis: (p != null && !refusal) ? p : null,
-      min: (p != null && refusal) ? p : 0,
+      min: Math.max(perWindowMin, appMin),
       active: +id === A,
     };
   };
@@ -102,12 +104,12 @@ export function specFromState({ pins, refusalSet, weightOf, lastId }) {
 // gesture preview equals the committed frame. Pure. Returns { frame, pins, bId }.
 export function predictResizeFrame({
   screenFrame, horizontal, nonCollapsed, collapsed,
-  weightOf, sizeOf, pins, refusalSet,
+  weightOf, sizeOf, pins, refusalSet, appMinOf,
   activeId, requestedSize, aBase, neighborId, bBase,
   floor = PIN_MIN_PX,
 }) {
   const A = +activeId;
-  const baseSpec = specFromState({ pins, refusalSet, weightOf, lastId: A });
+  const baseSpec = specFromState({ pins, refusalSet, weightOf, lastId: A, appMinOf });
   const framesFor = (specOf) => tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
   const frameOfA = (frames) => { const hit = frames.find((x) => +x.winId === A); return hit ? hit.frame : null; };
   const pinsOf = (frames) => { const o = Object.create(null); for (const t of frames) o[t.winId] = horizontal ? t.frame.w : t.frame.h; return o; };
@@ -123,8 +125,8 @@ export function predictResizeFrame({
   const delta = reqA - aBase;
   const bWant = Math.max(floor, Math.floor(bBase - delta));
   const specOf = (id) => {
-    if (+id === A) return { weight: weightOf(id), basis: reqA, active: true };
-    if (+id === B) return { weight: weightOf(id), basis: bWant };
+    if (+id === A) return { weight: weightOf(id), basis: reqA, min: appMinOf ? appMinOf(id) : 0, active: true };
+    if (+id === B) return { weight: weightOf(id), basis: bWant, min: appMinOf ? appMinOf(id) : 0 };
     return baseSpec(id);
   };
   const frames = framesFor(specOf);

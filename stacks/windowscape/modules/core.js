@@ -27,6 +27,14 @@ export const state = {
   // keeps this pin fixed and shrinks the others so a resize sticks. A stale id
   // is harmless — PIN-CLAMP validates it against the live pin set.
   lastPinPairId:      null,
+  // Per-app minimum cache: (bundleId||app) -> { h, v } px. Learned from AX
+  // refusals and fed to resolveFlex as a floor, so a NEW window of a known-fussy
+  // app (Terminal's column grid, System Settings' ~845px) starts at a legal size
+  // instead of refusing on its first tile. Runtime-only — NOT persisted, so a
+  // stale/false min never survives a restart; resetWeights clears it. (This
+  // caching is only fully safe once deterministic-echo lands and false refusals
+  // can't poison it — see the phase-4 plan.)
+  appMins:            Object.create(null),
   // A tile pass was skipped while a drag bracket was open; endDragBracket
   // (or its safety timeout) runs the deferred pass when the bracket closes.
   tileDeferred:       false,
@@ -133,6 +141,27 @@ export const state = {
     stripScrollOffsets: Object.create(null)
   }
 };
+
+// ── Per-app minimum cache (see state.appMins) ────────────────────────────────
+// Keyed by bundleId (falling back to app name) so windows of the same app share
+// the learned floor. Two axes: h = min width on a horizontal display, v = min
+// height on a vertical one.
+export function appKeyOf(winId) {
+  const w = state.windowsById[winId];
+  return w ? (w.bundleId || w.app || String(winId)) : String(winId);
+}
+export function appMinFor(winId, horizontal) {
+  const m = state.appMins[appKeyOf(winId)];
+  if (!m) return 0;
+  return (horizontal ? m.h : m.v) || 0;
+}
+export function learnAppMin(winId, horizontal, px) {
+  if (!(px > 0)) return;
+  const k = appKeyOf(winId);
+  const m = state.appMins[k] || (state.appMins[k] = { h: 0, v: 0 });
+  const axis = horizontal ? "h" : "v";
+  if (px > (m[axis] || 0)) m[axis] = px;
+}
 
 export function log(msg) {
   if (cfg.debugLogging) console.log("[WindowScape]", msg);

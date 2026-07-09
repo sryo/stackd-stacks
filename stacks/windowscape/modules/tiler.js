@@ -6,7 +6,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow } from "./core.js";
+import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin } from "./core.js";
 import { tileWeighted, specFromState } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -225,6 +225,7 @@ async function tileWindowsInternal(snap) {
       refusalSet: state.refusalPins,
       weightOf: getWindowWeight,
       lastId: state.lastPinPairId,
+      appMinOf: (id) => appMinFor(id, horizontal),
     });
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
     log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
@@ -356,6 +357,7 @@ async function tileWindowsInternal(snap) {
     for (const id of refused) {
       state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
       state.refusalPins.add(+id);
+      learnAppMin(id, horizontal, actuals[+id][axis]);
       // Update the recorded target to what the app actually accepted.
       // Leaving the PASS-1 target in place makes the out-of-bracket resize
       // path compare the live frame against a target the app already
@@ -397,6 +399,7 @@ async function tileWindowsInternal(snap) {
       if (dMajor2 > REFUSAL_PX) {
         state.pinnedSizes[+t.winId] = Math.max(50, a[axis]);
         state.refusalPins.add(+t.winId);
+        learnAppMin(t.winId, horizontal, a[axis]);
         state.lastTileTarget[+t.winId] = { frame: { ...a }, ts: now };
         log(`PASS2-FLEX-REFUSED id=${t.winId} pinned=${state.pinnedSizes[+t.winId]}px`);
       }
@@ -450,6 +453,7 @@ function schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal) 
     for (const [id, live] of refused) {
       state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
       state.refusalPins.add(+id);
+      learnAppMin(id, horizontal, horizontal ? live.w : live.h);
       // Same containment trick as PASS-2: record what the app actually
       // accepted so the resize machinery sees a settled target, not a
       // permanently-refused one.

@@ -3,7 +3,7 @@
 // → tileWeighted) so the gesture preview equals the committed frame.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { predictResizeFrame, PIN_MIN_PX } from "../modules/layouts.js";
+import { predictResizeFrame, specFromState, PIN_MIN_PX } from "../modules/layouts.js";
 import { resolveFlex } from "../modules/flex.js";
 
 const SF = { x: 0, y: 0, w: 1000, h: 900 }; // vertical stack → major axis = height
@@ -72,4 +72,15 @@ test("oversubscription: the active window is held; the row still fills exactly",
 test("solo tile → no pairwise resize, returns the plain tiled frame", () => {
   const r = predict({ activeId: 1, neighborId: null, requestedSize: 500, nonCollapsed: [1] });
   assert.deepEqual(r.frame, { x: 0, y: 0, w: 1000, h: 900 });
+});
+
+test("specFromState feeds the app-min cache as a floor (max with any per-window pin)", () => {
+  const specOf = specFromState({
+    pins: { 3: 700 }, refusalSet: new Set([3]), weightOf: () => 1,
+    appMinOf: (id) => (id === 2 ? 500 : id === 3 ? 300 : 0),
+  });
+  assert.equal(specOf(1).min, 0, "no pin, no app-min → 0");
+  assert.equal(specOf(2).min, 500, "app-min becomes the floor for an un-pinned window");
+  assert.equal(specOf(3).min, 700, "per-window refusal (700) wins over app-min (300)");
+  assert.equal(specOf(2).basis, null, "app-min never pins the window");
 });

@@ -63,6 +63,8 @@ export function cycleWidth() {
 export function resetAllWeights() {
   state.windowWeights = Object.create(null);
   state.pinnedSizes = Object.create(null);
+  state.refusalPins = new Set();
+  state.appMins = Object.create(null);   // escape hatch: forget learned app mins
   if (state.onLayoutChange) state.onLayoutChange();
   tileWindows();
 }

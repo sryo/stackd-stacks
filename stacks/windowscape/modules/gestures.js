@@ -11,7 +11,7 @@
 // commits with one setFrame and the same pairwise pin the preview was built on.
 
 import { sd } from "sd://runtime/api.js";
-import { state, log, displayForWindow } from "./core.js";
+import { state, log, displayForWindow, appMinFor } from "./core.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 import { isFullscreenActive } from "./fullscreen.js";
 import { moveWindowInOrder } from "./operations.js";
@@ -150,6 +150,7 @@ function stepPreview(deltaPx) {
     nonCollapsed: g.nonCollapsed, collapsed: g.collapsed,
     weightOf: getWindowWeight, sizeOf,
     pins: state.pinnedSizes, refusalSet: state.refusalPins,
+    appMinOf: (id) => appMinFor(id, g.horizontal),
     activeId: g.winId, requestedSize: g.reqMajor, aBase: g.aBase,
     neighborId: g.neighborId, bBase: g.bBase,
     floor: PIN_MIN_PX

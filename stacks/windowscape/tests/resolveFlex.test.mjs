@@ -105,6 +105,30 @@ test("oversubscription: the active pin keeps its size; others shrink to fit", ()
 });
 
 // ── pairwise transfer shape (locality): only A and B change ──────────────
+// ── stress-found regressions (over-constrained + tight-feasible) ─────────
+test("over-constrained row (Σmin > inner) stays valid: exact fill, non-negative", () => {
+  // 890+334+608 min in a 758px row — unsatisfiable; must still be a valid,
+  // exact-filling, non-negative layout (tiles land below min → apps refuse).
+  const out = resolveFlex([
+    pin(248, { active: true }), flex(), flex(),
+    { weight: 3, basis: 580, min: 890 }, pin(95),
+    { weight: 4, basis: 350, min: 334 }, { weight: 1, basis: 241, min: 608 },
+  ], 758);
+  assert.equal(out.length, 7);
+  assert.equal(sum(out), 758, "exact fill, no gap/overlap");
+  assert.ok(out.every((v) => Number.isInteger(v) && v >= 0), "non-negative integers");
+});
+
+test("tight-but-feasible row honors every app min", () => {
+  // Σmin = 668+828+323 = 1819 in an 1883px row (fits by 64) — every min holds.
+  const out = resolveFlex([
+    flex(), { weight: 4, basis: 942 }, { weight: 2, min: 668 }, flex(3),
+    { weight: 4, basis: 1771, min: 828 }, { weight: 4, min: 323 },
+  ], 1883);
+  assert.equal(sum(out), 1883);
+  assert.ok(out[2] >= 668 && out[4] >= 828 && out[5] >= 323, `mins honored: ${out}`);
+});
+
 test("gate rebalance holds the active pin while the others shrink for a newcomer", () => {
   // A flex window joins two pins filling the row; the active (dragged) pin keeps
   // its size, the other pin yields, the newcomer gets a fair share.

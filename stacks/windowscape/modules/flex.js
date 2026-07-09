@@ -65,11 +65,56 @@ function roundExact(order, floats, target) {
     .map((i, k) => ({ k, f: floats[i] - floored[k] }))
     .sort((a, b) => b.f - a.f);
   for (let j = 0; j < frac.length && rem > 0; j++, rem--) floored[frac[j].k]++;
-  // negative leftover (rare rounding overshoot): trim from the largest cells
-  for (let j = frac.length - 1; j >= 0 && rem < 0; j--, rem++) floored[frac[j].k]--;
+  // negative leftover: trim from the largest cells, never below 0.
+  for (let pass = 0; pass < 3 && rem < 0; pass++) {
+    for (let j = frac.length - 1; j >= 0 && rem < 0; j--) {
+      if (floored[frac[j].k] > 0) { floored[frac[j].k]--; rem++; }
+    }
+  }
   const res = Object.create(null);
   order.forEach((i, k) => { res[i] = floored[k]; });
   return res;
+}
+
+// Final reconciliation — the last word on the sizes:
+//   1. Over-constrained row (Σ past the axis)? Scale everything down so nothing
+//      goes negative (tiles land below min → the app refuses; unavoidable).
+//   2. Round to non-negative integers summing EXACTLY to `inner`.
+//   3. In a FEASIBLE row (Σmin <= inner), guarantee every tile clears its app
+//      `min`: raise any sub-min tile and reclaim the pixels (integer,
+//      sum-preserving) from tiles with slack above theirs. This runs AFTER the
+//      scale/round so nothing can push a satisfied min back under.
+function reconcile(order, sizes, minOf, inner) {
+  let raw = 0;
+  for (const i of order) raw += sizes[i];
+  if (raw > inner && raw > 0) { const sc = inner / raw; for (const i of order) sizes[i] *= sc; }
+  const out = roundExact(order, sizes, inner);
+
+  let minSum = 0;
+  for (const i of order) minSum += minOf(i);
+  if (minSum > inner) return out;              // over-constrained: keep it scaled
+
+  let deficit = 0;
+  for (const i of order) { const m = minOf(i); if (out[i] < m) { deficit += m - out[i]; out[i] = m; } }
+  if (deficit <= 0) return out;
+
+  let slackSum = 0;
+  for (const i of order) slackSum += Math.max(0, out[i] - minOf(i));
+  if (slackSum < deficit) return out;          // can't happen when feasible; guard
+  let taken = 0;
+  for (const i of order) {
+    const slack = out[i] - minOf(i);
+    if (slack <= 0) continue;
+    const t = Math.min(slack, Math.floor(deficit * slack / slackSum));
+    out[i] -= t; taken += t;
+  }
+  for (const i of order) {                      // integer rounding remainder
+    let rem = deficit - taken;
+    if (rem <= 0) break;
+    const slack = out[i] - minOf(i);
+    if (slack > 0) { const t = Math.min(slack, rem); out[i] -= t; taken += t; }
+  }
+  return out;
 }
 
 export function resolveFlex(items, total, gap = 0) {
@@ -103,7 +148,7 @@ export function resolveFlex(items, total, gap = 0) {
       sizes = Object.create(null);
       for (const i of pinIdx) sizes[i] = pinPx[i] * scale;
     }
-    const r = roundExact(idxAll, sizes, inner);
+    const r = reconcile(idxAll, sizes, (i) => items[i].min || 0, inner);
     return idxAll.map((i) => r[i]);
   }
 
@@ -141,6 +186,6 @@ export function resolveFlex(items, total, gap = 0) {
   const sizes = Object.create(null);
   for (const i of pinIdx) sizes[i] = pinPx[i];
   for (const i of flexIdx) sizes[i] = flexSizes[i];
-  const r = roundExact(idxAll, sizes, inner);
+  const r = reconcile(idxAll, sizes, (i) => items[i].min || 0, inner);
   return idxAll.map((i) => r[i]);
 }

@@ -78,6 +78,58 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, s
   return out;
 }
 
+// The inner span resolveFlex apportions among the non-collapsed tiles inside
+// tileWeighted — the major axis minus the collapsed rail and inter-tile gaps.
+// Kept next to tileWeighted so the two derivations can't drift (pinHeal.test
+// asserts they agree).
+export function innerSpanFor(screenFrame, horizontal, numNon, numCollapsed) {
+  const gaps = Math.max(0, numNon - 1) * cfg.tileGap;
+  if (horizontal) return screenFrame.w - gaps;
+  const collapsedH = numCollapsed > 0
+    ? (cfg.collapsedWindowHeight + cfg.tileGap) * numCollapsed - cfg.tileGap
+    : 0;
+  return screenFrame.h - collapsedH - gaps;
+}
+
+// Self-heal for pin drift. In an all-pinned row resolveFlex scales the
+// RENDERED sizes by inner/Σpins (PIN-FILL) but never mutates the pins, and
+// pinFromActualSize's pairwise transfer keeps Σpins constant — so once the
+// row's total stops matching the axis (a sibling left, a rail appeared, the
+// work area changed), every tile pass re-inflates the user's sizes by the
+// same stale factor and no resize ever sticks. Rescaling the pin STATE once
+// brings the fill factor back to 1 and makes subsequent pairwise transfers
+// operate on real sizes.
+//
+// Returns an id→px map summing exactly to `inner` (each ≥ floor), or null
+// when the row isn't entirely user-pinned (a flex or refusal-pinned sibling
+// absorbs the difference instead) or already agrees with the axis.
+export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN_PX, tolerance = 4 }) {
+  if (!ids || ids.length < 2 || !(inner > 0)) return null;
+  const px = [];
+  for (const id of ids) {
+    const p = pins[id];
+    if (p == null || (refusalSet && refusalSet.has(+id))) return null;
+    px.push(p);
+  }
+  const sum = px.reduce((s, v) => s + v, 0);
+  if (sum <= 0 || Math.abs(sum - inner) <= tolerance) return null;
+
+  const floats = px.map((v) => Math.max(floor, (v * inner) / sum));
+  // Largest-remainder rounding to an exact sum; the negative pass (floor
+  // clamps pushed the total over) reclaims only from tiles above `floor`.
+  const floored = floats.map((v) => Math.floor(v));
+  let rem = inner - floored.reduce((s, v) => s + v, 0);
+  const byFrac = floats.map((v, k) => ({ k, f: v - floored[k] })).sort((a, b) => b.f - a.f);
+  for (let j = 0; j < byFrac.length && rem > 0; j++, rem--) floored[byFrac[j].k]++;
+  for (let j = byFrac.length - 1; j >= 0 && rem < 0; j--) {
+    const give = Math.min(floored[byFrac[j].k] - floor, -rem);
+    if (give > 0) { floored[byFrac[j].k] -= give; rem += give; }
+  }
+  const out = Object.create(null);
+  ids.forEach((id, k) => { out[id] = floored[k]; });
+  return out;
+}
+
 // Build a tile's solver spec from the persisted state maps: a user pin →
 // `basis`, an AX-refusal pin → `min` (the app's floor), else a flex `weight`.
 // The last-grabbed pin (`lastId`) is marked active so it's held under overflow.

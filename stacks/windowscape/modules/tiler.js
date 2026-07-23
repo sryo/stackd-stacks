@@ -7,7 +7,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin } from "./core.js";
-import { tileWeighted, specFromState } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, innerSpanFor } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
@@ -206,6 +206,24 @@ async function tileWindowsInternal(snap) {
     // bottom strip on displays that host snapshotted tiles.
     const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
     const horizontal = screenFrame.w > screenFrame.h;
+
+    // Self-heal pin drift: an all-pinned row whose Σpins stopped matching the
+    // axis (a sibling left, a rail appeared, the work area changed) would be
+    // re-inflated by resolveFlex's fill every pass — rendered ×(inner/Σpins)
+    // while the pin state keeps the stale total, so user resizes never stick.
+    // Rescale the state once so pins and axis agree.
+    const healed = renormalizedPins({
+      ids: nonCollapsed,
+      pins: state.pinnedSizes,
+      refusalSet: state.refusalPins,
+      inner: innerSpanFor(screenFrame, horizontal, nonCollapsed.length, collapsed.length),
+    });
+    if (healed) {
+      const was = nonCollapsed.reduce((s, id) => s + state.pinnedSizes[id], 0);
+      for (const id of nonCollapsed) state.pinnedSizes[id] = healed[id];
+      const now = nonCollapsed.reduce((s, id) => s + healed[id], 0);
+      log(`PIN-HEAL display=${d.displayID} Σ${was}px→${now}px pins=${JSON.stringify(nonCollapsed.map(id => ({ id, px: healed[id] })))}`);
+    }
 
     // Collapsed widgets get positioned at their current pixel size — the tiler
     // doesn't force a width (Sticky Notes refuses width writes; forcing them

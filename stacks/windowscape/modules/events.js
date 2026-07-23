@@ -263,6 +263,16 @@ function armOobResizeTimer(id, entry) {
     // Fire-time zoom check (not bang-time): the 300ms debounce coalesces
     // the zoom's moved+resized bang train into one suppressed decision.
     if (isZoomSuspect(id)) {
+      // Same collapse-vs-zoom split as the bracket path: collapsed height
+      // means the double-click was a Stickies collapse — dock, don't snap back.
+      if (live.h <= cfg.collapsedWindowHeight) {
+        evt(`ZOOM-COLLAPSE id=${id} → dock`);
+        zoomSuspect = null;
+        state.tileReason = `collapse(${id})`;
+        state.snapNextTile = true;
+        await tileWindows();
+        return;
+      }
       evt(`ZOOM-SUPPRESS-PIN id=${id} path=oob`);
       scheduleZoomSnapBack(id);
       return;
@@ -764,6 +774,18 @@ export function endDragBracket(payload) {
     // resize branch (would pin the zoomed size) and the reorder branch
     // (would reorder off a mid-zoom frame) are wrong. Snap back instead.
     if (isZoomSuspect(movedId)) {
+      // A titlebar double-click that left the window at collapsed height is
+      // a Stickies-style collapse, not a macOS zoom — dock it on the rail
+      // instead of snapping it back open.
+      const f = state.windowsById[movedId]?.frame;
+      if (f && f.h <= cfg.collapsedWindowHeight) {
+        evt(`ZOOM-COLLAPSE id=${movedId} → dock`);
+        zoomSuspect = null;
+        state.tileReason = `collapse(${movedId})`;
+        state.snapNextTile = true;
+        await tileWindows();
+        return;
+      }
       evt(`ZOOM-SUPPRESS-PIN id=${movedId} path=bracket`);
       scheduleZoomSnapBack(movedId);
       return;

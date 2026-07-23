@@ -189,6 +189,19 @@ async function tileWindowsInternal(snap) {
       if (pruned.length !== arr.length) state.lastTiledByDisplay[otherID] = pruned;
     }
 
+    // Open/collapsed membership must reflect NOW, not the last bang: a
+    // Stickies-style titlebar collapse lands between passes, and classifying
+    // from a stale cached frame tiles the collapsed note full-height while
+    // justifying still-open siblings onto the rail. One parallel live read
+    // refreshes the frames that classification, sizeOf, and the pin heal
+    // depend on; PASS-1 below reuses these reads instead of re-fetching.
+    const lives = Object.create(null);
+    await Promise.all(screenWindows.map(async (id) => {
+      const f = await sd.windows.frame(id).catch(() => null);
+      lives[+id] = f;
+      if (f && state.windowsById[id]) state.windowsById[id].frame = f;
+    }));
+
     const collapsed = getCollapsedWindows(screenWindows);
     const nonCollapsed = screenWindows.filter((id) => !collapsed.includes(id));
 
@@ -250,6 +263,9 @@ async function tileWindowsInternal(snap) {
     if (cfg.enableAnimations && !snap) {
       for (const t of targets) {
         const cur = state.windowsById[t.winId]?.frame;
+        // Same collapse-race guard as the snap path below: never animate a
+        // live-collapsed window toward a full-height target.
+        if (cur && cur.h <= cfg.collapsedWindowHeight && t.frame.h > cfg.collapsedWindowHeight) continue;
         animatedSetFrame(t.winId, cur, t.frame);
       }
       schedulePostAnimationRefusalSweep(d.displayID, nonCollapsed, horizontal);
@@ -261,14 +277,10 @@ async function tileWindowsInternal(snap) {
       const f = state.windowsById[id]?.frame;
       return f && f.h <= cfg.collapsedWindowHeight;
     };
-    // PASS-1: apply each target, observe what AX actually accepted.
-    // Live frames are read in PARALLEL up front (halves the per-pass
-    // round-trips vs a serial read-then-apply loop).
+    // PASS-1: apply each target, observe what AX actually accepted. Live
+    // frames come from the membership read above — read once per pass, in
+    // parallel, shared by classification and apply.
     const actuals = Object.create(null);
-    const lives = Object.create(null);
-    await Promise.all(targets.map(async (t) => {
-      lives[+t.winId] = await sd.windows.frame(t.winId).catch(() => null);
-    }));
     const pending = [];
     for (const t of targets) {
       const live = lives[+t.winId];
@@ -297,6 +309,12 @@ async function tileWindowsInternal(snap) {
         actuals[+t.winId] = (probed && probed.actual) ? probed.actual : live;
         continue;
       }
+      // A live-collapsed window must never be pushed to a full-height
+      // target: the classification raced a titlebar collapse mid-pass, and
+      // applying the target would re-expand the note the user just
+      // collapsed. Skip it — no target record, no actual — and let the
+      // next pass reclassify it onto the rail.
+      if (live && live.h <= cfg.collapsedWindowHeight && t.frame.h > cfg.collapsedWindowHeight) continue;
       // Always record the target so echo-suppression sees
       // the CURRENT tile's target, not a stale one from a previous pass.
       state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };

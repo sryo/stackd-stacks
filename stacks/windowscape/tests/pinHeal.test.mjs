@@ -43,10 +43,38 @@ test("partially pinned row → null (flex siblings absorb the difference)", () =
   assert.equal(renormalizedPins({ ids: [1, 2], pins: { 1: 800 }, refusalSet: new Set(), inner: 2530 }), null);
 });
 
-test("refusal pin in the row → null (that pin is an app floor, not a share)", () => {
+test("refusal pins are floors: held fixed, user pins rescale into the remainder", () => {
+  // The observed field case: a 2420px row where app minimums (Terminal 240,
+  // Chrome 626, Terminal 240 — refusal pins) plus a stale 1805px Arc user pin
+  // oversubscribe the axis, looping PASS2-PIN-REFUSED forever.
+  const healed = renormalizedPins({
+    ids: [27853, 50873, 43094, 43141, 50475],
+    pins: { 27853: 240, 50873: 1805, 43094: 391, 43141: 626, 50475: 240 },
+    refusalSet: new Set([27853, 43141, 50475]), inner: 2420,
+  });
+  assert.equal(healed[27853], 240, "refusal floor untouched");
+  assert.equal(healed[43141], 626, "refusal floor untouched");
+  assert.equal(healed[50475], 240, "refusal floor untouched");
+  assert.deepEqual({ a: healed[50873], b: healed[43094] }, { a: 1080, b: 234 },
+    "user pins scale proportionally into inner − floors");
+  const total = [27853, 50873, 43094, 43141, 50475].reduce((s, id) => s + healed[id], 0);
+  assert.equal(total, 2420, "row sums exactly to the axis");
+});
+
+test("all-refusal row → null (nothing scalable)", () => {
   assert.equal(renormalizedPins({
-    ids: [1, 2], pins: { 1: 1019, 2: 828 }, refusalSet: new Set([2]), inner: 2530,
+    ids: [1, 2], pins: { 1: 1019, 2: 828 }, refusalSet: new Set([1, 2]), inner: 2530,
   }), null);
+});
+
+test("refusal floors already eat the axis → user pins park at the floor", () => {
+  const healed = renormalizedPins({
+    ids: [1, 2, 3], pins: { 1: 1200, 2: 1300, 3: 800 },
+    refusalSet: new Set([1, 2]), inner: 2420, floor: 50,
+  });
+  assert.equal(healed[1], 1200);
+  assert.equal(healed[2], 1300);
+  assert.equal(healed[3], 50, "no budget left: scalable pin lands on the floor");
 });
 
 test("solo row → null (solo pins are the tiler's job to drop)", () => {

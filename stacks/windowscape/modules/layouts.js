@@ -100,33 +100,52 @@ export function innerSpanFor(screenFrame, horizontal, numNon, numCollapsed) {
 // brings the fill factor back to 1 and makes subsequent pairwise transfers
 // operate on real sizes.
 //
-// Returns an id→px map summing exactly to `inner` (each ≥ floor), or null
-// when the row isn't entirely user-pinned (a flex or refusal-pinned sibling
-// absorbs the difference instead) or already agrees with the axis.
+// Refusal pins are app floors, not shares: they're held fixed and only the
+// USER pins rescale into what remains — so an over-subscribed row (stale big
+// pin + neighbors' app minimums past the axis) converges instead of looping
+// PASS-2 refusals forever against sub-minimum targets.
+//
+// Returns an id→px map summing exactly to `inner` (refusal pins carried
+// unchanged, user pins ≥ floor), or null when the row has an unpinned flex
+// sibling (it absorbs the difference instead), has nothing scalable, or
+// already agrees with the axis.
 export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN_PX, tolerance = 4 }) {
   if (!ids || ids.length < 2 || !(inner > 0)) return null;
-  const px = [];
+  const user = [], userPx = [];
+  let floorSum = 0, total = 0;
   for (const id of ids) {
     const p = pins[id];
-    if (p == null || (refusalSet && refusalSet.has(+id))) return null;
-    px.push(p);
+    if (p == null) return null;
+    total += p;
+    if (refusalSet && refusalSet.has(+id)) floorSum += p;
+    else { user.push(id); userPx.push(p); }
   }
-  const sum = px.reduce((s, v) => s + v, 0);
-  if (sum <= 0 || Math.abs(sum - inner) <= tolerance) return null;
+  if (user.length === 0) return null;
+  if (Math.abs(total - inner) <= tolerance) return null;
 
-  const floats = px.map((v) => Math.max(floor, (v * inner) / sum));
+  const out = Object.create(null);
+  for (const id of ids) out[id] = pins[id];
+
+  const budget = inner - floorSum;
+  const scalableSum = userPx.reduce((s, v) => s + v, 0);
+  if (budget <= floor * user.length || scalableSum <= 0) {
+    // The floors alone eat the axis: park user pins at the floor and let the
+    // solver's over-constrained scaling cover the genuinely impossible rest.
+    for (const id of user) out[id] = floor;
+    return out;
+  }
+  const floats = userPx.map((v) => Math.max(floor, (v * budget) / scalableSum));
   // Largest-remainder rounding to an exact sum; the negative pass (floor
   // clamps pushed the total over) reclaims only from tiles above `floor`.
   const floored = floats.map((v) => Math.floor(v));
-  let rem = inner - floored.reduce((s, v) => s + v, 0);
+  let rem = budget - floored.reduce((s, v) => s + v, 0);
   const byFrac = floats.map((v, k) => ({ k, f: v - floored[k] })).sort((a, b) => b.f - a.f);
   for (let j = 0; j < byFrac.length && rem > 0; j++, rem--) floored[byFrac[j].k]++;
   for (let j = byFrac.length - 1; j >= 0 && rem < 0; j--) {
     const give = Math.min(floored[byFrac[j].k] - floor, -rem);
     if (give > 0) { floored[byFrac[j].k] -= give; rem += give; }
   }
-  const out = Object.create(null);
-  ids.forEach((id, k) => { out[id] = floored[k]; });
+  user.forEach((id, k) => { out[id] = floored[k]; });
   return out;
 }
 

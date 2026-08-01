@@ -1,30 +1,36 @@
+/* Palette design system — white-alpha ramp over daemon glass.
+   Every surface is the base color at a fixed opacity stop, so the whole
+   theme flips by swapping --base (white on dark glass, near-black on
+   light). Accent is reserved for match highlights and small marks. */
 :root {
-  --sd-fg:        #e8e8ea;
-  --sd-fg-dim:    rgba(232, 232, 234, 0.55);
-  --sd-fg-mute:   rgba(232, 232, 234, 0.35);
-  --sd-divider:   rgba(255, 255, 255, 0.06);
-  --sd-overlay:   rgba(255, 255, 255, 0.08);
-  --sd-font:      -apple-system, system-ui, ui-system;
-  --sd-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
-  --sd-accent:    #7c8cff;
+  --base:   255, 255, 255;
+  --accent: #7c8cff;
+
+  --fg:         rgba(var(--base), 0.96);
+  --fg-2:       rgba(var(--base), 0.60);   /* secondary labels        */
+  --fg-3:       rgba(var(--base), 0.40);   /* placeholders, tertiary  */
+  --fill-hover: rgba(var(--base), 0.05);
+  --fill-sel:   rgba(var(--base), 0.10);
+  --stroke:     rgba(var(--base), 0.20);   /* keycap outlines         */
+  --hairline:   rgba(var(--base), 0.08);
+  --card:       rgba(var(--base), 0.05);
+
+  --font:      -apple-system, system-ui, ui-system;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 body[data-theme="light"] {
-  --sd-fg:        #1d1d1f;
-  --sd-fg-dim:    rgba(29, 29, 31, 0.62);
-  --sd-fg-mute:   rgba(29, 29, 31, 0.42);
-  --sd-divider:   rgba(0, 0, 0, 0.08);
-  --sd-overlay:   rgba(0, 0, 0, 0.08);
+  --base: 20, 20, 24;
 }
 
-/* Body IS the palette card — daemon owns the glass material, 12px corner
-   radius, and 500x330 size via the manifest. JS may re-place the panel
+/* Body IS the palette card — daemon owns the glass material, corner
+   radius, and 800x330 size via the manifest. JS may re-place the panel
    via sd.window.setFrame (mouse-anchored). No background, border,
    border-radius, backdrop-filter, or box-shadow here. */
 html, body {
   height: 100%;
-  color: var(--sd-fg);
-  font: 14px var(--sd-font);
+  color: var(--fg);
+  font: 14px var(--font);
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
@@ -36,88 +42,174 @@ body {
   overflow: hidden;
 }
 
-.crumbs {
-  padding: 6px 18px 0 18px;
-  font-size: 11px;
-  color: var(--sd-fg-dim);
-  display: flex; gap: 8px; align-items: center;
-  min-height: 14px;
+/* ── header ─────────────────────────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--hairline);
 }
-.crumbs .crumb  { color: var(--sd-fg); }
-.crumbs .arrow  { color: var(--sd-fg-mute); }
-.crumbs .stage  { color: var(--sd-accent); letter-spacing: 0.08em; text-transform: uppercase; font-size: 10px; }
-
+/* Fixed-width lead slot: magnifier at noun stage, back chevron at verb.
+   Slotting prevents the input text shifting when the glyph changes. */
+.lead {
+  width: 22px; flex: 0 0 22px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--fg-3);
+}
+.lead.back { font-size: 22px; line-height: 1; padding-bottom: 3px; }
+/* Selected-noun chip shown at the verb stage ("Safari ›" context). */
+.chip, #nounchip {
+  flex: 0 0 auto;
+  max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--fill-sel);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px; font-weight: 500;
+}
 input#q {
   all: unset;
-  display: block;
-  padding: 12px 18px 14px 18px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  padding: 12px 0;
   font-size: 20px;
-  color: var(--sd-fg);
-  box-sizing: border-box;
-  border-bottom: 1px solid var(--sd-divider);
+  color: var(--fg);
 }
-input#q::placeholder { color: var(--sd-fg-mute); }
+input#q::placeholder { color: var(--fg-3); }
 
+/* ── results ────────────────────────────────────────────────────────── */
 .results {
   flex: 1;
   overflow-y: auto;
   scrollbar-width: none;
+  position: relative;
+  padding: 6px 8px;
+  /* Edge dissolve: rows fade approaching header/footer. Band sizes are
+     driven from render.js scroll state (0 when nothing past the edge). */
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(180deg,
+    transparent 0,
+    black var(--fade-top),
+    black calc(100% - var(--fade-bottom)),
+    transparent 100%);
+  mask-image: linear-gradient(180deg,
+    transparent 0,
+    black var(--fade-top),
+    black calc(100% - var(--fade-bottom)),
+    transparent 100%);
 }
 .results::-webkit-scrollbar { display: none; }
 
+.section {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--fg-3);
+  padding: 12px 10px 4px 10px;
+}
+.section:first-child { padding-top: 4px; }
+
+/* ── rows: inset pill grammar ───────────────────────────────────────── */
 .row {
   display: flex; align-items: center; gap: 10px;
-  height: 40px; padding: 0 16px;
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: 10px;
   cursor: pointer;
 }
-.row.selected {
-  background: color-mix(in srgb, var(--sd-accent) 22%, transparent);
-  box-shadow: inset 2px 0 0 var(--sd-accent);
-}
-.row.disabled .name { color: var(--sd-fg-dim); }
+.row:hover:not(.selected) { background: var(--fill-hover); }
+.row.selected { background: var(--fill-sel); }
+.row.disabled .name { color: var(--fg-2); }
+
 .num {
-  font-family: var(--sd-font-mono);
-  font-size: 10px; color: var(--sd-fg-mute);
-  width: 14px; text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10px; color: var(--fg-3);
+  width: 12px; flex: 0 0 12px; text-align: right;
 }
-.icon { width: 22px; height: 22px; flex: 0 0 22px; }
-.icon:not([src]) { display: none; }
+.icon {
+  width: 24px; height: 24px; flex: 0 0 24px;
+  display: flex; align-items: center; justify-content: center;
+}
+.icon img { width: 24px; height: 24px; }
 .mark {
-  color: var(--sd-accent); font-size: 12px;
+  color: var(--accent); font-size: 12px;
   width: 10px; text-align: center;
 }
 .mark:empty { display: none; }
-.name { font-weight: 500; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
-.name b { color: var(--sd-accent); font-weight: 700; }
-.sub  {
-  margin-left: auto; color: var(--sd-fg-dim);
-  font-family: var(--sd-font-mono); font-size: 10px;
+.name {
+  font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 1 auto; min-width: 0;
+}
+.name b { color: var(--accent); font-weight: 700; }
+.sub {
+  margin-left: auto; color: var(--fg-3);
+  font-size: 11px;
   white-space: nowrap; flex: 0 0 auto; padding-left: 12px;
 }
 .hist {
-  color: var(--sd-accent); font-size: 12px;
+  color: var(--accent); font-size: 12px;
   width: 14px; text-align: center;
 }
 .hist:empty { display: none; }
-.accessory {
-  color: var(--sd-accent); font-family: var(--sd-font-mono); font-size: 11px;
-  min-width: 12px; text-align: right;
-}
-.accessory:empty { display: none; }
 
+/* ── keycap chips ───────────────────────────────────────────────────── */
+.keys { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+.key {
+  min-width: 18px; height: 18px;
+  box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 4px;
+  border-radius: 5px;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--fg-2);
+}
+.key.outline { border: 1px solid var(--stroke); }
+.key.filled  { background: var(--fill-sel); }
+
+/* ── inline calculator card ─────────────────────────────────────────── */
+.row.card {
+  margin: 2px 2px 6px 2px;
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  justify-content: center; gap: 14px;
+}
+.row.card:hover:not(.selected) { background: var(--card); border-color: var(--stroke); }
+.row.card.selected { background: var(--fill-sel); border-color: var(--stroke); }
+.card .expr  { font-size: 14px; color: var(--fg-2); }
+.card .arrow { font-size: 14px; color: var(--fg-3); }
+.card .val   { font-size: 18px; font-weight: 600; }
+
+/* ── empty state ────────────────────────────────────────────────────── */
+.empty {
+  height: 100%;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px;
+}
+.empty .msg  { font-size: 13px; color: var(--fg-2); }
+.empty .pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--fg-2);
+}
+
+/* ── footer ─────────────────────────────────────────────────────────── */
 .footer {
-  display: flex; gap: 14px; padding: 8px 16px;
-  border-top: 1px solid var(--sd-divider);
-  color: var(--sd-fg-dim);
-  font-size: 10px;
-  flex-wrap: wrap;
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--hairline);
 }
-.footer .hint { display: inline-flex; align-items: center; gap: 4px; }
-.footer kbd {
-  font-family: var(--sd-font-mono); font-size: 10px;
-  background: var(--sd-overlay);
-  border-radius: 3px;
-  padding: 1px 5px;
-  color: var(--sd-fg);
+.hints {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 11px; color: var(--fg-2);
+  flex-wrap: nowrap; overflow: hidden;
 }
+.hint { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.primary {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: 0 0 auto;
+}
+.primary .plabel { font-size: 12px; font-weight: 500; color: var(--fg); }

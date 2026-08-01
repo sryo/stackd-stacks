@@ -3,7 +3,7 @@
   "name": "Palette",
   "invocable": true,
   "anchor": { "edge": "top-center", "inset": [200] },
-  "size": { "w": 800, "h": 330 },
+  "size": { "w": 800, "h": 470 },
   "material": "glass",
   "cornerRadius": 24,
   "padding": 0,

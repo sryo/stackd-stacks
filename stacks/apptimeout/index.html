@@ -11,14 +11,16 @@
   // frontmost cancels the timer. Apps are identified by bundle identifier,
   // not display name — localizedName varies with the system locale.
   //
+  // The per-tick policy (including the blind-observer gate that keeps a
+  // locked-screen boot from killing every app in sight) lives in ./logic.js,
+  // pure and node-tested; this file wires it to sd.* channels and actions.
+  //
   // While anything is counting down, a "⌛ N" pill registers into the bar
   // (bar.register plugin API); clicking it pops a native menu that shows
   // remaining time and toggles the protected list, persisted via
   // sd.settings("ignored") as { bundleId: displayName|null }.
   import { sd } from "sd://runtime/api.js";
-
-  const CHECK_INTERVAL_MS = 10_000;
-  const TIMEOUT_S         = 300;
+  import { tick, isApp, TIMEOUT_S, CHECK_INTERVAL_MS } from "./logic.js";
 
   // Seed for first boot only; thereafter sd.settings("ignored") is the
   // truth and the menu edits it. Keyed by bundle identifier, not display
@@ -54,98 +56,40 @@
     }
   }
 
-  const windowlessSince = new Map();   // bundle id → epoch seconds
-  const windowedPids    = new Set();   // pids seen with ≥1 window this session
-  const BOOT_S          = Math.floor(Date.now() / 1000);
-
-  // Loop-stop: an app killed repeatedly (a background service respawns it
-  // windowless faster than we monitor) is given up on for the session, so
-  // we stop fighting it. Session-only and deliberately separate from the
-  // persisted `ignored` allowlist — a safety valve, not a user decision.
-  const KILL_WINDOW_S = 15 * 60;
-  const KILL_LIMIT    = 3;
-  const killLog = new Map();           // bundle id → [epoch seconds, ...]
-  const gaveUp  = new Set();           // bundle ids we've stopped auto-closing
-
-  // A real, killable app is a `.app` bundle. XPC service helpers live in
-  // `.xpc` bundles (inside frameworks) and must never be auto-closed.
-  // bundleURL comes from sd.apps.running (daemon exposes it for this).
-  const isApp = (app) => typeof app.bundleURL === "string" && app.bundleURL.endsWith(".app");
+  const BOOT_S = Math.floor(Date.now() / 1000);
+  const state = {
+    windowlessSince: new Map(),        // bundle id → epoch seconds
+    windowedPids:    new Set(),        // pids seen with ≥1 window this session
+    killLog:         new Map(),        // bundle id → [epoch seconds, ...]
+    gaveUp:          new Set()         // bundle ids we've stopped auto-closing
+  };
+  let wasBlind = false;
 
   function check() {
-    const apps = sd.apps.running.value || [];
-    const wins = sd.windows.all.value || [];
-    // Count by PID rather than display name. kCGWindowOwnerName (what
-    // sd.windows.all surfaces as `w.app`) is the *process* name —
-    // "Code" for VS Code, "Electron Helper" for some Electron apps —
-    // while sd.apps.running's `name` is NSRunningApplication.localizedName
-    // ("Visual Studio Code"). Matching on names misses windows for any
-    // app where the two diverge and the app would be wrongly considered
-    // windowless, then killed mid-session.
-    const winCount = new Map();
-    for (const w of wins) winCount.set(w.pid, (winCount.get(w.pid) || 0) + 1);
-
-    // Track which processes have ever presented a window this session, and
-    // forget dead pids. Only apps that showed a window are candidates for
-    // auto-close — a background respawn (new pid, never a window) is left
-    // alone, which is what stops the kill/respawn loop.
-    for (const pid of winCount.keys()) windowedPids.add(pid);
-    const livePids = new Set(apps.map((a) => a.pid));
-    for (const pid of windowedPids) if (!livePids.has(pid)) windowedPids.delete(pid);
-
-    const now = Math.floor(Date.now() / 1000);
-    const seen = new Set();
-    for (const app of apps) {
-      // Skipping bundleId-less apps also avoids sd.apps.kill(undefined).
-      if (!app.bundleId || ignored[app.bundleId] !== undefined) continue;
-      // Equivalent to Hammerspoon's app:kind() == 1: skip accessory
-      // (LSUIElement) and prohibited (XPC helper) processes so we don't
-      // try to kill Browser Helper / sandbox brokers / etc.
-      if (app.activationPolicy !== "regular") continue;
-      // Only real .app bundles. XPC service helpers (openAndSavePanelService,
-      // QuickLookUIService) live in .xpc bundles and briefly flip to .regular
-      // while presenting a panel, so activationPolicy alone lets them through.
-      if (!isApp(app)) continue;
-      seen.add(app.bundleId);
-      const count = winCount.get(app.pid) || 0;
-      const isFrontmost = !!app.active;
-
-      // Candidates for auto-close: the process showed a window this session
-      // (user actually used it), OR it was already running before this stack
-      // booted (left over from before a restart — Preview sat windowless
-      // across several reloads and was never cleaned up). What stays gated:
-      // a process that LAUNCHED after boot and never presented a window —
-      // that's a background service respawn (the Claude kill-loop).
-      const preBoot = typeof app.launchedAt === "number" && app.launchedAt < BOOT_S;
-      if (count === 0 && !isFrontmost && (windowedPids.has(app.pid) || preBoot) && !gaveUp.has(app.bundleId)) {
-        if (!windowlessSince.has(app.bundleId)) {
-          windowlessSince.set(app.bundleId, now);
-          console.log("apptimeout: monitoring", app.name);
-        } else if (now - windowlessSince.get(app.bundleId) >= TIMEOUT_S) {
-          console.log("apptimeout: closing", app.name, "(timeout)");
-          // Tell undoclose who did it, so its toast can offer to protect
-          // this app from future auto-closes (⌘⌥P → apptimeout.protect).
-          sd.bang("apptimeout.killed", { bundleId: app.bundleId, name: app.name });
-          sd.apps.kill(app.bundleId);
-          windowlessSince.delete(app.bundleId);
-          // Give up on an app we keep having to kill — something is
-          // respawning it, and fighting that is worse than leaving it.
-          const hits = (killLog.get(app.bundleId) || []).filter((t) => now - t < KILL_WINDOW_S);
-          hits.push(now);
-          killLog.set(app.bundleId, hits);
-          if (hits.length >= KILL_LIMIT) {
-            gaveUp.add(app.bundleId);
-            console.log("apptimeout: giving up on", app.name, "— killed", hits.length, "times this session");
-          }
-        }
-      } else if (windowlessSince.has(app.bundleId)) {
-        windowlessSince.delete(app.bundleId);
-        console.log("apptimeout: stopped monitoring", app.name);
-      }
+    const r = tick(state, {
+      apps: sd.apps.running.value || [],
+      wins: sd.windows.all.value || [],
+      ignored,
+      now: Math.floor(Date.now() / 1000),
+      bootS: BOOT_S
+    });
+    if (r.blind !== wasBlind) {
+      wasBlind = r.blind;
+      console.log(r.blind
+        ? "apptimeout: window observer blind — countdown decisions on hold"
+        : "apptimeout: window observer sighted again");
     }
-    // Drop entries whose app quit entirely between ticks.
-    for (const bundleId of windowlessSince.keys()) {
-      if (!seen.has(bundleId)) windowlessSince.delete(bundleId);
+    for (const name of r.monitoring) console.log("apptimeout: monitoring", name);
+    for (const name of r.stopped)    console.log("apptimeout: stopped monitoring", name);
+    for (const k of r.kills) {
+      console.log("apptimeout: closing", k.name, "(timeout)");
+      // Tell undoclose who did it, so its toast can offer to protect
+      // this app from future auto-closes (⌘⌥P → apptimeout.protect).
+      sd.bang("apptimeout.killed", { bundleId: k.bundleId, name: k.name });
+      sd.apps.kill(k.bundleId);
+    }
+    for (const g of r.gaveUpNow) {
+      console.log("apptimeout: giving up on", g.name, "— killed", g.hits, "times this session");
     }
     syncPill();
   }
@@ -156,7 +100,7 @@
   let pillLabel;
 
   function syncPill() {
-    const desired = windowlessSince.size ? `{sf:hourglass} ${windowlessSince.size}` : null;
+    const desired = state.windowlessSince.size ? `{sf:hourglass} ${state.windowlessSince.size}` : null;
     if (desired === pillLabel) return;
     if (desired === null) {
       sd.bang("bar.unregister", { id: "apptimeout" });
@@ -185,7 +129,7 @@
   async function protect(bundleId, name) {
     if (!bundleId || ignored[bundleId] !== undefined) return;
     ignored[bundleId] = name || null;
-    windowlessSince.delete(bundleId);
+    state.windowlessSince.delete(bundleId);
     await sd.settings.set("ignored", ignored);
     syncPill();
   }
@@ -196,14 +140,14 @@
     const nameOf = new Map(apps.filter(a => a.bundleId).map(a => [a.bundleId, a.name]));
 
     const items = [];
-    for (const [bundleId, since] of windowlessSince) {
+    for (const [bundleId, since] of state.windowlessSince) {
       items.push({
         id: bundleId,
         title: `${nameOf.get(bundleId) || bundleId} — ${fmtLeft(since, now)} left`
       });
     }
     const running = apps
-      .filter(a => a.bundleId && a.activationPolicy === "regular" && isApp(a) && !windowlessSince.has(a.bundleId))
+      .filter(a => a.bundleId && a.activationPolicy === "regular" && isApp(a) && !state.windowlessSince.has(a.bundleId))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (items.length && running.length) items.push({ separator: true });
     for (const a of running) {

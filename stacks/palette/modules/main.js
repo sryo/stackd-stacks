@@ -354,15 +354,17 @@ $q.addEventListener("keydown", async (e) => {
 });
 
 // ───────────────────────────── lifecycle ──────────────────────────────────
-// Theme: imperative subscription instead of a body-attribute placeholder.
+// Theme: imperative subscription instead of an attribute placeholder.
 // The `{{ sd.appearance.dark ? 'dark' : 'light' }}` template eval at mount
 // resolves to 'light' when the appearance channel hasn't pushed yet —
 // which on a dark-mode system left the palette with dark text on dark
 // glass until the first push (sometimes never, racing the WKWebView's
-// initial channel replay). Subscribe explicitly so the body flips as
+// initial channel replay). Subscribe explicitly so the theme flips as
 // soon as the daemon hands us a value, and again on every system change.
+// The attribute goes on <html>, not body — index.css derives its color
+// tokens from --base on :root, so the override must land there too.
 sd.appearance.subscribe((a) => {
-  document.body.dataset.theme = (a && a.dark) ? "dark" : "light";
+  document.documentElement.dataset.theme = (a && a.dark) ? "dark" : "light";
 });
 
 sd.hotkey.on("open", () => open());

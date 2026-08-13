@@ -1,7 +1,12 @@
 /* Palette design system — white-alpha ramp over daemon glass.
    Every surface is the base color at a fixed opacity stop, so the whole
    theme flips by swapping --base (white on dark glass, near-black on
-   light). Accent is reserved for match highlights and small marks. */
+   light). Accent is reserved for match highlights and small marks.
+
+   The --base override MUST live on :root, not body: the derived tokens
+   below substitute var(--base) at computed-value time on :root, and
+   descendants inherit the already-computed colors — a body-level --base
+   would never reach them. data-theme is therefore set on <html>. */
 :root {
   --base:   255, 255, 255;
   --accent: #7c8cff;
@@ -19,7 +24,7 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-body[data-theme="light"] {
+:root[data-theme="light"] {
   --base: 20, 20, 24;
 }
 

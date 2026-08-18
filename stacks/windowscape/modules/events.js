@@ -6,12 +6,13 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
   state, log, evt, updateWindowOrder, isAppIncluded, displayForWindow,
-  migrateWindowId, activeSpaceOnDisplay
+  migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
 import { PIN_MIN_PX } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating } from "./animation.js";
+import { oobPinBlockReason } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 
 // Push an inclusion verdict to the overlay-border stack so it can paint the
@@ -260,6 +261,25 @@ function armOobResizeTimer(id, entry) {
     const horizontal = d.frame.w > d.frame.h;
     const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
     if (dMajor <= 20) return; // settled echo — pass moved it back already
+    // Native-fullscreen transitions animate the window through screen-sized
+    // frames and fire the same resized bangs as a user drag. The tiler
+    // already refuses to touch fullscreen spaces; refuse to MINT PINS from
+    // them too — a pin read mid-transition pins the window at ~screen width
+    // (and its row-mate at the leftover sliver), and those pins survive the
+    // fullscreen session to deform the first re-tile after exit.
+    const tileArea = tileFrameForDisplay(d);
+    const fsExit = state.fsExitAt[d.uuid];
+    const blocked = oobPinBlockReason({
+      spaceIsFullscreen: !!state.spacesByDisplay[d.uuid]?.isFullscreen,
+      msSinceFsExit: fsExit != null ? Date.now() - fsExit : null,
+      liveMajor: horizontal ? live.w : live.h,
+      areaMajor: tileArea ? (horizontal ? tileArea.w : tileArea.h) : 0,
+      tiledCount: (state.lastTiledByDisplay[d.displayID] || []).length,
+    });
+    if (blocked) {
+      evt(`OOB-FS-BAIL id=${id} why=${blocked}`);
+      return;
+    }
     // Fire-time zoom check (not bang-time): the 300ms debounce coalesces
     // the zoom's moved+resized bang train into one suppressed decision.
     if (isZoomSuspect(id)) {
@@ -362,6 +382,17 @@ export function start() {
 
   sd.spaces.all.subscribe((info) => {
     if (!info) return;
+    // Record fullscreen-space exits before swapping the snapshot: the OOB
+    // resize guard distrusts resize reads for a grace window after the
+    // flip, because the exit animation's resized bangs debounce-fire
+    // AFTER the space info has already returned to normal (oobguard.js).
+    for (const uuid in state.spacesByDisplay) {
+      const prev = state.spacesByDisplay[uuid];
+      const next = info[uuid];
+      if (prev?.isFullscreen && next && !next.isFullscreen) {
+        state.fsExitAt[uuid] = Date.now();
+      }
+    }
     state.spacesByDisplay = info;
     // Active space changed — rebuild order + retile. Re-render the snapshot
     // strip too so tiles follow their origin desktop (show/hide per Space)

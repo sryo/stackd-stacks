@@ -55,6 +55,7 @@ export const state = {
   windowsById:        Object.create(null),
   displays:           [],      // sd.display.all snapshot
   spacesByDisplay:    {},      // sd.spaces.all snapshot
+  fsExitAt:           Object.create(null), // display uuid → ts of last fullscreen-space exit (oobguard grace)
   windowSpacesCache:  Object.create(null), // winId -> [spaceId,...]
   // Explicit minimize tracking. Populated by the sd.window.minimized bang
   // (events.js), cleared by sd.window.deminimized. Relying on

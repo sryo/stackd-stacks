@@ -24,7 +24,8 @@
 //   + x/y location. Documented as a primitive gap.
 // - Refresh timer: setInterval polls sd.windows.snapshot(id) every 5s for each
 //   tracked window, replacing the cached image so the preview stays current as
-//   the underlying window changes off-screen.
+//   the underlying window changes off-screen. Tiles whose display shows a
+//   native fullscreen space are skipped (snapgate.js): their strip isn't drawn.
 // - Right-click context menu: registered via the stack.json `eventtap`
 //   (rightMouseDown). Only fires when the cursor is on an existing snapshot
 //   tile — otherwise passthrough.
@@ -33,6 +34,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, log, isAppIncluded } from "./core.js";
+import { refreshBlockedByFullscreen } from "./snapgate.js";
 
 // Layout constants.
 export const PADDING       = 8;
@@ -870,6 +872,17 @@ export async function closeAll() {
 // Refresh timer.
 // ----------------------------------------------------------------------------
 
+// Displays whose tiles the refresh is currently skipping, so the pause/resume
+// log fires once per transition instead of once per tile per tick.
+const refreshPausedDisplays = new Set();
+
+function noteRefreshPause(displayID, blocked) {
+  if (blocked === refreshPausedDisplays.has(displayID)) return;
+  if (blocked) refreshPausedDisplays.add(displayID);
+  else refreshPausedDisplays.delete(displayID);
+  log(`SNAP-REFRESH d${displayID} ${blocked ? "paused (fullscreen space)" : "resumed"}`);
+}
+
 async function refreshSnapshots() {
   if (state.snapshotsState.isCreating) return;
   const ids = [...state.snapshotsState.order];
@@ -878,6 +891,12 @@ async function refreshSnapshots() {
   for (const winId of ids) {
     const data = state.snapshotsState.snapshots[winId];
     if (!data) continue;
+    // Per snapshot, not per pass: with two displays the one on a desktop
+    // keeps its visible strip fresh while the fullscreen one goes quiet.
+    // Read live each iteration, since the awaits below span space flips.
+    const blocked = refreshBlockedByFullscreen(data.displayID, state.displays, state.spacesByDisplay);
+    noteRefreshPause(data.displayID, blocked);
+    if (blocked) continue;
     try {
       const snap = await sd.windows.snapshot(winId, { format: "jpeg", quality: 0.7 });
       if (snap && snap.dataURL && snap.dataURL !== data.image) {

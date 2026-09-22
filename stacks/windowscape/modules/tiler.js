@@ -408,7 +408,17 @@ async function tileWindowsInternal(snap) {
     const targets2 = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
     const flexFixes = [];
     for (const t of targets2) {
-      if (refused.includes(t.winId)) continue; // already at actual
+      if (refused.includes(t.winId)) {
+        // Already at its actual SIZE, but a refusal earlier in the row
+        // shifts every later slot — reposition when the slot moved, or the
+        // row is left with an overlap on one side and a gap on the other.
+        const a = actuals[+t.winId];
+        if (a && (Math.abs(a.x - t.frame.x) > 2 || Math.abs(a.y - t.frame.y) > 2)) {
+          state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+          await sd.windows.setFrame(t.winId, t.frame).catch(() => null);
+        }
+        continue;
+      }
       if (collapsed.includes(t.winId)) continue; // collapsed branch handled in PASS-1
       const cur = state.lastTileTarget[+t.winId]?.frame;
       if (cur &&

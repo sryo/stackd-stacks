@@ -203,3 +203,24 @@ export function predictResizeFrame({
   const frames = framesFor(specOf);
   return { frame: frameOfA(frames), pins: pinsOf(frames), bId: B };
 }
+
+// Display a window belongs to, from its frame: the display containing its
+// center, else the one it overlaps most (partly dragged off-screen), else
+// none. Never guesses a display the window doesn't touch — right after a
+// display is reconnected the list can still be the old one while macOS has
+// already moved a window onto the returning display, and claiming it for
+// another display would pull it back there.
+export function displayForFrame(frame, displays) {
+  if (!frame || !Array.isArray(displays) || displays.length === 0) return null;
+  const cx = frame.x + frame.w / 2;
+  const cy = frame.y + frame.h / 2;
+  let best = null, bestArea = 0;
+  for (const d of displays) {
+    const f = d.frame;
+    if (cx >= f.x && cx < f.x + f.w && cy >= f.y && cy < f.y + f.h) return d;
+    const w = Math.min(frame.x + frame.w, f.x + f.w) - Math.max(frame.x, f.x);
+    const h = Math.min(frame.y + frame.h, f.y + f.h) - Math.max(frame.y, f.y);
+    if (w > 0 && h > 0 && w * h > bestArea) { best = d; bestArea = w * h; }
+  }
+  return best;
+}

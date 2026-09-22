@@ -3,6 +3,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
+import { displayForFrame } from "./layouts.js";
 
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
@@ -206,14 +207,7 @@ export function getCurrentSpace() {
 
 // Display whose frame contains the window's center, or null.
 export function displayForWindow(win) {
-  if (!win || !win.frame) return null;
-  const cx = win.frame.x + win.frame.w / 2;
-  const cy = win.frame.y + win.frame.h / 2;
-  for (const d of state.displays) {
-    const f = d.frame;
-    if (cx >= f.x && cx < f.x + f.w && cy >= f.y && cy < f.y + f.h) return d;
-  }
-  return state.displays[0] || null;
+  return displayForFrame(win && win.frame, state.displays);
 }
 
 // Adjusted screen frame for tiling = full frame minus the menu bar (visibleFrame).

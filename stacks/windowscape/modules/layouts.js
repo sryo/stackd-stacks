@@ -224,3 +224,13 @@ export function displayForFrame(frame, displays) {
   }
   return best;
 }
+
+// True when a spaces snapshot (keyed by display uuid) names a different set
+// of displays than `displays` — a display was added or removed and the
+// display list hasn't caught up yet. False before any display is known.
+export function displaySetChanged(spacesByDisplay, displays) {
+  if (!spacesByDisplay || !Array.isArray(displays) || displays.length === 0) return false;
+  const known = new Set(displays.map((d) => d.uuid));
+  const seen = Object.keys(spacesByDisplay);
+  return seen.length !== known.size || seen.some((uuid) => !known.has(uuid));
+}

@@ -9,7 +9,7 @@ import {
   migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
-import { PIN_MIN_PX } from "./layouts.js";
+import { PIN_MIN_PX, displaySetChanged } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating } from "./animation.js";
 import { oobPinBlockReason } from "./oobguard.js";
@@ -348,6 +348,7 @@ export function start() {
       }
     }
     state.windowsById = next;
+    state.windowsPushAt = Date.now();
     if (confirmedNew) debouncedHandleWindowEvent();
     // Prune minimizedIds of IDs that are gone — keeps the set bounded
     // and lets a re-created window (same app, new CGWindowID) get a
@@ -393,7 +394,13 @@ export function start() {
         state.fsExitAt[uuid] = Date.now();
       }
     }
+    const topologyChanged = displaySetChanged(info, state.displays);
     state.spacesByDisplay = info;
+    // A display was added or removed: this push lands before the new display
+    // list and before macOS's window moves reach windowsById, so tiling now
+    // would lay out stale state (and pull windows back onto the wrong
+    // display). The sd.display.all settle retiles once both are current.
+    if (topologyChanged) return;
     // Active space changed — rebuild order + retile. Re-render the snapshot
     // strip too so tiles follow their origin desktop (show/hide per Space)
     // and the tiler reserves strip space only on the active desktop.
@@ -417,6 +424,7 @@ export function start() {
   // spurious "Terminal dropped from rotation" events when AX is briefly
   // slow under load.
   let lastDisplayGeoSig = "";
+  let displayChangedAt = 0;
   sd.display.all && sd.display.all.subscribe && sd.display.all.subscribe((d) => {
     if (!Array.isArray(d)) return;
     state.displays = d;
@@ -425,6 +433,11 @@ export function start() {
       return `${s.displayID}|${f.x},${f.y},${f.w},${f.h}|${vf.x},${vf.y},${vf.w},${vf.h}`;
     }).join("/");
     if (sig === lastDisplayGeoSig) return; // brightness-only push, ignore
+    // Boot (first push) has no stale frames to guard against.
+    if (lastDisplayGeoSig !== "") {
+      state.displaySettling = true;
+      displayChangedAt = Date.now();
+    }
     lastDisplayGeoSig = sig;
     const runDisplaySettle = async () => {
       displayDebounce = null;
@@ -445,8 +458,15 @@ export function start() {
       // space, so every cached window→space list may now be wrong (a moved
       // window would stay filtered out of its new display's rotation).
       // Re-query all of them before rebuilding the order.
+      // The daemon re-pushes sd.windows.all after every display change;
+      // wait (bounded) for one that postdates this change so frames reflect
+      // where macOS moved the windows.
+      for (let i = 0; i < 10 && (state.windowsPushAt || 0) < displayChangedAt; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
       state.windowSpacesCache = Object.create(null);
       await refreshSpacesCache(Object.keys(state.windowsById).map(Number));
+      state.displaySettling = false;
       // Clear stale tile cooldown so the retile actually runs.
       state.tilingCount = 0;
       updateWindowOrder();

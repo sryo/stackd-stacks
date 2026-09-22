@@ -78,6 +78,7 @@ function scheduleGraceRepass(deadline) {
     // produces no further events to re-trigger a pass, which is the exact
     // hole this re-pass exists to heal. Re-arm until the guard clears.
     if (state.dragInFlight
+        || state.displaySettling
         || (state.fullscreenState && state.fullscreenState.active)
         || (state.snapshotsState && state.snapshotsState.isCreating)) {
       scheduleGraceRepass(Date.now() + 200);
@@ -141,9 +142,9 @@ async function tileWindowsInternal(snap) {
       // subscription re-triggers a pass when it upgrades a stub, so a
       // slow-AX window still tiles as soon as windows.all confirms it.
       if (w.isStandard !== true) continue;
-      // displayForWindow falls back to displays[0] when a window's center
-      // is off ALL displays — happens when a tile gets nudged off-screen
-      // briefly; we still want to address it on its assigned display.
+      // A window whose center is off every display (nudged partly
+      // off-screen) is assigned to the display it overlaps most; one that
+      // touches no known display is skipped (see displayForFrame).
       const wd = displayForWindow(w);
       if (!wd || wd.displayID !== d.displayID) continue;
       screenWindows.push(id);
@@ -527,6 +528,13 @@ export async function tileWindows() {
   }
   if (state.fullscreenState && state.fullscreenState.active) {
     log("skip tiling — simulated fullscreen active");
+    return;
+  }
+  // Between a display change and its settle, windowsById still holds
+  // pre-change frames (macOS has moved windows between displays) — any
+  // pass now would put windows back where they were. The settle tiles.
+  if (state.displaySettling) {
+    log("skip tiling — display change settling");
     return;
   }
   if (state.snapshotsState && state.snapshotsState.isCreating) {

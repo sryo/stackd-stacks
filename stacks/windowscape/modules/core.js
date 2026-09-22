@@ -97,6 +97,9 @@ export const state = {
   // focusedChanged / windowsAll / spaces.all subscriptions don't yank the
   // window out from under the cursor mid-drag.
   dragInFlight:       false,
+  // True from a display-geometry change until its settle pass has fresh
+  // window frames; tileWindows() skips while set.
+  displaySettling:    false,
   // The id of the window the user is currently dragging — captured from the
   // first moved/resized bang inside a leftMouseDown→leftMouseUp bracket
   // (events.js startDragBracket / endDragBracket). Mid-drag bangs overwrite

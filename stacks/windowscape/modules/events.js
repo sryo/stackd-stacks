@@ -426,7 +426,7 @@ export function start() {
     }).join("/");
     if (sig === lastDisplayGeoSig) return; // brightness-only push, ignore
     lastDisplayGeoSig = sig;
-    const runDisplaySettle = () => {
+    const runDisplaySettle = async () => {
       displayDebounce = null;
       // A drag bracket is open — mid-drag frames are transient, and a
       // premature updateWindowOrder here migrated the dragged window
@@ -441,6 +441,12 @@ export function start() {
       // that fired this callback.
       const settled = sd.display.all.peek?.();
       if (Array.isArray(settled)) state.displays = settled;
+      // macOS moves windows off a removed display onto another display's
+      // space, so every cached window→space list may now be wrong (a moved
+      // window would stay filtered out of its new display's rotation).
+      // Re-query all of them before rebuilding the order.
+      state.windowSpacesCache = Object.create(null);
+      await refreshSpacesCache(Object.keys(state.windowsById).map(Number));
       // Clear stale tile cooldown so the retile actually runs.
       state.tilingCount = 0;
       updateWindowOrder();

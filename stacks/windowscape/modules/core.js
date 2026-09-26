@@ -65,13 +65,10 @@ export const state = {
   // out of the eligible set and the tile would re-flow to fill its slot,
   // then re-flow back when the occlusion lifted.
   minimizedIds:       new Set(),
-  // { [winId]: { frame: {x,y,w,h}, ts: ms } } — the frame the tiler last
-  // asked setFrame for plus the wall time of the call. Drag handlers
-  // suppress a bang as an echo only when BOTH: (a) within 600ms of the
-  // setFrame, AND (b) frame matches within 5px. Pure time-window suppression
-  // swallows legitimate user drags right after a tile; pure frame-match
-  // (with a tolerance wide enough for app rounding) swallows small drags
-  // whose new frame happens to land near the tile target.
+  // { [winId]: { frame: {x,y,w,h} } } — the frame the tiler last asked
+  // setFrame for (or, after a refusal, what the app accepted). Pins, the
+  // refusal sweep and the drag/resize handlers measure deviations against
+  // it. Echo suppression is the daemon's `self` flag, not this record.
   lastTileTarget:     Object.create(null),
   // { [displayID]: [winId, ...] } — the exact set of window IDs the tiler
   // included in its most recent layout pass for each display. The drag
@@ -263,10 +260,9 @@ export function migrateWindowId(oldId, newId, stash) {
     if (stash.pin != null && state.pinnedSizes[newId] == null) {
       state.pinnedSizes[newId] = stash.pin;
     }
-    // Keep the stash's ORIGINAL ts: the 600ms echo window is long expired
-    // (correct — this was never our setFrame), but the out-of-bracket
-    // resize path needs a target so the recreated window sitting at its
-    // old tile frame reads dMajor≈0 instead of pinning phantom sizes.
+    // The out-of-bracket resize path needs a target so the recreated
+    // window sitting at its old tile frame reads dMajor≈0 instead of
+    // pinning phantom sizes.
     if (stash.target && !state.lastTileTarget[newId]) {
       state.lastTileTarget[newId] = stash.target;
     }

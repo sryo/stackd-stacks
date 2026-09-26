@@ -1,134 +1,63 @@
-// Frame animation.
+// Tile animation, driven by the daemon's motion engine.
 //
-// Interpolates the window frame over cfg.animationDuration
-// with an easeOutCubic curve at cfg.animationFPS. Per-window cancellable;
-// near-no-op when source ≈ target. Without this every tile-driven setFrame
-// snaps instantly, which makes reorders/resizes jarring.
+// sd.windows.setFrame(id, frame, {easing, duration}) animates daemon-side on
+// the display clock: every window of a pass starts on the same tick and
+// moves in lockstep, a new setFrame on a moving window supersedes it (a
+// spring carries its velocity into the new target), and an instant
+// setFrame / setFrameProbed cancels whatever is in flight. The promise
+// resolves at settle: true = reached the target, false = superseded,
+// cancelled, or the window couldn't be resolved.
 //
-// Implementation notes:
-// - One shared rAF-style loop (setInterval at the configured FPS) rather
-//   than per-window timers; cheaper at high window count and keeps all
-//   active animations in sync so they all finish on the same tick.
-// - sd.windows.setFrame is RPC over IPC, ~1–2ms per call. Per-tick frames
-//   apply as parallel plain setFrames — see the note inside tickOnce for
-//   why sd.windows.batch is deliberately NOT used here.
-// - cfg.enableAnimations === false short-circuits to a direct setFrame.
+// While a window animates the daemon swallows its moved/resized bangs, and
+// the trailing ones carry `self: true` from its write ledger — events.js
+// drops those, so the stack needs no echo bookkeeping of its own.
+//
+// isAnimating stays synchronous for the event handlers: a local mirror
+// entered on each animated write and cleared by that write's own settle.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state } from "./core.js";
+import { motionOptions, framesNearlyIdentical, createInFlight } from "./motion.js";
 
-// winId → { startFrame, targetFrame, startTs, onComplete, slow }
-const active = new Map();
-let loopHandle = null;
+const inFlight = createInFlight();
 
-function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
-function lerp(a, b, t)  { return a + (b - a) * t; }
-
-function framesNearlyIdentical(a, b) {
-  return Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2 &&
-         Math.abs(a.w - b.w) < 2 && Math.abs(a.h - b.h) < 2;
+export function isAnimating(winId) {
+  return inFlight.has(winId);
 }
 
-// Reentrancy guard: a tick is begin-to-end async (N setFrame RPCs); at
-// 60fps the interval can fire again before the previous tick's RPCs
-// return. Skipped ticks cost nothing — t is wall-clock, so the next tick
-// lands wherever the curve says.
-let ticking = false;
-
-async function tickOnce() {
-  if (ticking) return;
-  if (active.size === 0) {
-    if (loopHandle) { clearInterval(loopHandle); loopHandle = null; }
-    return;
-  }
-  ticking = true;
-  try {
-    const now = performance.now() / 1000;
-    const duration = cfg.animationDuration || 0.18;
-    const finished = [];
-
-    // Plain per-window setFrames, applied in parallel. Deliberately NOT
-    // sd.windows.batch: windows.batch.begin returns false on every call in
-    // the running daemon (batched animations apply nothing), and the batch
-    // path's split channels (AX size now / SLS position at commit) misplace
-    // windows. The direct AX path is the same channel the non-animated tiler
-    // rides. Cost: per-tick inter-window stagger instead of one compositor
-    // flip — imperceptible at this duration.
-    const writes = [];
-    for (const [winId, a] of active.entries()) {
-      const t = Math.min((now - a.startTs) / duration, 1);
-      const e = easeOutCubic(t);
-      const frame = {
-        x: Math.round(lerp(a.startFrame.x, a.targetFrame.x, e)),
-        y: Math.round(lerp(a.startFrame.y, a.targetFrame.y, e)),
-        w: Math.round(lerp(a.startFrame.w, a.targetFrame.w, e)),
-        h: Math.round(lerp(a.startFrame.h, a.targetFrame.h, e))
-      };
-      writes.push(sd.windows.setFrame(winId, frame).catch(() => {}));
-      if (t >= 1) finished.push(winId);
-    }
-    await Promise.all(writes);
-
-    for (const winId of finished) {
-      const entry = active.get(winId);
-      active.delete(winId);
-      if (entry && entry.onComplete) {
-        try { entry.onComplete(); } catch (_) { /* user callback errors don't stop the loop */ }
-      }
-    }
-  } finally {
-    ticking = false;
-  }
-}
-
-function ensureLoop() {
-  if (loopHandle) return;
-  const fps = cfg.animationFPS || 60;
-  loopHandle = setInterval(tickOnce, Math.max(8, Math.round(1000 / fps)));
-}
-
-// `active` keys are normalized to numbers (set/get/delete all coerce) so
-// isAnimating lookups from events.js — where ids arrive as +detail.id —
-// can't silently miss on string/number drift.
+// Stops the window where it stands (its setFrame promise resolves false).
 export function cancelAnimation(winId) {
-  active.delete(+winId);
+  inFlight.drop(winId);
+  return sd.windows.cancelAnimation(+winId).catch(() => false);
 }
 
 export function cancelAllAnimations() {
-  active.clear();
+  const ids = inFlight.ids();
+  inFlight.clear();
+  return Promise.all(ids.map((id) => sd.windows.cancelAnimation(id).catch(() => false)));
 }
 
-export function isAnimating(winId) {
-  return active.has(+winId);
-}
-
-// Drop-in replacement for `await sd.windows.setFrame(winId, target)`.
-// Returns immediately; the animation runs on its own loop. Callers that
-// need synchronous completion can pass onComplete or await sleep.
-//
-// cfg.enableAnimations === false short-circuits to direct setFrame.
-export async function animatedSetFrame(winId, currentFrame, targetFrame, onComplete) {
-  if (!winId || !targetFrame) return;
-  // Record the FINAL target up front. The tiler's animated branch routes
-  // through here instead of PASS-1 (which records targets itself), and the
-  // echo guards in events.js — DRAG-IGNORED plus the out-of-bracket resize
-  // wake-up's live-AX-read-vs-target comparison — all measure against
-  // state.lastTileTarget. Without this record, every per-tick setFrame's
-  // trailing resized bang compares against a stale pre-pass target, reads
-  // as a foreign resize, and ripples junk pins across the row.
-  state.lastTileTarget[+winId] = { frame: { ...targetFrame }, ts: Date.now() };
-  if (!cfg.enableAnimations || !currentFrame || framesNearlyIdentical(currentFrame, targetFrame)) {
-    await sd.windows.setFrame(winId, targetFrame);
-    if (onComplete) onComplete();
-    return;
+// Tile write toward targetFrame; resolves true once the window settled there.
+// Records targetFrame as the window's tile target up front — pins, the
+// refusal sweep and the out-of-bracket resize check all measure against it.
+// cfg.enableAnimations === false (or a window already at its target and not
+// moving) writes instantly.
+export function animatedSetFrame(winId, currentFrame, targetFrame) {
+  if (!winId || !targetFrame) return Promise.resolve(false);
+  const id = +winId;
+  state.lastTileTarget[id] = { frame: { ...targetFrame } };
+  const opts = motionOptions(cfg);
+  // windowsById frames go stale while a window moves (its bangs are
+  // swallowed), so an in-flight window always re-animates from where the
+  // daemon actually has it.
+  const atTarget = currentFrame && !inFlight.has(id) && framesNearlyIdentical(currentFrame, targetFrame);
+  if (!opts || atTarget) {
+    return sd.windows.setFrame(id, targetFrame).then((ok) => ok !== false, () => false);
   }
-  // Replace any prior in-flight animation for this window — last call wins.
-  active.set(+winId, {
-    startFrame:  { ...currentFrame },
-    targetFrame: { ...targetFrame },
-    startTs:     performance.now() / 1000,
-    onComplete:  onComplete || null
-  });
-  ensureLoop();
+  const token = inFlight.begin(id);
+  return sd.windows.setFrame(id, targetFrame, opts).then(
+    (settled) => { inFlight.end(id, token); return settled === true; },
+    () => { inFlight.end(id, token); return false; }
+  );
 }

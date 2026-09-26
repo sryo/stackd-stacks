@@ -8,7 +8,8 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin } from "./core.js";
 import { tileWeighted, specFromState, renormalizedPins, innerSpanFor } from "./layouts.js";
-import { animatedSetFrame, cancelAllAnimations, isAnimating } from "./animation.js";
+import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
+import { pickRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 
 export function getWindowWeight(winId) {
@@ -261,19 +262,24 @@ async function tileWindowsInternal(snap) {
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
     log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
 
+    // Bumped on snap passes too, which retires any sweep still pending.
+    const sweepGen = (sweepGenByDisplay[d.displayID] = (sweepGenByDisplay[d.displayID] || 0) + 1);
     if (cfg.enableAnimations && !snap) {
+      const settles = [];
       for (const t of targets) {
         const cur = state.windowsById[t.winId]?.frame;
         // Same collapse-race guard as the snap path below: never animate a
         // live-collapsed window toward a full-height target.
         if (cur && cur.h <= cfg.collapsedWindowHeight && t.frame.h > cfg.collapsedWindowHeight) continue;
-        animatedSetFrame(t.winId, cur, t.frame);
+        const id = +t.winId;
+        const settle = animatedSetFrame(id, cur, t.frame);
+        if (nonCollapsed.includes(t.winId)) settles.push(settle.then((ok) => (ok ? id : null)));
       }
-      schedulePostAnimationRefusalSweep(d.displayID, nonCollapsed, horizontal);
+      Promise.all(settles).then((ids) =>
+        sweepRefusalsAfterSettle(d.displayID, sweepGen, ids.filter((id) => id != null), nonCollapsed.length, horizontal));
       continue;
     }
 
-    const now = Date.now();
     const isCollapsed = (id) => {
       const f = state.windowsById[id]?.frame;
       return f && f.h <= cfg.collapsedWindowHeight;
@@ -295,11 +301,11 @@ async function tileWindowsInternal(snap) {
         const xDrift = live ? Math.abs(live.x - t.frame.x) : 0;
         if (!live || (yDrift <= 3 && xDrift <= 3)) {
           actuals[+t.winId] = live || t.frame;
-          state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+          state.lastTileTarget[+t.winId] = { frame: { ...t.frame } };
           continue;
         }
         const correctedFrame = { x: t.frame.x, y: t.frame.y, w: live.w, h: live.h };
-        state.lastTileTarget[+t.winId] = { frame: { ...correctedFrame }, ts: now };
+        state.lastTileTarget[+t.winId] = { frame: { ...correctedFrame } };
         const probed = await sd.windows.setFrameProbed(t.winId, correctedFrame).catch(() => null);
         // actual:null = daemon couldn't confirm the landing (see the pending
         // loop below for the two null sources). Don't record correctedFrame
@@ -316,11 +322,11 @@ async function tileWindowsInternal(snap) {
       // collapsed. Skip it — no target record, no actual — and let the
       // next pass reclassify it onto the rail.
       if (live && live.h <= cfg.collapsedWindowHeight && t.frame.h > cfg.collapsedWindowHeight) continue;
-      // Always record the target so echo-suppression sees
-      // the CURRENT tile's target, not a stale one from a previous pass.
-      state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+      // Always record the target so pins and the out-of-bracket resize
+      // check measure against the CURRENT tile's target, not a stale one.
+      state.lastTileTarget[+t.winId] = { frame: { ...t.frame } };
       // Already at target within 5px (app rounding) — skip the setFrame
-      // call but the target record above is what keeps echo-suppression current.
+      // call; the target record above still has to be current.
       if (live &&
           Math.abs(live.x - t.frame.x) <= 5 && Math.abs(live.y - t.frame.y) <= 5 &&
           Math.abs(live.w - t.frame.w) <= 5 && Math.abs(live.h - t.frame.h) <= 5) {
@@ -399,7 +405,7 @@ async function tileWindowsInternal(snap) {
       // path compare the live frame against a target the app already
       // refused — >20px apart forever — so it re-runs PIN-PAIR as if the
       // USER had resized, squeezing the innocent neighbor.
-      state.lastTileTarget[+id] = { frame: { ...actuals[+id] }, ts: now };
+      state.lastTileTarget[+id] = { frame: { ...actuals[+id] } };
     }
     log(`PASS2-PIN-REFUSED refused=${JSON.stringify(refused.map(id => ({id, px: state.pinnedSizes[id]})))}`);
 
@@ -415,7 +421,7 @@ async function tileWindowsInternal(snap) {
         // row is left with an overlap on one side and a gap on the other.
         const a = actuals[+t.winId];
         if (a && (Math.abs(a.x - t.frame.x) > 2 || Math.abs(a.y - t.frame.y) > 2)) {
-          state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+          state.lastTileTarget[+t.winId] = { frame: { ...t.frame } };
           await sd.windows.setFrame(t.winId, t.frame).catch(() => null);
         }
         continue;
@@ -427,7 +433,7 @@ async function tileWindowsInternal(snap) {
           Math.abs(cur.w - t.frame.w) <= 2 && Math.abs(cur.h - t.frame.h) <= 2) {
         continue; // PASS-1 target unchanged → no setFrame needed
       }
-      state.lastTileTarget[+t.winId] = { frame: { ...t.frame }, ts: now };
+      state.lastTileTarget[+t.winId] = { frame: { ...t.frame } };
       flexFixes.push(t);
     }
     // Contain re-flow refusals in the SAME pass. The probe already reads
@@ -446,7 +452,7 @@ async function tileWindowsInternal(snap) {
         state.pinnedSizes[+t.winId] = Math.max(50, a[axis]);
         state.refusalPins.add(+t.winId);
         learnAppMin(t.winId, horizontal, a[axis]);
-        state.lastTileTarget[+t.winId] = { frame: { ...a }, ts: now };
+        state.lastTileTarget[+t.winId] = { frame: { ...a } };
         log(`PASS2-FLEX-REFUSED id=${t.winId} pinned=${state.pinnedSizes[+t.winId]}px`);
       }
     }
@@ -455,61 +461,51 @@ async function tileWindowsInternal(snap) {
 }
 
 // Post-animation refusal sweep — the animated branch's stand-in for PASS-2.
-// The animated branch can't observe refusals at apply time (frames land
-// asynchronously over cfg.animationDuration), and a silent refuser gives the
-// out-of-bracket resize path nothing to wake on: an app that accepts the
-// position but refuses the size (System Settings pinned at its ~845px min
-// width) emits only `moved` bangs, which events.js ignores
-// outside brackets — the overlap never self-corrected. So after the
-// animation window we do ONE live read per tile and pin anything still
-// >REFUSAL_PX off its current target, exactly like PASS-2, then re-tile
-// once so flex siblings absorb the containment.
+// Animated writes can't report refusals at apply time, and a silent refuser
+// gives the out-of-bracket resize path nothing to wake on: an app that
+// accepts the position but refuses the size (System Settings pinned at its
+// ~845px min width) emits only `moved` bangs, which events.js ignores
+// outside brackets. So once every window of the pass has settled, one live
+// read per window pins anything still >REFUSAL_PX off its target, exactly
+// like PASS-2, then re-tiles once so flex siblings absorb the containment.
 //
-// Single timer slot per display: rapid passes supersede the previous sweep
-// (each new pass re-animates and schedules its own). Sweeping against
-// state.lastTileTarget (not captured targets) keeps a late sweep correct
-// even if it fires after a newer pass updated the targets.
-const animSweepTimers = Object.create(null); // displayID -> timer
-function schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal) {
-  if (animSweepTimers[displayID]) clearTimeout(animSweepTimers[displayID]);
-  const delay = (cfg.animationDuration || 0.18) * 1000 + 150;
-  animSweepTimers[displayID] = setTimeout(async () => {
-    delete animSweepTimers[displayID];
-    // A drag or a newer pass owns the frames right now — that newer pass
-    // scheduled its own sweep.
-    if (state.dragInFlight || state.tilingCount > 0) return;
-    // Frames still in transit (final ticks land late under load): probing
-    // now would read mid-flight positions as refusals. Re-arm once more.
-    if (nonCollapsed.some((id) => isAnimating(id))) {
-      schedulePostAnimationRefusalSweep(displayID, nonCollapsed, horizontal);
-      return;
-    }
-    const REFUSAL_PX = 20; // keep equal to PASS-2 / the settled-echo cutoff
-    const refused = [];
-    for (const id of nonCollapsed) {
-      const tgt = state.lastTileTarget?.[+id]?.frame;
-      if (!tgt) continue;
-      const live = await sd.windows.frame(id).catch(() => null);
-      if (!live) continue;
-      const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
-      if (dMajor > REFUSAL_PX) refused.push([+id, live]);
-    }
-    if (refused.length === 0 || refused.length >= nonCollapsed.length) return;
-    const now = Date.now();
-    for (const [id, live] of refused) {
-      state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
-      state.refusalPins.add(+id);
-      learnAppMin(id, horizontal, horizontal ? live.w : live.h);
-      // Same containment trick as PASS-2: record what the app actually
-      // accepted so the resize machinery sees a settled target, not a
-      // permanently-refused one.
-      state.lastTileTarget[id] = { frame: { ...live }, ts: now };
-    }
-    log(`ANIM-PASS2-PIN refused=${JSON.stringify(refused.map(([id]) => ({ id, px: state.pinnedSizes[id] })))}`);
-    state.tileReason = "anim-refusal";
-    state.snapNextTile = true; // containment pass — snap through PASS-1/PASS-2
-    await tileWindows();
-  }, delay);
+// Runs off the pass's settle promises. A newer pass on the same display
+// bumps the generation, so a superseded pass never sweeps; windows whose
+// animation was cancelled or superseded (settle false) are left out.
+const sweepGenByDisplay = Object.create(null); // displayID -> generation
+async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizontal, tries = 0) {
+  const current = () => sweepGenByDisplay[displayID] === gen;
+  if (!current() || ids.length === 0 || state.dragInFlight) return;
+  // A pass is running or cooling down (possibly this sweep's own pass, when
+  // a short curve settles inside the cooldown) — wait it out.
+  if (state.tilingCount > 0) {
+    if (tries < 5) setTimeout(() => sweepRefusalsAfterSettle(displayID, gen, ids, population, horizontal, tries + 1), 100);
+    return;
+  }
+  const REFUSAL_PX = 20; // keep equal to PASS-2 / the settled-echo cutoff
+  const entries = [];
+  for (const id of ids) {
+    const target = state.lastTileTarget?.[id]?.frame;
+    if (!target) continue;
+    const live = await sd.windows.frame(id).catch(() => null);
+    if (live) entries.push({ id, target, live });
+  }
+  if (!current() || state.dragInFlight) return;
+  const refused = pickRefusals(entries, horizontal, REFUSAL_PX, population);
+  if (refused.length === 0) return;
+  for (const [id, live] of refused) {
+    state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
+    state.refusalPins.add(+id);
+    learnAppMin(id, horizontal, horizontal ? live.w : live.h);
+    // Same containment trick as PASS-2: record what the app actually
+    // accepted so the resize machinery sees a settled target, not a
+    // permanently-refused one.
+    state.lastTileTarget[id] = { frame: { ...live } };
+  }
+  log(`ANIM-PASS2-PIN refused=${JSON.stringify(refused.map(([id]) => ({ id, px: state.pinnedSizes[id] })))}`);
+  state.tileReason = "anim-refusal";
+  state.snapNextTile = true; // containment pass — snap through PASS-1/PASS-2
+  await tileWindows();
 }
 
 let tilingTimer = null;
@@ -544,8 +540,11 @@ export async function tileWindows() {
   state.tileDeferred = false;
   const snap = state.snapNextTile === true;
   state.snapNextTile = false;
-  cancelAllAnimations();
+  // A snap pass skips windows already within 5px of their target; one still
+  // gliding toward an older target would keep going. Stop them first. An
+  // animated pass needs no cancel — its writes supersede in flight.
   state.tilingCount = 1;
+  if (snap) await cancelAllAnimations();
   try {
     await tileWindowsInternal(snap);
   } catch (e) {
@@ -558,8 +557,5 @@ export async function tileWindows() {
     console.warn("[WindowScape] tile error:", detail);
   }
   if (tilingTimer) clearTimeout(tilingTimer);
-  const cooldown = cfg.enableAnimations
-    ? (cfg.animationDuration * 1000 + 100)
-    : 150;
-  tilingTimer = setTimeout(() => { state.tilingCount = 0; tilingTimer = null; }, cooldown);
+  tilingTimer = setTimeout(() => { state.tilingCount = 0; tilingTimer = null; }, 150);
 }

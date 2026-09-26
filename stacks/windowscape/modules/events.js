@@ -196,15 +196,11 @@ async function handleWindowEvent() {
 // train wins, then run the SAME pairwise pin + retile as a bracket-close
 // resize.
 //
-// Echo safety: our own tile-pass setFrames bounce back as resized bangs,
-// and AX notifications trail the actual setFrame by up to several hundred
-// ms — long after tilingCount cooled down — carrying frames that differ
-// wildly from the pass's NEW targets. Trusting the bang payload here
-// produces a pin-from-echo feedback loop (junk pins at 100-ish px,
-// retile, more bangs, more pins). So the bang is only a WAKE-UP: at fire
-// time we do ONE live AX read and compare against the CURRENT tile
-// target. A settled echo matches its target → no-op; a real external
-// resize persists at the foreign size → pin.
+// Our own writes never get here: the daemon swallows bangs while a window
+// animates and tags the trailing ones `self` (handleDragBang drops those).
+// The bang is still only a WAKE-UP: at fire time we do ONE live AX read and
+// compare against the CURRENT tile target, so a resize something already
+// undid is a no-op and only one that persists at the foreign size pins.
 // PER-WINDOW debounce map — a single shared candidate slot lets one
 // window's trailing echo train stomp another window's REAL resize (B's
 // post-pass echoes overwrite A's candidacy, silently swallowing A's
@@ -221,33 +217,13 @@ function armOobResizeTimer(id, entry) {
   entry.timer = setTimeout(async () => {
     // A real user drag opened meanwhile — bracket close owns the decision.
     if (state.dragInFlight) { oobResize.delete(id); return; }
-    // isAnimating: with cfg.enableAnimations the window can still be in
-    // transit AFTER tilingCount cools down (under load the final animation
-    // tick lands late). A live read mid-flight is >20px off its target by
-    // construction — without this gate every animated pass risks phantom
+    // isAnimating: an animated pass leaves windows in transit after
+    // tilingCount cools down. A live read mid-flight is >20px off its target
+    // by construction — without this gate every animated pass risks phantom
     // PIN-PAIRs on windows nobody resized.
     if ((state.tilingCount > 0 || isAnimating(id)) && entry.retries < 5) {
       entry.retries++;
       armOobResizeTimer(id, entry);
-      return;
-    }
-    // Apply-latency grace: a tile pass re-targeted this window moments ago
-    // and apps apply setFrames asynchronously — a live read now can catch
-    // the PRE-apply frame and mint a phantom pin, which cascades: each
-    // pass's pin transfer produces the next window's ±delta mismatch,
-    // phantom pins oversubscribe the row, PIN-CLAMP resets, repeat. Wait
-    // out a fresh target (each retry re-checks, so back-to-back passes keep
-    // deferring); if it never ages, bail WITHOUT pinning — a real drift
-    // either re-bangs later or is contained by the next pass's PASS-2.
-    const tgtTs = state.lastTileTarget?.[id]?.ts;
-    if (tgtTs != null && Date.now() - tgtTs < 1000) {
-      if (entry.retries < 8) {
-        entry.retries++;
-        armOobResizeTimer(id, entry);
-        return;
-      }
-      oobResize.delete(id);
-      log(`OOB-SETTLE-BAIL id=${id} — target still fresh after ${entry.retries} retries, not pinning`);
       return;
     }
     oobResize.delete(id);
@@ -260,7 +236,7 @@ function armOobResizeTimer(id, entry) {
     if (!tgt || !d) return;
     const horizontal = d.frame.w > d.frame.h;
     const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
-    if (dMajor <= 20) return; // settled echo — pass moved it back already
+    if (dMajor <= 20) return; // a pass already put it back
     // Native-fullscreen transitions animate the window through screen-sized
     // frames and fire the same resized bangs as a user drag. The tiler
     // already refuses to touch fullscreen spaces; refuse to MINT PINS from

@@ -112,6 +112,10 @@ async function tileWindowsInternal(snap) {
     for (const id of ordered) {
       const w = state.windowsById[id];
       if (!w || !w.frame) continue;
+      // Minimized windows hold their slot in the order but never tile, and
+      // must not start the offscreen grace below (that would schedule a
+      // pointless grace-expiry pass after every minimize).
+      if (state.minimizedIds.has(+id) || w.isMinimized === true) continue;
       // Debounced onscreen check. kCGWindowIsOnscreen flickers false when
       // a window is momentarily OCCLUDED (e.g. a new sibling spawns on top
       // of it) — an instant check dropped freshly-tiled windows for one
@@ -132,7 +136,6 @@ async function tileWindowsInternal(snap) {
       } else {
         delete state.offscreenSince[id];
       }
-      if (w.isMinimized === true) continue;
       if (w.addressable === false) continue;
       // Positive confirmation required, not just "not known-bad": a
       // created-bang stub (events.js onBang_sd_window_created) carries no

@@ -4,6 +4,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { displayForFrame } from "./layouts.js";
+import { nextSpaceOrder } from "./order.js";
 
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
@@ -304,7 +305,6 @@ export function updateWindowOrder() {
     if (space == null) continue;
 
     const eligible = [];
-    const eligibleIds = new Set();
     const isRecovery = state.tileReason === "stray-overlap-recovery";
     for (const id in state.windowsById) {
       const w = state.windowsById[id];
@@ -327,21 +327,16 @@ export function updateWindowOrder() {
         continue;
       }
       eligible.push(w);
-      eligibleIds.add(w.id);
     }
 
-    const prev = state.windowOrderBySpace[space] || [];
-    const seen = new Set();
-    const next = [];
-    for (const id of prev) {
-      if (eligibleIds.has(id) && !seen.has(id)) {
-        next.push(id); seen.add(id);
-      }
+    // Minimized windows that still exist hold their slot (the tiler skips
+    // them), so a restore returns the window where it was.
+    const held = new Set();
+    for (const id of state.minimizedIds) {
+      if (state.windowsById[id]) held.add(+id);
     }
-    for (const w of eligible) {
-      if (!seen.has(w.id)) { next.push(w.id); seen.add(w.id); }
-    }
-    state.windowOrderBySpace[space] = next;
+    state.windowOrderBySpace[space] = nextSpaceOrder(
+      state.windowOrderBySpace[space] || [], eligible.map((w) => w.id), held);
   }
   if (state.onLayoutChange) state.onLayoutChange();
 }

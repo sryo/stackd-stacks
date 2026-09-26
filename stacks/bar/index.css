@@ -9,6 +9,13 @@
   --bar-notch-gap: 10px;
 }
 
+/* Over a bright wallpaper the system menubar draws near-black text; a dark
+   drop shadow would smear it, so the halo turns light and faint. */
+:root[data-menubar="light"] {
+  --bar-fg: rgba(0, 0, 0, 0.85);
+  --bar-shadow: rgba(255, 255, 255, 0.35);
+}
+
 html, body {
   height: 100%;
   color: var(--bar-fg);

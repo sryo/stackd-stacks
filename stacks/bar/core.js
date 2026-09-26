@@ -443,6 +443,11 @@ sd.bang.declare('bar.update').on((detail) => {
   sd.spaces.all.subscribe(updateModeFromSpaces);
   trackPeek();
 
+  // Follow the system menubar: dark text over a bright wallpaper, light
+  // text over a dark one. Light text until the daemon reports otherwise.
+  sd.bind([document.documentElement, "data-menubar"], sd.appearance,
+    (a) => a?.menubarDark === false ? "light" : "dark");
+
   relayout();
 
   // Tell plugin stacks to re-register their items. They may have fired

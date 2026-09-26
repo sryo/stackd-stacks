@@ -7,7 +7,7 @@
   "permissions": [
     "battery", "display", "input", "net", "media",
     "audio", "apps", "proc", "settings", "spaces", "menubar", "menu",
-    "mouse", "app"
+    "mouse", "app", "appearance"
   ],
   "handles": ["bar.register", "bar.unregister", "bar.update", "nowplaying.toggle"],
   "hotkeys": [

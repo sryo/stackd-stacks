@@ -33,7 +33,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, log, isAppIncluded } from "./core.js";
+import { state, log, isManaged } from "./core.js";
 import { refreshBlockedByFullscreen } from "./snapgate.js";
 import { tooltipLines, tooltipRect } from "./tooltip.js";
 
@@ -1137,7 +1137,7 @@ export async function init() {
       if (!w || !w.frame) return;
       if (w.isStandard === false) return;
       if (w.frame.h <= cfg.collapsedWindowHeight) return;
-      if (!isAppIncluded(w)) return;
+      if (!isManaged(w)) return;
       captureForOSMinimize(id).catch((e) =>
         console.warn(`[WindowScape] captureForOSMinimize ${id}:`, e)
       );

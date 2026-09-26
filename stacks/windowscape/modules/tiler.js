@@ -6,7 +6,11 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor } from "./core.js";
+import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor, tileOpts, learnFixedWidth, learnPanelApp, fixedWidthPxOf, isFloating } from "./core.js";
+import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal } from "./tileable.js";
+import { dockNewFloats } from "./events.js";
+import { planFloatZone } from "./floatzone.js";
+import { captureAndMinimize } from "./snapshot_create.js";
 import { tileWeighted, specFromState, renormalizedPins, innerSpanFor } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals } from "./motion.js";
@@ -55,6 +59,21 @@ export function pruneStaleWeights() {
   }
   for (const k of Object.keys(state.offscreenSince)) {
     if (!live.has(+k)) delete state.offscreenSince[k];
+  }
+  for (const k of Object.keys(state.floatOverrides)) {
+    if (!live.has(+k)) delete state.floatOverrides[k];
+  }
+  for (const k of Object.keys(state.preTileFrame)) {
+    if (!live.has(+k)) delete state.preTileFrame[k];
+  }
+  for (const k of state.floatLoose) {
+    if (!live.has(+k)) state.floatLoose.delete(k);
+  }
+  for (const k of state.everCollapsed) {
+    if (!live.has(+k)) state.everCollapsed.delete(k);
+  }
+  for (const d in state.floatZone) {
+    state.floatZone[d] = state.floatZone[d].filter((id) => live.has(+id));
   }
   for (let i = state.focusHistory.length - 1; i >= 0; i--) {
     if (!live.has(state.focusHistory[i])) state.focusHistory.splice(i, 1);
@@ -145,7 +164,9 @@ async function tileWindowsInternal(snap, reason) {
       // evicted them, visibly resizing everything twice. The all-push
       // subscription re-triggers a pass when it upgrades a stub, so a
       // slow-AX window still tiles as soon as windows.all confirms it.
-      if (w.isStandard !== true) continue;
+      // isStandard, plus traits: a panel that reports AXStandardWindow but
+      // refuses any size floats (tileable.js).
+      if (!isTileable(w, tileOpts(w))) continue;
       // A window whose center is off every display (nudged partly
       // off-screen) is assigned to the display it overlaps most; one that
       // touches no known display is skipped (see displayForFrame).
@@ -153,6 +174,7 @@ async function tileWindowsInternal(snap, reason) {
       if (!wd || wd.displayID !== d.displayID) continue;
       screenWindows.push(id);
     }
+    restoreFloated(d.displayID, screenWindows);
     if (screenWindows.length === 0) continue;
 
     // Membership diff for observability (TILE-IN / TILE-OUT). Computed
@@ -165,6 +187,8 @@ async function tileWindowsInternal(snap, reason) {
     const removed = [...prev].filter(id => !cur.has(id));
     if (added.length || removed.length) {
       for (const id of added) {
+        const f = state.windowsById[id]?.frame;
+        if (f && !state.preTileFrame[id]) state.preTileFrame[id] = { ...f };
         const a = state.windowsById[id]?.app || "?";
         evt(`TILE-IN  d${d.displayID} ${id} (${a.slice(0,18)})  via=${reason}`);
       }
@@ -220,10 +244,26 @@ async function tileWindowsInternal(snap, reason) {
     }
 
     // Honor snapshot-strip reservation: tiles must not draw under the
-    // bottom strip on displays that host snapshotted tiles.
-    const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
+    // bottom strip on displays that host snapshotted tiles. Docked floats
+    // take a column off the right of what's left (floatzone.js).
+    const railFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
+    const zonePlan = planZoneFor(d, railFrame);
+    const screenFrame = zonePlan ? zonePlan.tileArea : railFrame;
     state.lastTileAreaByDisplay[d.displayID] = { ...screenFrame };
-    const horizontal = screenFrame.w > screenFrame.h;
+    const horizontal = railFrame.w > railFrame.h;
+    if (zonePlan) placeZone(d.displayID, zonePlan, snap);
+
+    // Fixed-width apps (System Settings) tile at the width they refused to
+    // grow past, as an exact basis rather than a floor to grow from.
+    if (horizontal) {
+      for (const id of nonCollapsed) {
+        const w = state.windowsById[id];
+        const px = w && fixedWidthPin(w, fixedWidthPxOf(w));
+        if (px == null) continue;
+        state.pinnedSizes[id] = px;
+        state.refusalPins.delete(+id);
+      }
+    }
 
     // Self-heal pin drift: an all-pinned row whose Σpins stopped matching the
     // axis (a sibling left, a rail appeared, the work area changed) would be
@@ -397,7 +437,12 @@ async function tileWindowsInternal(snap, reason) {
       const dW = Math.abs(a.w - t.frame.w), dH = Math.abs(a.h - t.frame.h);
       return horizontal ? dW > REFUSAL_PX : dH > REFUSAL_PX;
     });
+    if (learnPanels(nonCollapsed.map((id) => [id, targets.find((t) => t.winId === id)?.frame, actuals[+id]]), horizontal)) {
+      setTimeout(dockNewFloats, 0);
+      continue;
+    }
     if (refused.length === 0 || refused.length >= nonCollapsed.length) continue;
+    learnFixedWidths(refused.map((id) => [id, targets.find((t) => t.winId === id).frame, actuals[+id]]), horizontal);
 
     for (const id of refused) {
       state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
@@ -452,6 +497,7 @@ async function tileWindowsInternal(snap, reason) {
       if (!a) continue;
       const dMajor2 = Math.abs(horizontal ? a.w - t.frame.w : a.h - t.frame.h);
       if (dMajor2 > REFUSAL_PX) {
+        learnFixedWidths([[t.winId, t.frame, a]], horizontal);
         state.pinnedSizes[+t.winId] = Math.max(50, a[axis]);
         state.refusalPins.add(+t.winId);
         learnAppMin(t.winId, horizontal, a[axis]);
@@ -461,6 +507,117 @@ async function tileWindowsInternal(snap, reason) {
     }
   }
   if (graceDeadline < Infinity) scheduleGraceRepass(graceDeadline);
+}
+
+// A window that stays smaller than its tile has a maximum size; if it also
+// can't go fullscreen, its app is learned as fixed-width (System Settings)
+// and its windows tile pinned at that width from then on. Min-width
+// refusals (Activity Monitor) stay plain refusal pins.
+function learnFixedWidths(entries, horizontal) {
+  if (!horizontal) return;
+  for (const [id, target, live] of entries) {
+    const w = state.windowsById[id];
+    if (!w || !target || !live || w.canFullscreen !== false) continue;
+    if (!refusedGrowth(target, live, horizontal, 20)) continue;
+    if (fixedWidthPxOf(w) !== live.w) {
+      evt(`FIXED-WIDTH ${id} (${(w.app || "?").slice(0, 18)}) target=${target.w} live=${live.w}`);
+    }
+    learnFixedWidth(w, live.w);
+  }
+}
+
+// A window short of its tile on the cross axis with no fullscreen button is
+// a panel: its app is learned, and its no-fullscreen-button windows float
+// and dock from then on. Returns whether any was learned.
+function learnPanels(entries, horizontal) {
+  let any = false;
+  for (const [id, target, live] of entries) {
+    const w = state.windowsById[id];
+    if (!w || !target || !live || tileOpts(w).collapsible) continue;
+    if (!isPanelRefusal(w, target, live, horizontal, 20)) continue;
+    evt(`PANEL ${id} (${(w.app || "?").slice(0, 18)}) target=${target.w}x${target.h} live=${live.w}x${live.h}`);
+    learnPanelApp(w);
+    any = true;
+  }
+  return any;
+}
+
+// displayID -> { plan, until?, timer? }: the last non-empty zone, held for
+// ZONE_HOLD_MS after it empties so closing a float and opening another
+// doesn't reflow the tiles twice.
+const zoneHold = Object.create(null);
+const ZONE_HOLD_MS = 800;
+
+function planZoneFor(d, area) {
+  if (!cfg.floatZone) return null;
+  if (!(d.frame.w > d.frame.h) || d.frame.w < cfg.floatZoneMinDisplayW) return null;
+  const space = activeSpaceOnDisplay(d.uuid);
+  const members = [];
+  for (const id of state.floatZone[d.displayID] || []) {
+    const w = state.windowsById[id];
+    if (!w || !w.frame || w.isMinimized === true || state.minimizedIds.has(+id) || !isFloating(w)) continue;
+    const sp = state.windowSpacesCache[id];
+    if (sp && sp.length && !sp.includes(space)) continue;
+    members.push({ id: +id, w: w.frame.w, h: w.frame.h });
+  }
+  const now = Date.now();
+  if (members.length === 0) {
+    const held = zoneHold[d.displayID];
+    if (held && held.until == null) held.until = now + ZONE_HOLD_MS;
+    if (!held || now >= held.until) { delete zoneHold[d.displayID]; return null; }
+    if (!held.timer) {
+      held.timer = setTimeout(() => { state.tileReason = "float-zone-release"; tileWindows(); }, held.until - now + 20);
+    }
+    return { ...held.plan, placements: [], overflow: [] };
+  }
+  const plan = planFloatZone({
+    area, members, gap: cfg.tileGap, pad: 8,
+    maxW: Math.round(area.w * cfg.floatZoneMaxFrac),
+  });
+  if (plan.zone) {
+    if (zoneHold[d.displayID]?.timer) clearTimeout(zoneHold[d.displayID].timer);
+    zoneHold[d.displayID] = { plan };
+  }
+  return plan.zone ? plan : null;
+}
+
+// Move docked floats to their zone slots (position only — they can't be
+// resized); what didn't fit goes to the snapshots strip.
+function placeZone(displayID, plan, snap) {
+  for (const { id, x, y } of plan.placements) {
+    const f = state.windowsById[id]?.frame;
+    if (!f || (Math.abs(f.x - x) <= 2 && Math.abs(f.y - y) <= 2)) continue;
+    const target = { x, y, w: f.w, h: f.h };
+    if (cfg.enableAnimations && !snap) animatedSetFrame(id, f, target);
+    else sd.windows.setFrame(id, target).catch(() => null);
+  }
+  for (const id of plan.overflow) {
+    const zone = state.floatZone[displayID];
+    if (zone) state.floatZone[displayID] = zone.filter((z) => z !== id);
+    evt(`FLOAT-OVERFLOW ${id} (${(state.windowsById[id]?.app || "?").slice(0, 18)}) → snapshot`);
+    captureAndMinimize(id).catch(() => null);
+  }
+}
+
+export function isDocked(id) {
+  for (const d in state.floatZone) if (state.floatZone[d].includes(+id)) return true;
+  return false;
+}
+
+// Windows that left this display's tiling because they now float go back
+// to the frame their app gave them before they were first tiled.
+function restoreFloated(displayID, screenWindows) {
+  const prev = state.lastTiledByDisplay[displayID] || [];
+  const cur = new Set(screenWindows.map((id) => +id));
+  for (const id of prev) {
+    if (cur.has(+id)) continue;
+    const w = state.windowsById[id];
+    const frame = state.preTileFrame[id];
+    if (!w || !frame || floatReason(w, tileOpts(w)) == null || isDocked(id)) continue;
+    delete state.preTileFrame[id];
+    evt(`FLOAT-RESTORE ${id} (${(w.app || "?").slice(0, 18)}) → ${frame.w}x${frame.h}@${frame.x},${frame.y}`);
+    sd.windows.setFrame(+id, frame).catch(() => null);
+  }
 }
 
 // Post-animation refusal sweep — the animated branch's stand-in for PASS-2.
@@ -499,8 +656,14 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
   // minimum from) them deforms every tile after the exit.
   const blocked = fsTransitionBlockFor(state.displays.find((d) => d.displayID === displayID));
   if (blocked) { evt(`ANIM-PASS2-FS-BAIL d${displayID} why=${blocked}`); return; }
+  if (learnPanels(entries.map((e) => [e.id, e.target, e.live]), horizontal)) {
+    dockNewFloats();
+    return;
+  }
   const refused = pickRefusals(entries, horizontal, REFUSAL_PX, population);
   if (refused.length === 0) return;
+  const targetOf = Object.fromEntries(entries.map((e) => [e.id, e.target]));
+  learnFixedWidths(refused.map(([id, live]) => [id, targetOf[id], live]), horizontal);
   for (const [id, live] of refused) {
     state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
     state.refusalPins.add(+id);

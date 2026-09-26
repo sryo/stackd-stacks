@@ -5,10 +5,13 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
-  state, log, evt, updateWindowOrder, isAppIncluded, displayForWindow,
+  state, log, evt, updateWindowOrder, isManaged, isFloating, inclusionOf, tileOpts, displayForWindow,
   migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor, appMinFor
 } from "./core.js";
-import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight } from "./tiler.js";
+import { isTileable } from "./tileable.js";
+import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight, isDocked } from "./tiler.js";
+import { floatsToDock } from "./floatzone.js";
+import { floatReason } from "./tileable.js";
 import { PIN_MIN_PX, displaySetChanged, pairwisePins } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating, cancelAnimation } from "./animation.js";
@@ -23,7 +26,41 @@ import { returnedOnscreen } from "./onscreen.js";
 // re-focus is free.
 function emitInclusionBang(w) {
   if (!w || !w.id) return;
-  sd.bang.declare('overlay-border.inclusion').emit({ winId: w.id, included: isAppIncluded(w) });
+  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
+}
+
+// Fixed-size floats dock into the float zone (floatzone.js) as soon as the
+// window list confirms them, and the tiles reflow once, right then.
+export function dockNewFloats({ retile = true } = {}) {
+  if (!cfg.floatZone) return;
+  const floats = [];
+  for (const id in state.windowsById) {
+    const w = state.windowsById[id];
+    if (!isFloating(w)) continue;
+    floats.push({
+      id: +id,
+      reason: floatReason(w, tileOpts(w)),
+      onscreen: w.onscreen,
+      minimized: w.isMinimized === true || state.minimizedIds.has(+id),
+    });
+  }
+  const docked = new Set(Object.values(state.floatZone).flat());
+  let any = false;
+  for (const id of floatsToDock({ floats, docked, loose: state.floatLoose })) {
+    const d = displayForWindow(state.windowsById[id]);
+    if (!d) continue;
+    (state.floatZone[d.displayID] ||= []).push(id);
+    evt(`FLOAT-DOCK d${d.displayID} ${id} (${(state.windowsById[id]?.app || "?").slice(0, 18)})`);
+    any = true;
+  }
+  if (any && retile) {
+    state.tileReason = "float-dock";
+    tileWindows();
+  }
+}
+
+export function undock(id) {
+  for (const d in state.floatZone) state.floatZone[d] = state.floatZone[d].filter((z) => z !== +id);
 }
 
 // Spatial drop-position calculator.
@@ -148,7 +185,10 @@ async function handleWindowEvent() {
   const currentData = Object.create(null);
   for (const id in state.windowsById) {
     const w = state.windowsById[id];
-    if (!isAppIncluded(w)) continue;
+    // Tileable, not just managed: a window whose standard verdict or traits
+    // arrive in a later push must show up here as new, or that push
+    // retiles nothing.
+    if (!isManaged(w) || !isTileable(w, tileOpts(w))) continue;
     const d = displayForWindow(w);
     if (!d) continue;
     currentIds.add(+id);
@@ -317,9 +357,9 @@ export function start() {
       if (now - entry.ts > DESTROYED_GRACE_MS) destroyedRecently.delete(id);
     }
     const next = Object.create(null);
-    // The tiler only admits isStandard === true, so a created-bang stub
-    // (no isStandard field) stays out of rotation until this push confirms
-    // it — and since the all-push is not otherwise a tile trigger, the
+    // The tiler only admits isStandard === true with traits read, so a
+    // created-bang stub (no isStandard field) stays out of rotation until
+    // this push confirms it — and since the all-push is not otherwise a tile trigger, the
     // confirmation must schedule the pass itself or a slow-AX window would
     // never tile until some unrelated event.
     let confirmedNew = false;
@@ -331,7 +371,10 @@ export function start() {
       // Feed the tiler's boot-phantom gate: only windows seen onscreen at
       // least once earn the offscreen-flicker grace.
       if (w.onscreen !== false) state.everOnscreen.add(+w.id);
-      if (w.isStandard === true && state.windowsById[w.id]?.isStandard !== true) {
+      if (w.frame && w.frame.h <= cfg.collapsedWindowHeight) state.everCollapsed.add(+w.id);
+      const was = state.windowsById[w.id];
+      if (w.isStandard === true &&
+          (was?.isStandard !== true || (w.isResizable !== undefined && was?.isResizable === undefined))) {
         confirmedNew = true;
       }
       // A window that just went offscreen may have changed spaces under us
@@ -347,6 +390,7 @@ export function start() {
     state.windowsById = next;
     state.windowsPushAt = Date.now();
     if (confirmedNew) debouncedHandleWindowEvent();
+    dockNewFloats();
     if (returned.length) scheduleOnscreenReturnTile(returned);
     // Prune minimizedIds of IDs that are gone — keeps the set bounded
     // and lets a re-created window (same app, new CGWindowID) get a
@@ -491,6 +535,9 @@ export function start() {
   // Lifecycle bangs — invalidate space cache for destroyed windows AND
   // retile (closed window leaves a gap the remaining tiles should fill).
   window.onBang_sd_window_destroyed = (detail) => {
+    // A docked float is out of tile membership, so its close changes no
+    // membership diff — the zone must be retiled away explicitly.
+    const wasDocked = !!detail?.id && isDocked(+detail.id);
     if (detail && detail.id) {
       const id = +detail.id;
       // Stash per-id state BEFORE the eager purge below — if this destroy
@@ -522,6 +569,11 @@ export function start() {
     }
     pruneStaleWeights();
     debouncedHandleWindowEvent();
+    if (wasDocked) {
+      undock(+detail.id);
+      state.tileReason = "float-closed";
+      tileWindows();
+    }
   };
   window.onBang_sd_window_created = (detail) => {
     // Seed the live index from the bang payload (created bangs carry
@@ -547,6 +599,7 @@ export function start() {
   window.onBang_sd_window_minimized = (detail) => {
     if (!detail || detail.id == null) return;
     state.minimizedIds.add(+detail.id);
+    undock(+detail.id);
     // Eager hydration — the bang can beat the pumped sd.windows.all push,
     // and the immediate tile pass below reads windowsById's enrichment.
     if (state.windowsById[+detail.id]) state.windowsById[+detail.id].isMinimized = true;
@@ -565,6 +618,7 @@ export function start() {
     // minimize-era isMinimized:true (the refreshed all-push races the bang)
     // and skips the restored window; nothing retiles when the push lands.
     if (state.windowsById[+detail.id]) state.windowsById[+detail.id].isMinimized = false;
+    dockNewFloats({ retile: false });
     updateWindowOrder();
     state.tileReason = `deminimize(${detail.id})`;
     tileWindows();
@@ -615,14 +669,24 @@ export function start() {
     //
     // Accept the bang if either: (a) we've actually tiled this id on some
     // display (post-first-pass), OR (b) it's a window we WOULD tile —
-    // isAppIncluded + has a frame + lives on a known display. The second
+    // isManaged + has a frame + lives on a known display. The second
     // path covers the boot race: after a hot-reload, lastTiledByDisplay
     // is empty until the first tile pass finishes; a user drag in that
     // window would otherwise get DRAG-SKIP'd and lost.
+    // The user moved a docked float: it leaves the zone and stays where
+    // it's dropped. Our own zone placements arrive as detail.self.
+    if (kind === "moved" && !detail.self && isDocked(+detail.id)) {
+      undock(+detail.id);
+      state.floatLoose.add(+detail.id);
+      evt(`FLOAT-LOOSE ${detail.id} (${(state.windowsById[+detail.id]?.app || "?").slice(0, 18)})`);
+      state.tileReason = "float-loose";
+      tileWindows();
+      return;
+    }
     const w = state.windowsById[+detail.id];
     const wasTiled = Object.values(state.lastTiledByDisplay || {})
       .some(arr => Array.isArray(arr) && arr.includes(+detail.id));
-    const eligible = w && w.frame && isAppIncluded(w) && displayForWindow(w);
+    const eligible = w && w.frame && isManaged(w) && displayForWindow(w);
     if (!wasTiled && !eligible) {
       log(`DRAG-SKIP non-tiled id=${detail.id} (${w?.app?.slice(0,12)}) lastTiled=${JSON.stringify(state.lastTiledByDisplay)}`);
       return;
@@ -1306,7 +1370,7 @@ export async function crossDisplayDrop(movedId, srcDisplayID, dest) {
 async function reorderOnDrop(movedId) {
   const moved = state.windowsById[movedId];
   if (!moved || !moved.frame) return;
-  if (!isAppIncluded(moved)) return;
+  if (!isManaged(moved)) return;
   const d = displayForWindow(moved);
   if (!d) return;
   const space = state.spacesByDisplay[d.uuid]?.active;

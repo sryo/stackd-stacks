@@ -19,7 +19,7 @@
 // .active to bail out, this module owns writes.
 
 import { sd } from "sd://runtime/api.js";
-import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, isAppIncluded, log } from "./core.js";
+import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, isManaged, inclusionOf, log } from "./core.js";
 import { tileWindows } from "./tiler.js";
 
 // Belt-and-suspenders push to overlay-border so the border has the right
@@ -29,7 +29,7 @@ function emitInclusionBang(winId) {
   if (!winId) return;
   const w = state.windowsById[winId];
   if (!w) return;
-  sd.bang.declare('overlay-border.inclusion').emit({ winId, included: isAppIncluded(w) });
+  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
 }
 
 // Returns true if the window is on the same display + active space as the
@@ -96,7 +96,7 @@ export async function enterSimulatedFullscreen(winId) {
     // these gates, entering fullscreen flung excluded apps, non-standard
     // helper windows, and already-minimized windows to the 1x1 corner — and
     // the exit restore un-minimized the minimized ones.
-    if (!isAppIncluded(peer)) continue;
+    if (!isManaged(peer)) continue;
     if (peer.isStandard !== true) continue;
     if (peer.isMinimized === true) continue;
     if (peer.addressable === false) continue;

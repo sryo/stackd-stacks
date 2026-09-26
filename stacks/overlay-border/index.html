@@ -31,7 +31,8 @@
   const DEFAULTS = {
     thickness:     8,
     colorIncluded: "rgba(26,77,230,0.8)",
-    colorExcluded: "rgba(230,153,26,0.8)"
+    colorExcluded: "rgba(230,153,26,0.8)",
+    colorFloating: "rgba(140,90,220,0.8)"
   };
   let cfg = { ...DEFAULTS };
   async function loadConfig() {
@@ -115,8 +116,9 @@
   }
 
   function colorForWin(winId) {
-    const included = inclusionByWinId.has(winId) ? inclusionByWinId.get(winId) : true;
-    return included ? cfg.colorIncluded : cfg.colorExcluded;
+    const v = inclusionByWinId.has(winId) ? inclusionByWinId.get(winId) : "included";
+    if (v === "floating") return cfg.colorFloating;
+    return v === "included" ? cfg.colorIncluded : cfg.colorExcluded;
   }
 
   async function hintsFor(winId) {
@@ -287,14 +289,14 @@
   }
 
   // --- bang: external inclusion verdict ----------------------------------
-  // Other stacks (windowscape) push `{ winId, included }` so we know which
+  // Other stacks (windowscape) push `{ winId, included, floating? }` so we know which
   // palette to draw. We cache for every window we hear about; if the verdict
   // is for the currently-FOCUSED window we restyle immediately. Compared
   // against focusedWin, not currentWid — currentWid can lag in hidden
   // states and restyling off it painted the previous window (invariant 1).
   sd.bang.declare("overlay-border.inclusion").on((detail) => {
     if (!detail || typeof detail.winId !== "number") return;
-    const next = !!detail.included;
+    const next = detail.floating ? "floating" : detail.included ? "included" : "excluded";
     const prev = inclusionByWinId.has(detail.winId)
       ? inclusionByWinId.get(detail.winId)
       : null;

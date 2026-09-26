@@ -4,13 +4,15 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, saveList, updateWindowOrder, isAppIncluded, log } from "./core.js";
+import { state, saveList, updateWindowOrder, inclusionOf, tileOpts, displayForWindow, log } from "./core.js";
+import { nextOverride } from "./tileable.js";
 import {
   grow, shrink, cycleWidth, resetAllWeights, forceRetile,
   moveWindowInOrder, focusAdjacentWindow, moveWindowToAdjacentScreen,
   minimizeFocused
 } from "./operations.js";
 import { tileWindows } from "./tiler.js";
+import { undock } from "./events.js";
 import { toggleSimulatedFullscreen } from "./fullscreen.js";
 import {
   clearAll as snapshotsClearAll,
@@ -37,13 +39,40 @@ async function toggleFocusedWindowInList() {
   await tileWindows();
   // Toggling exclusion flips the inclusion verdict for the focused window;
   // push the new verdict so overlay-border re-skins immediately. Use
-  // isAppIncluded against the freshly-mutated state.listedApps rather than
+  // inclusionOf against the freshly-mutated state.listedApps rather than
   // inverting the local `listed` variable — the inverse depends on
-  // cfg.exclusionMode and isAppIncluded already encapsulates that.
-  sd.bang.declare('overlay-border.inclusion').emit({
-    winId: f.id,
-    included: isAppIncluded(state.windowsById[f.id] || f)
-  });
+  // cfg.exclusionMode and inclusionOf already encapsulates that.
+  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(state.windowsById[f.id] || f));
+}
+
+// Per-window float toggle (tileable.js nextOverride). A window that
+// starts floating goes back to its pre-tile frame (tiler restoreFloated).
+async function toggleFocusedWindowFloat() {
+  const f = sd.windows.focused.peek();
+  if (!f) return;
+  const w = state.windowsById[f.id] || f;
+  const next = nextOverride(w, tileOpts(w));
+  if (next) state.floatOverrides[f.id] = next;
+  else delete state.floatOverrides[f.id];
+  undock(f.id);
+  state.floatLoose.delete(+f.id);
+  log(`FLOAT-TOGGLE ${f.id} (${w.app}) → ${next || "auto"}`);
+  updateWindowOrder();
+  state.tileReason = "float-toggle";
+  await tileWindows();
+  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
+}
+
+// Focus the next docked float on the focused window's display, newest
+// first; from outside the zone, the newest.
+function cycleZoneFocus() {
+  const f = sd.windows.focused.peek();
+  const displayID = f && displayForWindow(state.windowsById[f.id] || f)?.displayID;
+  const zone = state.floatZone[displayID] || Object.values(state.floatZone).find((z) => z.length) || [];
+  if (zone.length === 0) return;
+  const order = [...zone].reverse();
+  const i = f ? order.indexOf(+f.id) : -1;
+  sd.windows.focus(order[(i + 1) % order.length]);
 }
 
 // Simulated fullscreen — expands the focused window to its display's
@@ -62,6 +91,8 @@ function toggleDebug() {
 // disposers (unused here; stack-lifetime cleanup is automatic via reload).
 export function bind() {
   sd.hotkey.on("toggleExcluded",   toggleFocusedWindowInList);
+  sd.hotkey.on("toggleFloat",      toggleFocusedWindowFloat);
+  sd.hotkey.on("cycleFloatZone",   cycleZoneFocus);
   sd.hotkey.on("movePrev",         () => moveWindowInOrder("backward"));
   sd.hotkey.on("moveNext",         () => moveWindowInOrder("forward"));
   sd.hotkey.on("moveScreenPrev",   () => moveWindowToAdjacentScreen("previous"));

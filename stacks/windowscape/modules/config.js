@@ -18,6 +18,11 @@ export const cfg = {
   // Dragging a tiled window's edge moves the neighbor across it live, every
   // frame, instead of on release.
   liveResize:            true,
+  // Fixed-size panels dock into a column beside the tiles as they open, so no
+  // tile covers them.
+  floatZone:             true,
+  floatZoneMaxFrac:      0.35,
+  floatZoneMinDisplayW:  1800,
   debugLogging:          true,
   widthDefault:          1.0
 };

@@ -1,7 +1,7 @@
 // Bootloader. Wires the modules and starts watchers.
 
 import { sd } from "sd://runtime/api.js";
-import { state, loadList, updateWindowOrder, isAppIncluded } from "./core.js";
+import { state, loadList, loadFixedWidthApps, updateWindowOrder, inclusionOf } from "./core.js";
 import { start as startEvents, startDragBracket, endDragBracket } from "./events.js";
 import { bind as bindKeybinds } from "./keybinds.js";
 import { bind as bindGestures } from "./gestures.js";
@@ -18,6 +18,7 @@ import {
 
 async function init() {
   await loadList();
+  await loadFixedWidthApps();
   startEvents();
   bindKeybinds();
   bindGestures();
@@ -75,7 +76,7 @@ async function init() {
     const fid = sd.windows.focused.peek()?.id;
     if (fid != null) {
       const w = state.windowsById[fid];
-      if (w) sd.bang.declare('overlay-border.inclusion').emit({ winId: fid, included: isAppIncluded(w) });
+      if (w) sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
     }
     console.log("[WindowScape] initialized");
   }, 500);

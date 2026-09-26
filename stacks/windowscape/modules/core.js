@@ -6,6 +6,7 @@ import { cfg } from "./config.js";
 import { displayForFrame } from "./layouts.js";
 import { nextSpaceOrder } from "./order.js";
 import { fsTransitionBlock } from "./oobguard.js";
+import { floatReason } from "./tileable.js";
 
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
@@ -53,6 +54,27 @@ export const state = {
   focusHistory:       [],
   focusHistoryMax:    10,
   listedApps:         Object.create(null), // bundleId/name -> true
+  // winId -> "float" | "tile": the user's per-window toggle (ctrl+cmd+p),
+  // overriding tileable.js's automatic verdict.
+  floatOverrides:     Object.create(null),
+  // bundleId/name -> px: apps seen refusing to grow past a maximum width
+  // (System Settings). Persisted, so their next window tiles pinned at that
+  // width on arrival.
+  fixedWidthApps:     Object.create(null),
+  // displayID -> [winId]: floats docked in the float zone, oldest first
+  // (floatzone.js).
+  floatZone:          Object.create(null),
+  // Docked floats the user dragged out; they stay where they were dropped.
+  floatLoose:         new Set(),
+  // bundleId/name -> true: apps whose no-fullscreen-button windows are
+  // panels (tileable.js isPanelRefusal). Persisted.
+  panelApps:          Object.create(null),
+  // winIds seen titlebar-collapsed (h <= cfg.collapsedWindowHeight): these
+  // tile on the collapsed rail and never count as fixed-size (tileable.js).
+  everCollapsed:      new Set(),
+  // winId -> the frame the app gave the window before it was first tiled;
+  // a window that later floats goes back to it.
+  preTileFrame:       Object.create(null),
   // Live windows index, rebuilt from sd.windows.all on each push.
   // win = { id, pid, app, title, frame, screen, space }
   windowsById:        Object.create(null),
@@ -235,6 +257,53 @@ export function tileFrameForDisplay(d) {
   return { ...d.visibleFrame };
 }
 
+function appKeyOfWindow(w) {
+  return w.bundleId || w.app || String(w.id);
+}
+
+export function tileOpts(w) {
+  return {
+    override: state.floatOverrides[w.id],
+    panelApp: !!state.panelApps[appKeyOfWindow(w)],
+    collapsible: state.everCollapsed.has(+w.id) ||
+      (!!w.frame && w.frame.h <= cfg.collapsedWindowHeight),
+  };
+}
+
+export function fixedWidthPxOf(w) {
+  return state.fixedWidthApps[appKeyOfWindow(w)];
+}
+
+export function isFloating(w) {
+  return !!w && isAppIncluded(w) && floatReason(w, tileOpts(w)) != null;
+}
+
+// Included by the app list and not floating: the windows windowscape moves.
+export function isManaged(w) {
+  return isAppIncluded(w) && floatReason(w, tileOpts(w)) == null;
+}
+
+// overlay-border.inclusion payload: tiled (included), excluded app, or
+// floating — the border paints each differently.
+export function inclusionOf(w) {
+  return { winId: w.id, included: isManaged(w), floating: isFloating(w) };
+}
+
+export async function learnPanelApp(w) {
+  const k = appKeyOfWindow(w);
+  if (state.panelApps[k]) return;
+  state.panelApps[k] = true;
+  await sd.settings.set("panelApps", state.panelApps);
+}
+
+export async function learnFixedWidth(w, px) {
+  const k = appKeyOfWindow(w);
+  if (state.fixedWidthApps[k] === px) return;
+  // Set before the await: the caller's retile reads it immediately.
+  state.fixedWidthApps[k] = px;
+  await sd.settings.set("fixedWidthApps", state.fixedWidthApps);
+}
+
 export function isAppIncluded(win) {
   if (!win) return false;
   // Snapshotted/minimized windows aren't tiled.
@@ -291,6 +360,20 @@ export function migrateWindowId(oldId, newId, stash) {
       state.windowSpacesCache[newId] = stash.spaces;
     }
   }
+  if (state.floatOverrides[oldId] && !state.floatOverrides[newId]) {
+    state.floatOverrides[newId] = state.floatOverrides[oldId];
+  }
+  if (state.preTileFrame[oldId] && !state.preTileFrame[newId]) {
+    state.preTileFrame[newId] = state.preTileFrame[oldId];
+  }
+  for (const k in state.floatZone) {
+    const arr = state.floatZone[k];
+    const i = arr.indexOf(oldId);
+    if (i >= 0) arr[i] = newId;
+  }
+  if (state.floatLoose.delete(oldId)) state.floatLoose.add(newId);
+  delete state.floatOverrides[oldId];
+  delete state.preTileFrame[oldId];
   delete state.windowWeights[oldId];
   delete state.pinnedSizes[oldId];
   delete state.lastTileTarget[oldId];
@@ -327,7 +410,7 @@ export function updateWindowOrder() {
     for (const id in state.windowsById) {
       const w = state.windowsById[id];
       if (!w) { if (isRecovery) evt(`UWO-DROP id=${id} reason=no-w`); continue; }
-      if (!isAppIncluded(w)) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=excluded`); continue; }
+      if (!isManaged(w)) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=excluded`); continue; }
       if (state.minimizedIds && state.minimizedIds.has(+w.id)) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=minimizedIds`); continue; }
       const wd = displayForWindow(w);
       if (!wd) { if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=no-display frame=${JSON.stringify(w.frame)}`); continue; }
@@ -367,6 +450,17 @@ export async function loadList() {
     // Default deny list — exclude stackd itself + common dialogs.
     state.listedApps = { "com.apple.loginwindow": true };
     await sd.settings.set("listedApps", state.listedApps);
+  }
+}
+
+export async function loadFixedWidthApps() {
+  const panels = await sd.settings.get("panelApps");
+  if (panels && typeof panels === "object") state.panelApps = { ...panels };
+  const saved = await sd.settings.get("fixedWidthApps");
+  if (saved && typeof saved === "object") {
+    // Entries learned as a bare flag carry no width; relearn them.
+    state.fixedWidthApps = Object.fromEntries(
+      Object.entries(saved).filter(([, px]) => typeof px === "number" && px > 0));
   }
 }
 

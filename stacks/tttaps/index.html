@@ -33,7 +33,7 @@
     dragCommitThreshold:     0.08,
     // Vertical steps commit sooner for step-enabled clusters: resize wants
     // many small increments (smooth growth), reorder wants deliberate slots.
-    dragStepCommitThresholdV: 0.035,
+    dragStepCommitThresholdV: 0.012,
     directionFlipMultiplier: 1.5,
     clusterCap:              5,
     debugLog:                false,
@@ -289,7 +289,13 @@
         const lockH = dragAxisLock === "horizontal";
         const lockV = dragAxisLock === "vertical";
 
-        if (!dragArmed) {
+        if (hasStep && lockV) {
+          // Vertical steps after the first: no re-arm travel, so steps land
+          // evenly every commit-distance. The sign picks the direction each
+          // frame, so reversing mid-drag steps back without a dead zone.
+          dragArmed     = agreeY;
+          dragDirection = avgDy > 0 ? "up" : "down";
+        } else if (!dragArmed) {
           if (!lockV && absX >= CFG.dragArmThreshold
               && (lockH || absX > absY) && agreeX) {
             dragArmed     = true;

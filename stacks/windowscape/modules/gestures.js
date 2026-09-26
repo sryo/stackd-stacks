@@ -7,8 +7,8 @@
 // consistently regardless of slot; left/right steps reorder. The space comes
 // from ONE neighbor, fixed at bracket-open (the next tile, or the previous at
 // the row's end). The preview outline renders the tiler's PREDICTED landing
-// frame, so lifting commits with no jump: on dragEnd the predicted frame
-// commits with one setFrame and the same pairwise pin the preview was built on.
+// frame. On dragEnd the same pairwise pin the preview was built on commits,
+// and the retile animates the row onto the previewed frames.
 
 import { sd } from "sd://runtime/api.js";
 import { state, log, displayForWindow, appMinFor } from "./core.js";
@@ -20,10 +20,10 @@ import { cancelAnimation } from "./animation.js";
 import { predictResizeFrame, PIN_MIN_PX } from "./layouts.js";
 import { getWindowWeight, getCollapsedWindows, tileWindows } from "./tiler.js";
 
-// Resize feel: vertical steps commit every 0.035 of trackpad travel (see
-// tttaps CFG.dragStepCommitThresholdV) at 40px each — finer than the hotkeys'
-// 100px GROW_STEP_PX so a drag reads as continuous growth.
-const RESIZE_STEP_PX = 40;
+// Resize feel: vertical steps commit every 0.012 of trackpad travel (see
+// tttaps CFG.dragStepCommitThresholdV) at 12px each — ~1000px per unit of
+// travel, fine-grained enough that a drag reads as continuous growth.
+const RESIZE_STEP_PX = 12;
 const RESIZE_MIN_PX  = 100; // smallest the focused window may shrink to via gesture
 
 // Gesture-resize bracket. The resize drag rides the SAME bracket as a mouse
@@ -203,10 +203,14 @@ export function bind() {
     // reinterpreted as a cross-display drop and defer the retile 100ms (a gap).
     clearDragBracket();
     if (dMajor >= 1 && g.neighborId != null && g.predicted) {
-      sd.windows.setFrame(g.winId, { ...g.predicted });
-      if (state.windowsById[g.winId]) state.windowsById[g.winId].frame = { ...g.predicted };
-      pinFromActualSize(g.winId, { edge: g.edge, neighborId: g.neighborId });
-      state.snapNextTile = true;
+      // Pin from the predicted size instead of writing it first: the retile
+      // then animates the window and its neighbors from where they stand to
+      // the frames the preview showed.
+      pinFromActualSize(g.winId, {
+        edge: g.edge, neighborId: g.neighborId,
+        actualSize: major(g.predicted), aBase: g.aBase, bBase: g.bBase,
+        minDelta: 1
+      });
       log(`GESTURE commit id=${g.winId} ${g.horizontal ? "w" : "h"}=${Math.round(major(g.predicted))} edge=${g.edge}`);
     } else {
       log("GESTURE bracket-close (no net change)");

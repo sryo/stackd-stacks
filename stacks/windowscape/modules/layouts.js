@@ -172,7 +172,9 @@ export function specFromState({ pins, refusalSet, weightOf, lastId, appMinOf }) 
 // Predict the frame the tiler will assign when a window is resized to
 // `requestedSize` against `neighborId`, WITHOUT mutating anything. Mirrors the
 // commit path (pairwise A/B basis override → resolveFlex → tileWeighted) so the
-// gesture preview equals the committed frame. Pure. Returns { frame, pins, bId }.
+// gesture preview equals the committed frame. Pure. Returns { frame, frames,
+// pins, bId } — `frames` is the whole row ([{ winId, frame }], tileWeighted's
+// shape), for callers that move the neighbors along with the active window.
 export function predictResizeFrame({
   screenFrame, horizontal, nonCollapsed, collapsed,
   weightOf, sizeOf, pins, refusalSet, appMinOf,
@@ -188,7 +190,7 @@ export function predictResizeFrame({
   // Solo / neighborless → no pairwise transfer; preview the plain tiled frame.
   if (nonCollapsed.indexOf(A) < 0 || nonCollapsed.length < 2 || neighborId == null) {
     const frames = framesFor(baseSpec);
-    return { frame: frameOfA(frames), pins: pinsOf(frames), bId: null };
+    return { frame: frameOfA(frames), frames, pins: pinsOf(frames), bId: null };
   }
 
   const B = +neighborId;
@@ -201,7 +203,17 @@ export function predictResizeFrame({
     return baseSpec(id);
   };
   const frames = framesFor(specOf);
-  return { frame: frameOfA(frames), pins: pinsOf(frames), bId: B };
+  return { frame: frameOfA(frames), frames, pins: pinsOf(frames), bId: B };
+}
+
+// Pairwise transfer for a user resize: A keeps `actualSize` on the major
+// axis, B gives or takes exactly the delta against A's baseline, so A+B's
+// total (and every other tile's share) is unchanged. Both floored at
+// `floor`; `bWant` is B's unfloored size, for callers that log the clamp.
+export function pairwisePins({ aBase, bBase, actualSize, floor = PIN_MIN_PX }) {
+  const delta = actualSize - aBase;
+  const bWant = Math.floor(bBase - delta);
+  return { a: Math.max(floor, Math.floor(actualSize)), b: Math.max(floor, bWant), bWant, delta };
 }
 
 // Display a window belongs to, from its frame: the display containing its

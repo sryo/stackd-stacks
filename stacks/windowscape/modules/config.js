@@ -15,6 +15,9 @@ export const cfg = {
   animationEasing:       "spring",
   // Seconds; applies to the curve easings only.
   animationDuration:     0.15,
+  // Dragging a tiled window's edge moves the neighbor across it live, every
+  // frame, instead of on release.
+  liveResize:            true,
   debugLogging:          true,
   widthDefault:          1.0
 };

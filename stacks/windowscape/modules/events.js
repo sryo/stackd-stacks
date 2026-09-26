@@ -6,12 +6,13 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
   state, log, evt, updateWindowOrder, isAppIncluded, displayForWindow,
-  migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor
+  migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor, appMinFor
 } from "./core.js";
-import { tileWindows, pruneStaleWeights } from "./tiler.js";
-import { PIN_MIN_PX, displaySetChanged } from "./layouts.js";
+import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight } from "./tiler.js";
+import { PIN_MIN_PX, displaySetChanged, pairwisePins } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
-import { isAnimating } from "./animation.js";
+import { isAnimating, cancelAnimation } from "./animation.js";
+import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "./liveresize.js";
 import { oobPinBlockReason, fullscreenExits, idsCachedOnSpaces, FS_EXIT_GRACE_MS } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 import { returnedOnscreen } from "./onscreen.js";
@@ -643,6 +644,14 @@ export function start() {
     // close — see endDragBracket below. The LATEST mid-bracket bang wins as
     // the candidate (drag-train's final position is what matters).
     if (state.dragInFlight) {
+      // During a live edge drag only the dragged window can be the
+      // candidate: a neighbor's bang (an app refusing a live write) must not
+      // turn the release into a resize or reorder of the neighbor.
+      const lr = state.liveResize;
+      if (lr && +detail.id !== lr.id) {
+        log(`DRAG-MID id=${detail.id} (${app}) ignored — live resize of ${lr.id}`);
+        return;
+      }
       state.dragCandidateId = +detail.id;
       log(`DRAG-MID id=${detail.id} (${app}) bracket-open, recording candidate`);
       return;
@@ -666,6 +675,12 @@ export function start() {
   };
   window.onBang_sd_window_moved   = (detail) => handleDragBang(detail, "moved");
   window.onBang_sd_window_resized = (detail) => handleDragBang(detail, "resized");
+
+  // Live neighbor resize (see "Live edge drag" below). Guarded so the stack
+  // still loads on a daemon without the channel.
+  if (sd.windows.resizing && sd.windows.resizing.subscribe) {
+    sd.windows.resizing.subscribe(onResizing);
+  }
 }
 
 // Titlebar double-click (macOS zoom) detection. Zoom manifests as a plain
@@ -767,7 +782,14 @@ function armZoomSnapTimer(id, entry) {
 // bangs; at close, we run ONE decision based on the final frame.
 let dragSafetyTimer = null;
 let dragCloseTimer = null;
+// Frames of every tiled window at the bracket's mouse-down — a live edge
+// drag's fallback baseline for a tile with no pin or tile target.
+let dragDownFrames = Object.create(null);
+const DRAG_SAFETY_MS = 5000;
+// Bumped per bracket, so an async commit can tell its bracket from a newer one.
+let bracketSeq = 0;
 export function startDragBracket(payload) {
+  bracketSeq++;
   // Reset bracket state. If a previous bracket is still pending close (e.g.
   // user click-drag-click in rapid succession), cancel the pending close so
   // we don't run the prior decision on the new mouse-down.
@@ -775,21 +797,37 @@ export function startDragBracket(payload) {
   if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
   state.dragInFlight = true;
   state.dragCandidateId = null;
+  dragDownFrames = Object.create(null);
+  for (const displayID in state.lastTiledByDisplay) {
+    for (const id of state.lastTiledByDisplay[displayID] || []) {
+      const f = state.windowsById[+id]?.frame;
+      if (f) dragDownFrames[+id] = { ...f };
+    }
+  }
   trackTitlebarDoubleClick(payload);
-  // Safety: drop the gate after 5s of no mouseUp. Shouldn't happen (every
-  // mouseDown gets a mouseUp), but if the eventtap drops one we don't want
-  // tile passes blocked forever.
+  armDragSafety();
+}
+
+// Safety: drop the gate after 5s of no mouseUp. Shouldn't happen (every
+// mouseDown gets a mouseUp), but if the eventtap drops one we don't want
+// tile passes blocked forever. A live edge drag still receiving frames is
+// a user holding the edge, not a lost mouse-up.
+function armDragSafety() {
   dragSafetyTimer = setTimeout(() => {
+    dragSafetyTimer = null;
+    const lr = state.liveResize;
+    if (lr && Date.now() - lr.lastEventAt < DRAG_SAFETY_MS) { armDragSafety(); return; }
+    if (lr && isLive(lr)) { finishLiveResize("safety"); return; }
+    state.liveResize = null;
     log("DRAG-BRACKET safety timeout — clearing dragInFlight");
     state.dragInFlight = false;
     state.dragCandidateId = null;
-    dragSafetyTimer = null;
     if (state.tileDeferred) {
       updateWindowOrder();
       state.tileReason = "bracket-safety-deferred";
       tileWindows();
     }
-  }, 5000);
+  }, DRAG_SAFETY_MS);
 }
 
 // Tear the drag bracket down synchronously without processing a candidate.
@@ -822,6 +860,12 @@ export function endDragBracket(payload) {
   // mid-drag one.
   dragCloseTimer = setTimeout(async () => {
     dragCloseTimer = null;
+    // A live edge drag commits through its own end (normally the daemon's
+    // `ended`, which lands inside this grace; this is the fallback when it
+    // doesn't). A cross-axis drag never went live: today's path below.
+    const lr = state.liveResize;
+    if (lr && isLive(lr)) { await finishLiveResize("bracket-close"); return; }
+    state.liveResize = null;
     const movedId = state.dragCandidateId;
     state.dragCandidateId = null;
     state.dragInFlight = false;
@@ -895,6 +939,180 @@ export function endDragBracket(payload) {
   }, 100);
 }
 
+// ── Live edge drag ───────────────────────────────────────────────────────
+// sd.window.resizing follows a user drag of a window's edge frame by frame.
+// While it runs, the neighbor across the moved edge (and any tile the layout
+// shifts) follows live; the dragged window A is never written. The row math
+// is pure (liveresize.js).
+//
+// Which signal is authoritative: the mouse bracket still owns the tile gate
+// (dragInFlight, open from mouse-down to mouse-up) and every non-resize
+// decision (reorder, cross-display drop, zoom). The resizing phases own the
+// resize: `began` locks A and snapshots the row, `ended` commits and runs
+// the settle pass. The bracket close defers to that commit, and runs it
+// itself only if `ended` never came. A drag that never moves a tiling-axis
+// edge (cross-axis) never goes live and takes the bracket's path.
+//
+// state.liveResize = { id, displayID, screenFrame, horizontal,
+//   nonCollapsed, collapsed, baselines, edge, neighborId, minSize, written,
+//   changed, writes, clamped, lastFrame, lastEventAt }
+
+function isLive(lr) {
+  return lr.edge != null && lr.neighborId != null;
+}
+
+function onResizing(detail) {
+  if (!detail || detail.id == null) return;
+  const id = +detail.id;
+  if (detail.phase === "began") { liveBegan(id, detail); return; }
+  const lr = state.liveResize;
+  if (!lr || lr.id !== id) return;
+  if (detail.phase === "changed") {
+    lr.changed++;
+    liveApply(lr, detail);
+  } else if (detail.phase === "ended") {
+    if (isLive(lr)) finishLiveResize("ended", detail.frame);
+    else state.liveResize = null; // cross-axis: the bracket close decides
+  }
+}
+
+function liveBegan(id, detail) {
+  if (!cfg.liveResize) return;
+  if (state.liveResize) {
+    evt(`LIVE-RESIZE superseded id=${state.liveResize.id} by id=${id}`);
+    state.liveResize = null;
+  }
+  if (state.fullscreenState && state.fullscreenState.active) return;
+  const displayID = sourceDisplayIdFor(id);
+  if (displayID == null) return; // not a tiled window
+  const d = state.displays.find((x) => +x.displayID === +displayID);
+  const screenFrame = state.lastTileAreaByDisplay[displayID];
+  if (!d || !screenFrame || fsTransitionBlockFor(d)) return;
+  const horizontal = screenFrame.w > screenFrame.h;
+  const tiled = (state.lastTiledByDisplay[displayID] || []).map(Number);
+  const collapsed = getCollapsedWindows(tiled).map(Number);
+  if (collapsed.includes(id)) return;
+  const nonCollapsed = tiled.filter((x) => !collapsed.includes(x));
+  if (nonCollapsed.length < 2) return;
+
+  // Drag-start baselines. Tile passes are deferred while the bracket is
+  // open and live writes never touch pins or tile targets, so these stay
+  // the drag-start sizes even when the daemon's echo-filtered began lands
+  // a few steps into the drag.
+  const targets = Object.create(null);
+  for (const x of nonCollapsed) {
+    const t = state.lastTileTarget[x]?.frame;
+    if (t) targets[x] = t;
+  }
+  const baselines = dragBaselines({
+    ids: nonCollapsed, pins: state.pinnedSizes, targets, snapshot: dragDownFrames,
+    horizontal, activeId: id, startFrame: detail.startFrame,
+  });
+  if (nonCollapsed.some((x) => baselines[x] == null)) return;
+
+  if (!state.dragInFlight) startDragBracket();
+  state.dragCandidateId = id;
+  // A tile animation still converging would fight the live writes.
+  for (const x of nonCollapsed) cancelAnimation(x);
+
+  const lr = {
+    id, displayID, screenFrame, horizontal, nonCollapsed, collapsed, baselines,
+    edge: null, neighborId: null,
+    minSize: Object.create(null),
+    written: { ...targets },
+    changed: 0, writes: 0, clamped: false,
+    lastFrame: detail.frame, lastEventAt: Date.now(),
+  };
+  state.liveResize = lr;
+  if (sd.windows.minSize) {
+    for (const x of nonCollapsed) {
+      if (x === id) continue;
+      sd.windows.minSize(x).then((m) => {
+        const v = m && (horizontal ? m.w : m.h);
+        if (v > 0) lr.minSize[x] = v;
+      }, () => {});
+    }
+  }
+  const startMajor = detail.startFrame && (horizontal ? detail.startFrame.w : detail.startFrame.h);
+  evt(`LIVE-RESIZE began id=${id} (${state.windowsById[id]?.app?.slice(0, 12)}) row=${JSON.stringify(nonCollapsed)} base=${baselines[id]} startFrame=${startMajor ?? "?"}`);
+  liveApply(lr, detail);
+}
+
+// One resizing frame: lock the edge on the first tiling-axis movement, then
+// write the neighbors whose frame changed — one write set per frame.
+function liveApply(lr, detail) {
+  lr.lastEventAt = Date.now();
+  const frame = detail.frame;
+  if (!frame) return;
+  lr.lastFrame = frame;
+  if (state.windowsById[lr.id]) state.windowsById[lr.id].frame = frame;
+  if (lr.edge == null) {
+    const edge = liveEdgeOf(detail.edges, lr.horizontal);
+    if (!edge) return; // cross-axis so far: snap on release, as before
+    lr.edge = edge;
+    lr.neighborId = neighborFor(lr.nonCollapsed, lr.id, edge);
+    log(`LIVE-RESIZE edge id=${lr.id} edge=${edge} neighbor=${lr.neighborId}`);
+  }
+  if (!isLive(lr)) return; // the row's outer edge: no neighbor to follow
+  const r = liveRowFor(lr, frame);
+  lr.clamped = r.clamped;
+  const writes = changedWrites(r.frames, lr.written);
+  for (const t of writes) {
+    lr.written[t.winId] = t.frame;
+    sd.windows.setFrame(t.winId, t.frame, { live: true }).catch(() => null);
+  }
+  lr.writes += writes.length;
+}
+
+function liveRowFor(lr, frame) {
+  const sizeOf = (id) => {
+    const f = state.windowsById[id]?.frame;
+    return f ? { w: f.w, h: f.h } : null;
+  };
+  const appMinOf = (id) => appMinFor(id, lr.horizontal);
+  return liveRow({
+    screenFrame: lr.screenFrame, horizontal: lr.horizontal,
+    nonCollapsed: lr.nonCollapsed, collapsed: lr.collapsed,
+    weightOf: getWindowWeight, sizeOf,
+    pins: state.pinnedSizes, refusalSet: state.refusalPins,
+    appMinOf, minOf: (id) => Math.max(appMinOf(id), lr.minSize[id] || 0),
+    activeId: lr.id, edge: lr.edge, neighborId: lr.neighborId,
+    frame, baselines: lr.baselines,
+  });
+}
+
+// Commit a live drag: pin A and its neighbor against the drag-start
+// baselines (the live writes left pins and tile targets untouched, so
+// nothing is subtracted twice), then one snap settle pass. When the neighbor
+// hit its floor, A commits at the most the neighbor allowed, so the settle
+// pulls A back off the overlap.
+async function finishLiveResize(via, endFrame) {
+  const lr = state.liveResize;
+  if (!lr) return;
+  state.liveResize = null;
+  const seq = bracketSeq;
+  const frame = endFrame || await sd.windows.frame(lr.id).catch(() => null) || lr.lastFrame;
+  if (frame && state.windowsById[lr.id]) state.windowsById[lr.id].frame = frame;
+  let aSize = null;
+  if (frame) {
+    const r = liveRowFor(lr, frame);
+    aSize = r.aSize;
+    lr.clamped = r.clamped;
+    pinFromActualSize(lr.id, {
+      edge: lr.edge, neighborId: lr.neighborId,
+      aBase: lr.baselines[lr.id], bBase: lr.baselines[lr.neighborId],
+      actualSize: aSize, minDelta: 1,
+    });
+  }
+  evt(`LIVE-RESIZE ended id=${lr.id} via=${via} edge=${lr.edge} neighbor=${lr.neighborId} changed=${lr.changed} writes=${lr.writes} clamped=${lr.clamped} size=${lr.baselines[lr.id]}→${aSize ?? "?"}`);
+  // A new mouse-down may have opened another bracket while the frame read
+  // was pending: leave it open; the settle below then defers to its close.
+  if (seq === bracketSeq) clearDragBracket();
+  state.tileReason = `live-resize(${lr.id})`;
+  state.snapNextTile = true; // resize containment settles instantly
+  await tileWindows();
+}
+
 // User resize → edge-aware PAIRWISE transfer: pin BOTH sides of the
 // dragged edge. The resized window A keeps its actual major-axis size; the
 // neighbor across the dragged edge (B) gives/takes exactly the delta. A+B's
@@ -907,6 +1125,11 @@ export function endDragBracket(payload) {
 // display order; otherwise the TRAILING edge → next tile. A missing
 // neighbor (A at the row end) falls back to the other side; a solo tile
 // stays unpinned.
+//
+// A live edge drag passes its drag-start baselines (`aBase`, `bBase`), the
+// size A commits at (`actualSize`, capped where the neighbor hit its floor)
+// and a `minDelta` of 1: its frames are a known user drag, so the 20px echo
+// margin doesn't apply.
 export function pinFromActualSize(movedId, opts) {
   const w = state.windowsById[movedId];
   if (!w || !w.frame) return;
@@ -925,12 +1148,12 @@ export function pinFromActualSize(movedId, opts) {
   const horizontal = d.frame.w > d.frame.h;
   const tgt = state.lastTileTarget?.[+movedId]?.frame;
   if (!tgt) return;
-  const actualSize = horizontal ? w.frame.w : w.frame.h;
+  const actualSize = opts?.actualSize ?? (horizontal ? w.frame.w : w.frame.h);
   // A's baseline: its pin when already pinned (the pin IS its target),
   // else its last tile target.
-  const aBase = state.pinnedSizes[+movedId] ?? (horizontal ? tgt.w : tgt.h);
+  const aBase = opts?.aBase ?? state.pinnedSizes[+movedId] ?? (horizontal ? tgt.w : tgt.h);
   const delta = actualSize - aBase;
-  if (Math.abs(delta) < 20) return;
+  if (Math.abs(delta) < (opts?.minDelta ?? 20)) return;
 
   // Which edge moved? A gesture commit passes the fence it previewed against;
   // otherwise infer it from major-axis origin drift (mouse / AX resize).
@@ -957,7 +1180,8 @@ export function pinFromActualSize(movedId, opts) {
   // B's baseline: its pin if pinned, else its last tile target, else live frame.
   const bTgt = state.lastTileTarget?.[+bId]?.frame;
   const bLive = state.windowsById[bId]?.frame;
-  const bBase = state.pinnedSizes[+bId]
+  const bBase = opts?.bBase
+    ?? state.pinnedSizes[+bId]
     ?? (bTgt ? (horizontal ? bTgt.w : bTgt.h) : null)
     ?? (bLive ? (horizontal ? bLive.w : bLive.h) : null);
   if (bBase == null) {
@@ -965,12 +1189,12 @@ export function pinFromActualSize(movedId, opts) {
     if (state.onLayoutChange) state.onLayoutChange();
     return;
   }
-  const bWant = Math.floor(bBase - delta);
+  const { b, bWant } = pairwisePins({ aBase, bBase, actualSize });
   if (bWant < PIN_MIN_PX) {
     // Clamp; do NOT push the overflow to a third tile — accepted imperfection.
     log(`PIN-PAIR clamp neighbor ${bId} ${bWant}px → ${PIN_MIN_PX}px (overflow not redistributed)`);
   }
-  state.pinnedSizes[+bId] = Math.max(PIN_MIN_PX, bWant);
+  state.pinnedSizes[+bId] = b;
   // Only a transfer that GROWS B supersedes a refusal-min provenance; shrinking
   // B toward its app minimum keeps the flag so PIN-CLAMP holds B fixed.
   if (bWant >= bBase) state.refusalPins.delete(+bId);

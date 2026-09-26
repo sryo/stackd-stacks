@@ -108,6 +108,10 @@ export const state = {
   // this with the latest id so the trailing bang wins; the bracket's close
   // handler reads it to decide resize-redistribute vs reorder.
   dragCandidateId:    null,
+  // The live edge drag in progress (events.js "Live edge drag"): the dragged
+  // window, its row frozen at drag start, and the neighbor frames written so
+  // far. Null when no drag is live.
+  liveResize:         null,
   // One-shot animation suppression for the NEXT tileWindows() call. The
   // resize-containment paths (out-of-bracket pin, bracket-close pin, the
   // post-animation refusal sweep) set this so their corrective pass SNAPS

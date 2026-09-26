@@ -90,7 +90,7 @@ function scheduleGraceRepass(deadline) {
   }, delay);
 }
 
-async function tileWindowsInternal(snap) {
+async function tileWindowsInternal(snap, reason) {
   let graceDeadline = Infinity;
   updateWindowOrder();
   for (const d of state.displays) {
@@ -164,7 +164,6 @@ async function tileWindowsInternal(snap) {
     const added = [...cur].filter(id => !prev.has(id));
     const removed = [...prev].filter(id => !cur.has(id));
     if (added.length || removed.length) {
-      const reason = state.tileReason || "?";
       for (const id of added) {
         const a = state.windowsById[id]?.app || "?";
         evt(`TILE-IN  d${d.displayID} ${id} (${a.slice(0,18)})  via=${reason}`);
@@ -264,7 +263,7 @@ async function tileWindowsInternal(snap) {
       appMinOf: (id) => appMinFor(id, horizontal),
     });
     const targets = tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, sizeOf, specOf);
-    log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
+    log(`TILE n=${screenWindows.length} display=${d.displayID} ${horizontal ? "H" : "V"} via=${reason} weights=${JSON.stringify(screenWindows.map(id => +(state.windowWeights[id] ?? 1).toFixed(2)))} pins=${JSON.stringify(screenWindows.filter(id => state.pinnedSizes[id] != null).map(id => ({id, px: state.pinnedSizes[id]})))} targets=${JSON.stringify(targets.map(t => ({id: t.winId, app: state.windowsById[t.winId]?.app?.slice(0,10), x: t.frame.x, w: t.frame.w})))}`);
 
     // Bumped on snap passes too, which retires any sweep still pending.
     const sweepGen = (sweepGenByDisplay[d.displayID] = (sweepGenByDisplay[d.displayID] || 0) + 1);
@@ -542,6 +541,10 @@ export async function tileWindows() {
     return;
   }
   state.tileDeferred = false;
+  // Consumed per pass, so a caller that sets no reason logs "unlabeled"
+  // instead of inheriting the previous pass's.
+  const reason = state.tileReason || "unlabeled";
+  state.tileReason = "";
   const snap = state.snapNextTile === true;
   state.snapNextTile = false;
   // A snap pass skips windows already within 5px of their target; one still
@@ -550,7 +553,7 @@ export async function tileWindows() {
   state.tilingCount = 1;
   if (snap) await cancelAllAnimations();
   try {
-    await tileWindowsInternal(snap);
+    await tileWindowsInternal(snap, reason);
   } catch (e) {
     const detail = JSON.stringify({
       message: e?.message,

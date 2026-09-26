@@ -6,14 +6,15 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
   state, log, evt, updateWindowOrder, isAppIncluded, displayForWindow,
-  migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay
+  migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor
 } from "./core.js";
 import { tileWindows, pruneStaleWeights } from "./tiler.js";
 import { PIN_MIN_PX, displaySetChanged } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating } from "./animation.js";
-import { oobPinBlockReason } from "./oobguard.js";
+import { oobPinBlockReason, fullscreenExits, idsCachedOnSpaces, FS_EXIT_GRACE_MS } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
+import { returnedOnscreen } from "./onscreen.js";
 
 // Push an inclusion verdict to the overlay-border stack so it can paint the
 // focused window's border in the included vs excluded palette. The bang is
@@ -66,6 +67,12 @@ let lastKnownFrames = Object.create(null); // id -> { app, frame }
 const destroyedRecently = new Map(); // id -> { ts, app, frame, weight, pin, target, spaces }
 const DESTROYED_GRACE_MS = 2000;
 
+// Drop and re-fetch cached space lists that may have gone stale.
+async function requerySpaces(ids) {
+  for (const id of ids) delete state.windowSpacesCache[id];
+  await refreshSpacesCache(ids);
+}
+
 // Refresh windowSpaces cache for ids we haven't seen before, so the tiler
 // has a current spaces list when it next runs.
 async function refreshSpacesCache(ids) {
@@ -116,6 +123,18 @@ function debouncedHandleWindowEvent() {
     eventDebounceTimer = null;
     handleWindowEvent();
   }, cfg.eventDebounceSeconds * 1000);
+}
+
+// One retile shortly after windows come back onscreen, so a burst of pushes
+// during a space switch lands as a single pass.
+let onscreenReturnTimer = null;
+function scheduleOnscreenReturnTile(ids) {
+  if (onscreenReturnTimer) clearTimeout(onscreenReturnTimer);
+  onscreenReturnTimer = setTimeout(() => {
+    onscreenReturnTimer = null;
+    state.tileReason = `onscreen-return(${ids.join(",")})`;
+    tileWindows();
+  }, 200);
 }
 
 async function handleWindowEvent() {
@@ -323,9 +342,11 @@ export function start() {
         delete state.windowSpacesCache[w.id];
       }
     }
+    const returned = returnedOnscreen(state.windowsById, list, state.offscreenSince);
     state.windowsById = next;
     state.windowsPushAt = Date.now();
     if (confirmedNew) debouncedHandleWindowEvent();
+    if (returned.length) scheduleOnscreenReturnTile(returned);
     // Prune minimizedIds of IDs that are gone — keeps the set bounded
     // and lets a re-created window (same app, new CGWindowID) get a
     // fresh tile slot.
@@ -357,19 +378,18 @@ export function start() {
     emitInclusionBang(state.windowsById[id] || w);
   });
 
-  sd.spaces.all.subscribe((info) => {
+  sd.spaces.all.subscribe(async (info) => {
     if (!info) return;
     // Record fullscreen-space exits before swapping the snapshot: the OOB
     // resize guard distrusts resize reads for a grace window after the
     // flip, because the exit animation's resized bangs debounce-fire
     // AFTER the space info has already returned to normal (oobguard.js).
-    for (const uuid in state.spacesByDisplay) {
-      const prev = state.spacesByDisplay[uuid];
-      const next = info[uuid];
-      if (prev?.isFullscreen && next && !next.isFullscreen) {
-        state.fsExitAt[uuid] = Date.now();
-      }
-    }
+    const exits = fullscreenExits(state.spacesByDisplay, info);
+    for (const { uuid } of exits) state.fsExitAt[uuid] = Date.now();
+    // Windows cached on the fullscreen space just left may have come back to
+    // the desktop; re-query them now and once more after the exit animation.
+    const exitedSpaces = exits.map((e) => e.space);
+    const staleIds = idsCachedOnSpaces(state.windowSpacesCache, exitedSpaces);
     const topologyChanged = displaySetChanged(info, state.displays);
     state.spacesByDisplay = info;
     // A display was added or removed: this push lands before the new display
@@ -377,6 +397,20 @@ export function start() {
     // would lay out stale state (and pull windows back onto the wrong
     // display). The sd.display.all settle retiles once both are current.
     if (topologyChanged) return;
+    if (staleIds.length) {
+      await requerySpaces(staleIds);
+      setTimeout(async () => {
+        const still = idsCachedOnSpaces(state.windowSpacesCache, exitedSpaces);
+        if (!still.length) return;
+        await requerySpaces(still);
+        // Windows of an app that is still fullscreen stay put; only retile
+        // when one of them has actually left the exited space.
+        if (idsCachedOnSpaces(state.windowSpacesCache, exitedSpaces).length === still.length) return;
+        updateWindowOrder();
+        state.tileReason = "fs-exit-requery";
+        tileWindows();
+      }, FS_EXIT_GRACE_MS);
+    }
     // Active space changed — rebuild order + retile. Re-render the snapshot
     // strip too so tiles follow their origin desktop (show/hide per Space)
     // and the tiler reserves strip space only on the active desktop.
@@ -845,6 +879,10 @@ export function endDragBracket(payload) {
       const dW = Math.abs(liveFrame.w - tgt.w);
       const dH = Math.abs(liveFrame.h - tgt.h);
       if (dW > 20 || dH > 20) {
+        // A click that exits fullscreen (the green button) opens and closes a
+        // bracket around a screen-sized frame; that is no user resize.
+        const blocked = fsTransitionBlockFor(displayForWindow(state.windowsById[movedId]));
+        if (blocked) { evt(`DRAG-CLOSE-FS-BAIL id=${movedId} why=${blocked}`); return; }
         log(`DRAG-CLOSE id=${movedId} resize dW=${Math.round(dW)} dH=${Math.round(dH)}`);
         pinFromActualSize(movedId);
         state.snapNextTile = true; // resize containment settles instantly

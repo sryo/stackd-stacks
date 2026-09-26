@@ -6,7 +6,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin } from "./core.js";
+import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor } from "./core.js";
 import { tileWeighted, specFromState, renormalizedPins, innerSpanFor } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals } from "./motion.js";
@@ -494,6 +494,11 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
     if (live) entries.push({ id, target, live });
   }
   if (!current() || state.dragInFlight) return;
+  // The pass settled, but its display may have entered fullscreen since: the
+  // live frames are then screen-sized, and pinning (and learning an app
+  // minimum from) them deforms every tile after the exit.
+  const blocked = fsTransitionBlockFor(state.displays.find((d) => d.displayID === displayID));
+  if (blocked) { evt(`ANIM-PASS2-FS-BAIL d${displayID} why=${blocked}`); return; }
   const refused = pickRefusals(entries, horizontal, REFUSAL_PX, population);
   if (refused.length === 0) return;
   for (const [id, live] of refused) {

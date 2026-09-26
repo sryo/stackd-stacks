@@ -5,6 +5,7 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { displayForFrame } from "./layouts.js";
 import { nextSpaceOrder } from "./order.js";
+import { fsTransitionBlock } from "./oobguard.js";
 
 export const state = {
   windowOrderBySpace: Object.create(null), // spaceId -> [winId, ...]
@@ -151,6 +152,16 @@ export const state = {
 // Keyed by bundleId (falling back to app name) so windows of the same app share
 // the learned floor. Two axes: h = min width on a horizontal display, v = min
 // height on a vertical one.
+/// fsTransitionBlock for a display, from the live spaces snapshot.
+export function fsTransitionBlockFor(d) {
+  if (!d) return null;
+  const fsExit = state.fsExitAt[d.uuid];
+  return fsTransitionBlock({
+    spaceIsFullscreen: !!state.spacesByDisplay[d.uuid]?.isFullscreen,
+    msSinceFsExit: fsExit != null ? Date.now() - fsExit : null,
+  });
+}
+
 export function appKeyOf(winId) {
   const w = state.windowsById[winId];
   return w ? (w.bundleId || w.app || String(winId)) : String(winId);

@@ -59,3 +59,15 @@ test("unknown tile area (0) → size check disabled, others still apply", () => 
     oobPinBlockReason({ ...base, areaMajor: 0, spaceIsFullscreen: true }),
     "fullscreen-space");
 });
+
+// fsTransitionBlock is the fullscreen half of oobPinBlockReason, shared with
+// the paths that have no resize train to size-check: the post-animation
+// refusal sweep and drag-bracket close.
+import { fsTransitionBlock } from "../modules/oobguard.js";
+
+test("fsTransitionBlock: fullscreen space and exit grace block, anything else passes", () => {
+  assert.equal(fsTransitionBlock({ spaceIsFullscreen: true, msSinceFsExit: null }), "fullscreen-space");
+  assert.equal(fsTransitionBlock({ spaceIsFullscreen: false, msSinceFsExit: FS_EXIT_GRACE_MS - 1 }), "fullscreen-exit-grace");
+  assert.equal(fsTransitionBlock({ spaceIsFullscreen: false, msSinceFsExit: FS_EXIT_GRACE_MS }), null);
+  assert.equal(fsTransitionBlock({ spaceIsFullscreen: false, msSinceFsExit: null }), null);
+});

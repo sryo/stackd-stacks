@@ -1,6 +1,7 @@
 :root {
-  --bar-bg: #000;
+  --bar-bg: transparent;
   --bar-fg: rgba(235, 235, 235, 0.92);
+  --bar-shadow: rgba(0, 0, 0, 0.55);
   --bar-font-size: 13px;
   --bar-edge-pad: 12px;
   --bar-item-gap: 14px;
@@ -32,6 +33,9 @@ html, body {
   display: flex;
   align-items: center;
   white-space: nowrap;
+  /* On the zone, not the items: a filter runs before a mask, so on .sf the
+     mask would clip the shadow away, and text-shadow skips masked glyphs. */
+  filter: drop-shadow(0 1px 1.5px var(--bar-shadow)) drop-shadow(0 0 4px var(--bar-shadow));
 }
 
 .zone[data-side="left"]         { left:  var(--bar-edge-pad); flex-direction: row; }

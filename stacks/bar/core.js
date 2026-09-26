@@ -360,7 +360,11 @@ function trackPeek() {
   });
 }
 
-// ----- hotkey: toggle the system menu bar -------------------------------------
+// ----- system menu bar ---------------------------------------------------------
+//
+// The bar is transparent, so the system menu bar would show through it. It stays
+// suppressed while the bar is loaded (the daemon restores it on unload); the
+// hotkey brings it back on demand.
 
 let menubarSuppressed = false;
 sd.hotkey.on("toggleSystemMenubar", async () => {
@@ -428,6 +432,7 @@ sd.bang.declare('bar.update').on((detail) => {
 
 (async function init() {
   applyGeometry();
+  menubarSuppressed = !!(await sd.menubar.suppress());
   const saved = await sd.settings.get(SETTINGS_KEY);
   if (saved && typeof saved === "object") state.enabledOverride = saved;
 

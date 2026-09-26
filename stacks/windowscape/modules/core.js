@@ -79,6 +79,9 @@ export const state = {
   // and totalWeight diverges → false "user resized!" detections that
   // transfer weight to windows the user didn't touch.
   lastTiledByDisplay: Object.create(null),
+  // { [displayID]: {x,y,w,h} } — the tiling area (visible frame minus the
+  // snapshot rail) the most recent pass on that display laid out.
+  lastTileAreaByDisplay: Object.create(null),
   // (No persistent caches: stickyTileSet, prevTileMembership, axMissCount,
   // lastAxOkAt, windowLastScreen, windowConstraints, fixedSizeIds all
   // deleted. AX min/max are layout-pressure-dependent and the daemon

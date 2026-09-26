@@ -27,8 +27,10 @@ import { sd } from "sd://runtime/api.js";
 import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log } from "./core.js";
 import {
   getSnapshotSizeForWindow,
-  updateLayout
+  updateLayout,
+  adjustedFrameForDisplay
 } from "./snapshots.js";
+import { areaChanged } from "./layouts.js";
 
 // Lazy-import tiler so we don't create an eval-time cycle (snapshots.js ←→
 // tiler.js via reserved-frame adjustment).
@@ -144,14 +146,25 @@ export async function captureForOSMinimize(winId) {
   if (state.snapshotsState.snapshots[winId]) return; // already tracked
   state.snapshotsState.isCreating = true;
   state.snapshotsState.isCreatingStart = Date.now();
+  let data = null;
   try {
-    const data = await captureCore(winId);
+    data = await captureCore(winId);
     if (!data) return;
     updateLayout();
   } finally {
     state.snapshotsState.isCreating = false;
   }
+  // The minimize bang already ran a tile pass (events.js). When the capture
+  // finished before that pass measured its area, the pass laid the row out
+  // around the new rail and a second pass would only restart the same
+  // animations; retile only when the rail changed the area after it.
   setTimeout(async () => {
+    const d = state.displays.find((x) => x.displayID === data.displayID);
+    const area = d && (adjustedFrameForDisplay(d) || d.visibleFrame);
+    if (d && !areaChanged(state.lastTileAreaByDisplay[d.displayID], area)) {
+      log(`SNAP-RETILE-SKIP d${d.displayID} — last pass already used the rail`);
+      return;
+    }
     const tiler = await getTiler();
     await tiler.tileWindows();
   }, 200);

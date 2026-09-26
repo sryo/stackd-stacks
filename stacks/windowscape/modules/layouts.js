@@ -234,3 +234,10 @@ export function displaySetChanged(spacesByDisplay, displays) {
   const seen = Object.keys(spacesByDisplay);
   return seen.length !== known.size || seen.some((uuid) => !known.has(uuid));
 }
+
+// True when `area` differs from `last`, the area a display's previous tile
+// pass laid out (or there was none).
+export function areaChanged(last, area) {
+  if (!last || !area) return true;
+  return last.x !== area.x || last.y !== area.y || last.w !== area.w || last.h !== area.h;
+}

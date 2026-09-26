@@ -223,6 +223,7 @@ async function tileWindowsInternal(snap) {
     // Honor snapshot-strip reservation: tiles must not draw under the
     // bottom strip on displays that host snapshotted tiles.
     const screenFrame = adjustedFrameForDisplay(d) || { ...d.visibleFrame };
+    state.lastTileAreaByDisplay[d.displayID] = { ...screenFrame };
     const horizontal = screenFrame.w > screenFrame.h;
 
     // Self-heal pin drift: an all-pinned row whose Σpins stopped matching the

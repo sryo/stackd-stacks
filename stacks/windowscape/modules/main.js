@@ -51,11 +51,9 @@ async function init() {
   // click-through overlay.
   sd.events.on("snapshotsTileClick", onTileClickEvent);
   sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
-  // A mouseMoved eventtap firing the hover handler at ~120Hz starves
-  // every other stack's sd.mouse / sd.windows.all push — the 30Hz sd.mouse
-  // signal timetrail / focus / etc. depend on gets choked. Dropping the
-  // hover indicator (snapshots tiles still work; they just don't scale up
-  // on cursor-over) buys back the fluidity.
+  // No mouseMoved eventtap: firing at ~120Hz it starved every other stack's
+  // sd.mouse / sd.windows.all push. Snapshot-tile hover rides the 30Hz
+  // sd.mouse channel instead (snapshots.js init).
 
   // Wait one tick for signals (windowsAll / displays / spaces) to populate
   // before we restore + tile. The signal subscriptions in startEvents replay

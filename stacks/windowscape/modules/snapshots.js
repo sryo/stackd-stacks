@@ -35,6 +35,7 @@ import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, log, isAppIncluded } from "./core.js";
 import { refreshBlockedByFullscreen } from "./snapgate.js";
+import { tooltipLines, tooltipRect } from "./tooltip.js";
 
 // Layout constants.
 export const PADDING       = 8;
@@ -67,7 +68,6 @@ let myScreenInfo = null;     // { displayID, frame, ... }
 // DOM container hosting the strips (one per display).
 let stripsRoot = null;
 let stripsByDisplay = Object.create(null);    // displayID -> { container, tiles: Map<winId, el> }
-let tooltipEl = null;
 
 let refreshTimerHandle = null;
 let saveTimerHandle = null;
@@ -90,13 +90,6 @@ export function isMinimized(winId) {
 
 export function getState() {
   return state.snapshotsState;
-}
-
-function truncateMiddle(input, maxLength) {
-  if (!input) return "";
-  if (input.length <= maxLength) return input;
-  const partLen = Math.floor(maxLength / 2);
-  return input.slice(0, partLen - 2) + "..." + input.slice(-partLen);
 }
 
 export function getSnapshotSizeForWindow(winFrame) {
@@ -497,23 +490,6 @@ const STRIP_CSS = `
     display: none;
   }
   #ws-strips-root .ws-tile.hover .ws-close { display: block; }
-  #ws-tooltip {
-    position: absolute;
-    background: rgba(0, 0, 0, 0.78);
-    color: white;
-    padding: 6px 10px;
-    border-radius: 4px;
-    font: 13px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 120ms ease-out;
-    z-index: 100;
-    max-width: 320px;
-    text-align: center;
-    line-height: 1.3;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  }
-  #ws-tooltip.visible { opacity: 1; }
 `;
 
 // Map a global screen rect to local WebView coords. The WebView frame is set
@@ -597,61 +573,58 @@ export function updateLayout() {
 // Tooltip — init / show / hide.
 // ----------------------------------------------------------------------------
 
-function ensureTooltip() {
-  if (tooltipEl) return tooltipEl;
-  tooltipEl = document.createElement("div");
-  tooltipEl.id = "ws-tooltip";
-  document.body.appendChild(tooltipEl);
-  return tooltipEl;
+// The tooltip gets its own click-through region overlay beside the tile: the
+// strip overlays are only as big as the strip band, and this stack's own page
+// is not where the tiles are. Created on first hover, then moved and
+// re-filled per tile.
+const TIP_CSS = `
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent}
+  #tip{position:absolute;inset:0;display:flex;box-sizing:border-box;padding:6px}
+  #tip.right{justify-content:flex-end;align-items:center}
+  #tip.bottom{justify-content:center;align-items:flex-end}
+  #b{background:rgba(0,0,0,0.78);color:#fff;padding:6px 10px;border-radius:4px;
+     font:13px -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;line-height:1.3;
+     text-align:center;max-width:320px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);
+     opacity:0;transition:opacity 120ms ease-out}
+  #tip.on #b{opacity:1}
+`;
+let tipRegion = null;       // Promise<region handle | null>
+let tipShownFor = null;     // winId the tooltip currently describes
+
+function tipHandle(rect) {
+  if (!tipRegion) {
+    tipRegion = sd.overlay.region({ rect, html: `<div id="tip"><div id="b"></div></div>`, css: TIP_CSS })
+      .catch(() => null);
+  }
+  return tipRegion;
 }
 
-export function showTooltip(winId, tileEl) {
-  const data = state.snapshotsState.snapshots[winId];
+async function showTooltipFor(hit) {
+  const data = state.snapshotsState.snapshots[hit.winId];
   if (!data) return;
-  const tt = ensureTooltip();
-
-  const appName = data.app || "";
-  const title = data.title || "";
-  let msg;
-  if (appName && title && appName !== title) msg = `${appName}\n${title}`;
-  else if (appName) msg = appName;
-  else msg = title || "Untitled";
-
-  const lines = msg.split("\n").map((l) => truncateMiddle(l, 60));
-  tt.textContent = "";
-  for (let i = 0; i < lines.length; i++) {
-    if (i > 0) tt.appendChild(document.createElement("br"));
-    tt.appendChild(document.createTextNode(lines[i]));
-  }
-
-  // Position the tooltip to the left of the tile on landscape (right rail) and
-  // above the tile on portrait (bottom row). Pick orientation from the parent
-  // strip's class.
-  const r = tileEl.getBoundingClientRect();
-  tt.style.visibility = "hidden";
-  tt.classList.add("visible");
-  const tr = tt.getBoundingClientRect();
-  const vertical = tileEl.closest(".ws-strip")?.classList.contains("vertical");
-  let x, y;
-  if (vertical) {
-    x = r.left - tr.width - 8;
-    y = r.top + r.height / 2 - tr.height / 2;
-  } else {
-    x = r.left + r.width / 2 - tr.width / 2;
-    y = r.top - tr.height - 8;
-  }
-  if (x < 4) x = vertical ? r.right + 8 : 4;
-  if (x + tr.width > window.innerWidth - 4) x = window.innerWidth - tr.width - 4;
-  if (y < 4) y = vertical ? 4 : r.bottom + 8;
-  if (y + tr.height > window.innerHeight - 4) y = window.innerHeight - tr.height - 4;
-  tt.style.left = `${x}px`;
-  tt.style.top  = `${y}px`;
-  tt.style.visibility = "";
+  tipShownFor = hit.winId;
+  const d = state.displays.find((x) => x.displayID === hit.displayID);
+  const r = tooltipRect(hit, hit.isLandscape, d && d.frame);
+  const rect = { x: r.x, y: r.y, w: r.w, h: r.h };
+  const h = await tipHandle(rect);
+  if (!h || tipShownFor !== hit.winId) return;
+  await h.setFrame(rect);
+  const lines = JSON.stringify(tooltipLines(data));
+  await h.eval(`(() => {
+    const t = document.getElementById("tip"), b = document.getElementById("b");
+    b.textContent = "";
+    ${lines}.forEach((l, i) => { if (i) b.appendChild(document.createElement("br")); b.appendChild(document.createTextNode(l)); });
+    t.className = ${JSON.stringify(r.align)} + " on";
+  })()`);
 }
 
 export function hideTooltip() {
-  if (!tooltipEl) return;
-  tooltipEl.classList.remove("visible");
+  if (tipShownFor == null) return;
+  tipShownFor = null;
+  if (!tipRegion) return;
+  tipRegion.then((h) => {
+    if (h && tipShownFor == null) h.eval(`document.getElementById("tip").classList.remove("on")`);
+  });
 }
 
 // ----------------------------------------------------------------------------
@@ -963,7 +936,8 @@ function tileAt(x, y) {
     const strip = stripsByDisplayCache[did];
     for (const t of strip.tiles) {
       if (x >= t.gx && x < t.gx + t.gw && y >= t.gy && y < t.gy + t.gh) {
-        return { winId: t.winId, localX: x - t.gx, localY: y - t.gy, displayID: +did };
+        return { winId: t.winId, localX: x - t.gx, localY: y - t.gy, displayID: +did,
+                 gx: t.gx, gy: t.gy, gw: t.gw, gh: t.gh, isLandscape: strip.isLandscape };
       }
     }
   }
@@ -1019,67 +993,25 @@ export function onTileClickEvent(payload) {
   restoreFromSnapshot(hit.winId);
 }
 
-// Mouse-moved eventtap — drives hover state on tiles. The CGEventTap fires
-// at the host's mouse-move sample rate (high), so we do a cheap reservation-
-// area gate FIRST and only walk per-tile rects when the cursor is inside a
-// strip. Hovered id is memoized so the per-tile rect walk doesn't run while
-// the cursor lingers on the same tile.
+// Hover → tooltip, fed by the daemon's sd.mouse channel (subscribed in init).
+// A mouseMoved eventtap fired this at the hardware sample rate and starved
+// other stacks' pushes; sd.mouse arrives at a steady 30Hz. The reservation-
+// area gate runs first so the per-tile walk only happens over a strip, and the
+// hovered id is memoized so lingering on one tile does no work.
 let lastHoveredId = null;
-let mouseMoveTickPending = false;
-let lastMouseEvent = null;
 export function onMouseMoveEvent(payload) {
-  lastMouseEvent = payload;
-  if (mouseMoveTickPending) return;
-  mouseMoveTickPending = true;
-  // rAF-coalesce so we never re-render hover state more than once per frame
-  // even under high mouseMoved cadence.
-  requestAnimationFrame(() => {
-    mouseMoveTickPending = false;
-    const ev = lastMouseEvent;
-    if (!ev) return;
-    if (state.snapshotsState.order.length === 0) {
-      if (lastHoveredId != null) { clearHover(); lastHoveredId = null; }
-      return;
-    }
-    const { x, y } = ev;
-    if (x == null || y == null) return;
-    // Cheap gate: cursor must be inside a strip's reserved area.
-    if (!screenForStripAt(x, y)) {
-      if (lastHoveredId != null) { clearHover(); lastHoveredId = null; }
-      return;
-    }
-    const hit = tileAt(x, y);
-    const id = hit ? hit.winId : null;
-    if (id === lastHoveredId) return;
-    if (lastHoveredId != null) {
-      const el = findTileEl(lastHoveredId);
-      if (el) el.classList.remove("hover");
-    }
-    lastHoveredId = id;
-    if (id != null && hit) {
-      hit.el.classList.add("hover");
-      showTooltip(id, hit.el);
-    } else {
-      hideTooltip();
-    }
-  });
-}
-
-function clearHover() {
-  for (const did of Object.keys(stripsByDisplay)) {
-    for (const el of stripsByDisplay[did].tiles.values()) {
-      el.classList.remove("hover");
-    }
+  if (!payload) return;
+  const { x, y } = payload;
+  if (x == null || y == null) return;
+  if (state.snapshotsState.order.length === 0 || !screenForStripAt(x, y)) {
+    if (lastHoveredId != null) { lastHoveredId = null; hideTooltip(); }
+    return;
   }
-  hideTooltip();
-}
-
-function findTileEl(winId) {
-  for (const did of Object.keys(stripsByDisplay)) {
-    const el = stripsByDisplay[did].tiles.get(winId);
-    if (el) return el;
-  }
-  return null;
+  const hit = tileAt(x, y);
+  const id = hit ? hit.winId : null;
+  if (id === lastHoveredId) return;
+  lastHoveredId = id;
+  if (hit) showTooltipFor(hit); else hideTooltip();
 }
 
 // Right-click eventtap: if the cursor is on an existing snapshot tile, show the
@@ -1172,6 +1104,7 @@ async function loadPersistedSnapshots() {
 export async function init() {
   myScreenInfo = (typeof window !== "undefined" && window.__sd_screen) || null;
   ensureStripsRoot();
+  sd.mouse.subscribe(onMouseMoveEvent);
   // sd.window.{minimized,deminimized,destroyed} fire when the OS changes a
   // window from outside our control (user clicked the yellow dot, Alt-Tab
   // restore, Dock click, etc.). Track those so the tiler doesn't see a

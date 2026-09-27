@@ -1,5 +1,5 @@
-/* Adaptive glass text colors — palette convention: stack-local variables
-   toggled by the data-theme binding on <body>. Daemon owns the glass
+/* Adaptive glass text colors: stack-local variables toggled by the
+   data-theme binding on <body>. Daemon owns the glass
    material, corner radius, and window sizing via the manifest. */
 :root {
   --sd-fg:     #e8e8ea;

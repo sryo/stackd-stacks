@@ -3,6 +3,7 @@
 // open; dynamic sources re-evaluate per keystroke.
 import { sd } from "sd://runtime/api.js";
 import { fuzzyMatch } from "./matcher.js";
+import { mapLimit } from "./logic.js";
 import { recents } from "./recents.js";
 
 export const SELF = "stackd";
@@ -20,19 +21,20 @@ export function getPriorFront() { return priorFront; }
 
 // ───────────────── apps source (port of apps.lua) ───────────────────────
 // Running apps with at least one visible window. Subtitle = "N windows"
-// matching HS. visibleWindows is per-pid AX, slowish but n ≤ ~20.
+// matching HS. visibleWindows is per-pid AX, so the queries run in parallel.
 export const appsSource = {
   id: "apps",
   async list() {
-    const list = sd.apps.running.value || [];
+    const apps = (sd.apps.running.value || []).filter(a =>
+      a.name && a.bundleId && a.name !== SELF
+      && (!a.activationPolicy || a.activationPolicy === "regular"));
+    const counts = await Promise.all(apps.map(a =>
+      sd.apps.visibleWindows(a.pid)
+        .then(w => (Array.isArray(w) ? w.length : 0), () => 0)));
     const out = [];
-    for (const a of list) {
-      if (!a.name || !a.bundleId || a.name === SELF) continue;
-      if (a.activationPolicy && a.activationPolicy !== "regular") continue;
-      let wins = [];
-      try { wins = await sd.apps.visibleWindows(a.pid); } catch (e) {}
-      const n = Array.isArray(wins) ? wins.length : 0;
-      if (n === 0) continue;
+    apps.forEach((a, i) => {
+      const n = counts[i];
+      if (n === 0) return;
       out.push({
         id:          "app:" + a.bundleId,
         title:       a.name,
@@ -42,7 +44,7 @@ export const appsSource = {
         defaultVerb: "activate",
         verbs:       ["activate", "hide", "quit", "askmuse"]
       });
-    }
+    });
     return out;
   }
 };
@@ -193,7 +195,6 @@ function formatNumber(n) {
 }
 export const calcSource = {
   id: "calc",
-  dynamic: true,
   list(query) {
     const q = (query || "").trim();
     if (!q || !looksMathy(q)) return [];
@@ -230,7 +231,6 @@ async function isOnPath(token) {
 }
 export const shellSource = {
   id: "shellrunner",
-  dynamic: true,
   async list(query) {
     const q = (query || "").trim();
     if (!q) return [];
@@ -278,6 +278,7 @@ function isPathTrigger(q) {
 }
 const MAX_PATH_RESULTS = 30;
 const MAX_VISITED_RESULTS = 10;
+const STAT_CONCURRENCY = 16;
 async function listPathDir(query) {
   const slashAt = query.lastIndexOf("/");
   if (slashAt < 0) return [];
@@ -291,12 +292,11 @@ async function listPathDir(query) {
   const showHidden = tail.startsWith(".");
   // sd.fs.list is in-process FileManager — no fork+exec per directory.
   const names = (await sd.fs.list(absDir, { hidden: showHidden }).catch(() => null)) || [];
-  // Stat first so the sort can promote directories above files at equal
-  // score (matches Lua files.lua's tertiary sort key). Doing it inline
-  // means we stat all matches, not just the top 30 — acceptable because
-  // the fuzzy filter has already culled most names and sd.fs.stat is
-  // in-process (FileManager.attributesOfItem), not a subprocess.
-  const scored = [];
+  // Stat every match (not just the top 30) so the sort can promote
+  // directories above files at equal score (files.lua's tertiary sort
+  // key). The fuzzy filter has already culled most names; stats run
+  // STAT_CONCURRENCY at a time.
+  const matched = [];
   for (const name of names) {
     let score = 0, positions = [];
     if (tail !== "") {
@@ -306,10 +306,12 @@ async function listPathDir(query) {
       positions = m.positions;
     }
     const full = absDir === "/" ? "/" + name : absDir + "/" + name;
-    const st = await sd.fs.stat(full).catch(() => null);
-    const isDir = !!(st && st.isDir);
-    scored.push({ name, score, positions, full, isDir });
+    matched.push({ name, score, positions, full });
   }
+  const scored = await mapLimit(matched, STAT_CONCURRENCY, async (c) => {
+    const st = await sd.fs.stat(c.full).catch(() => null);
+    return { ...c, isDir: !!(st && st.isDir) };
+  });
   scored.sort((a, b) => {
     if (a.score !== b.score) return b.score - a.score;
     if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
@@ -317,12 +319,10 @@ async function listPathDir(query) {
   });
   const slice = scored.slice(0, MAX_PATH_RESULTS);
   const out = [];
-  for (const c of slice) {
-    const full = c.full;
-    const isDir = c.isDir;
+  for (const { full, isDir, name, positions } of slice) {
     out.push({
       id:               full,
-      title:            c.name,
+      title:            name,
       subtitle:         abbreviatePath(absDir),
       source:           "files",
       payload:          { path: full, isDir },
@@ -332,7 +332,7 @@ async function listPathDir(query) {
                           : ["open", "reveal", "copypath", "askmuse"],
       hideOnEmptyQuery: true,
       bypassMatcher:    true,
-      matchPositions:   c.positions
+      matchPositions:   positions
     });
   }
   return out;
@@ -362,8 +362,6 @@ function listVisited(query) {
 }
 export const filesSource = {
   id: "files",
-  dynamic: true,
-  abbreviatePath,
   async list(query) {
     const q = (query || "").trim();
     if (!q) return [];

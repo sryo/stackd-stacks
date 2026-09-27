@@ -9,7 +9,7 @@
   "level": "tooltip",
   "clickThrough": true,
   "permissions": [],
-  "handles": ["sd.window.destroyed", "apptimeout.killed"],
+  "handles": ["sd.window.destroyed"],
   "hotkeys": [
     { "key": "cmd+alt+z", "callback": "undo" },
     { "key": "cmd+alt+p", "callback": "protect" }

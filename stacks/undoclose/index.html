@@ -22,6 +22,7 @@
     // that window relaunches the app, or `open`s the folder. After 5s, hidden.
     // No persistent recents list — just the last thing.
     import { sd } from "sd://runtime/api.js";
+    import { finderWindowId, createFinderPaths } from "./logic.js";
 
     // Window is an anchored glass panel; hidden at alpha=0 by default and
     // revealed per toast. The first setAlpha call disables the daemon's
@@ -29,7 +30,6 @@
     sd.window.setAlpha(0);
 
     const TIMEOUT_S = 5;
-    const TOAST_H = 48;
     const TOP_INSET = 80;
     const MIN_W = 240;
     const $toast   = document.getElementById("toast");
@@ -55,7 +55,7 @@
       const scr = sd.screen.current;
       if (scr) {
         const f = scr.frame;
-        sd.window.setFrame({ x: f.x + Math.round((f.w - w) / 2), y: f.y + TOP_INSET, w: w, h: TOAST_H });
+        sd.window.setFrame({ x: f.x + Math.round((f.w - w) / 2), y: f.y + TOP_INSET, w });
       }
       sd.window.setAlpha(1);
     }
@@ -145,34 +145,30 @@
     //      lifetime — tracked in parallel via sd.windows.all. This filters
     //      out regular-policy processes that never present UI (rare but real,
     //      e.g. some launchers and update helpers).
-    const bidsWithWindows = new Set();
+    const pidsWithWindows = new Set();
     sd.windows.all.subscribe((wins) => {
       if (!wins) return;
       for (const w of wins) {
-        // w.app is the app name; we need bundleId. Cross-reference via pid in
-        // the current running snapshot — pids are unique per process lifetime.
-        // Simpler: just record the pid here, then resolve to bundleId in the
-        // running-apps callback below.
-        if (w.pid) bidsWithWindows.add(w.pid);
+        if (w.pid) pidsWithWindows.add(w.pid);
       }
     });
 
     let prevApps = new Map();   // bundleId → name
     sd.apps.running.subscribe((apps) => {
       if (!apps) return;
-      // Prune pids whose process has exited — keeps bidsWithWindows from
+      // Prune pids whose process has exited — keeps pidsWithWindows from
       // growing unbounded over a long session, and stops a reused pid from
       // inheriting a dead process's "had a window" verdict.
       const livePids = new Set(apps.map(a => a.pid));
-      for (const pid of bidsWithWindows) {
-        if (!livePids.has(pid)) bidsWithWindows.delete(pid);
+      for (const pid of pidsWithWindows) {
+        if (!livePids.has(pid)) pidsWithWindows.delete(pid);
       }
       const now = new Map();
       for (const a of apps) {
         if (!a.bundleId) continue;
         if (a.activationPolicy !== "regular") continue;
         // Only track apps that have had a visible window during this session.
-        if (!bidsWithWindows.has(a.pid)) continue;
+        if (!pidsWithWindows.has(a.pid)) continue;
         now.set(a.bundleId, a.name);
       }
       if (prevApps.size > 0) {
@@ -189,17 +185,14 @@
     });
 
     // ──────────────────── Finder window path tracker ─────────────────────────
-    // Per the Lua: track each Finder window's current folder via AppleScript.
-    // The Lua keys by hs.window:id() which is a stable CGWindowID; stackd's
-    // sd.windows.focused doesn't expose a window id yet (the AX/CG mapping
-    // needs _AXUIElementGetWindow private SPI). v0: track only the most
-    // recently focused Finder path. Trade-off: if you have multiple Finder
-    // windows and close a background one, we offer to reopen the foreground
-    // one instead. Good enough until window-id support lands.
-    let lastFinderPath = null;
+    // Per the Lua: track each Finder window's current folder via AppleScript,
+    // keyed by CGWindowID. Finder retitles a window when it navigates, so
+    // focusedChanged + titleChanged together cover switching windows and
+    // browsing within one; both payloads carry the window id.
+    const finderPaths = createFinderPaths();
     let captureTimer = null;
 
-    async function captureFinderPath() {
+    async function captureFinderPath(id) {
       const r = await sd.proc.exec("/usr/bin/osascript", ["-e",
         'tell application "Finder"\n' +
         '  try\n' +
@@ -210,22 +203,24 @@
         'end tell'
       ]);
       const path = (r && r.stdout || "").trim();
-      if (path) lastFinderPath = path;
+      finderPaths.record(id, path);
     }
 
-    sd.windows.focusedChanged.subscribe((w) => {
-      if (!w || w.app !== "Finder") return;
-      // Match the Lua's 0.2s wait for AppleScript to settle after focus change.
-      // focusedChanged (not the union `focused`) so title-only edits don't refire.
+    function scheduleCapture(w) {
+      const id = finderWindowId(w);
+      if (id == null) return;
+      // Match the Lua's 0.2s wait for AppleScript to settle after a change.
       clearTimeout(captureTimer);
-      captureTimer = setTimeout(captureFinderPath, 200);
-    });
+      captureTimer = setTimeout(() => captureFinderPath(id), 200);
+    }
+    sd.windows.focusedChanged.subscribe(scheduleCapture);
+    sd.windows.titleChanged.subscribe(scheduleCapture);
 
+    // The destroyed bang carries only { id }; match it against the capture map.
     sd.windows.destroyed.subscribe((detail) => {
-      if (!detail) return;
-      if (detail.app === "Finder" && lastFinderPath) {
-        const path = lastFinderPath;
-        lastFinderPath = null;
+      if (!detail || detail.id == null) return;
+      const path = finderPaths.take(detail.id);
+      if (path) {
         const folderName = (path.replace(/\/$/, "").split("/").pop()) || "Folder";
         arm(`Finder: ${folderName}`, async () => {
           await sd.proc.exec("/usr/bin/open", [path]);

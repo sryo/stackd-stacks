@@ -5,10 +5,10 @@
 // ~/.hammerspoon/Palette/.
 //
 // Trigger: Ctrl+Cmd+Space hotkey, or `sd.bang('palette.open')` from any
-// stack. (HS also opens on TTTaps 5-finger tap; deferred until
-// gesture-payload extension lands.)
+// stack.
 import { sd } from "sd://runtime/api.js";
 import { rank } from "./matcher.js";
+import { createGeneration, digitPicksRow, clampToScreen } from "./logic.js";
 import { recents } from "./recents.js";
 import {
   SELF, appsSource, menuItemsSource, installedSource, calcSource,
@@ -59,23 +59,32 @@ document.body.addEventListener("mousedown", (e) => {
 });
 
 // ───────────────────────────── stage ops ─────────────────────────────────
-async function buildPool() {
+async function buildPool(query) {
   if (state.stage === "verb") return state.raw;
   const pool = state.raw.slice();
   // Dynamic sources re-evaluate per query.
   const dyn = [calcSource, shellSource, filesSource];
   for (const src of dyn) {
     try {
-      const list = await src.list(state.query);
+      const list = await src.list(query);
       if (Array.isArray(list)) for (const it of list) pool.push(it);
     } catch (e) { console.error("palette: dynamic source", src.id, e); }
   }
   return pool;
 }
-async function refresh() {
-  state.items = rank(await buildPool(), state.query, recents.score);
-  state.focused = Math.min(Math.max(0, state.focused), Math.max(0, state.items.length - 1));
-  render();
+// Keystrokes overlap refreshes (files/shell sources await IPC); only the
+// newest one may write state.items, and Enter waits for it to land.
+const refreshGen = createGeneration();
+function refresh() {
+  const token = refreshGen.next();
+  const query = state.query;
+  return refreshGen.track((async () => {
+    const pool = await buildPool(query);
+    if (!refreshGen.isCurrent(token)) return;
+    state.items = rank(pool, query, recents.score);
+    state.focused = Math.min(Math.max(0, state.focused), Math.max(0, state.items.length - 1));
+    render();
+  })());
 }
 function pushStage(newStage, newRaw, opts) {
   state.history.push({
@@ -94,6 +103,7 @@ function pushStage(newStage, newRaw, opts) {
 function popStage() {
   const prev = state.history.pop();
   if (!prev) return false;
+  refreshGen.next();
   Object.assign(state, prev);
   $q.value = state.query;
   const n = state.query.length;
@@ -177,20 +187,17 @@ async function activateFocused() {
 // Mirrors canvas.lua mouseAnchorFrame(). Lands the cursor on row 1's
 // center so scroll / click work without moving the mouse. Clamps inside
 // the cursor's screen with 8px margin.
-const PANEL_W = 800, PANEL_H = 470, LEFT_BOX_W = 520, Y_OFFSET = 90, MARGIN = 8;
+// The panel's size comes from the manifest; the WebView fills it, so the
+// viewport is the panel size.
+const LEFT_BOX_W = 520, Y_OFFSET = 90, MARGIN = 8;
+function moveClamped(x, y, sf) {
+  const p = clampToScreen(x, y, window.innerWidth, window.innerHeight, sf, MARGIN);
+  return sd.window.setFrame(p);
+}
 async function placePanel() {
   const m = await sd.mouse.first();
   const scr = m.display || (sd.display.all.peek() || [])[0] || null;
-  const sf = scr ? scr.frame : null;
-  let x = m.x - LEFT_BOX_W / 2;
-  let y = m.y - Y_OFFSET;
-  if (sf) {
-    if (x < sf.x + MARGIN) x = sf.x + MARGIN;
-    if (x + PANEL_W > sf.x + sf.w - MARGIN) x = sf.x + sf.w - PANEL_W - MARGIN;
-    if (y + PANEL_H > sf.y + sf.h - MARGIN) y = sf.y + sf.h - PANEL_H - MARGIN;
-    if (y < sf.y + MARGIN) y = sf.y + MARGIN;
-  }
-  await sd.window.setFrame({ x, y, w: PANEL_W, h: PANEL_H });
+  await moveClamped(m.x - LEFT_BOX_W / 2, m.y - Y_OFFSET, scr ? scr.frame : null);
 }
 
 // Bar-anchored placement. Used by `sd.bang('palette.open', { under: 'bar' })`
@@ -205,14 +212,8 @@ async function placePanelUnderBar() {
   const sf = scr ? scr.frame : null;
   const vf = scr ? scr.visibleFrame : null;
   const barH = (sf && vf) ? Math.max(0, vf.y - sf.y) : 24;
-  let x = m.x - LEFT_BOX_W / 2;
-  let y = (vf ? vf.y : (sf ? sf.y + barH : 0)) + barH;
-  if (sf) {
-    if (x < sf.x + MARGIN) x = sf.x + MARGIN;
-    if (x + PANEL_W > sf.x + sf.w - MARGIN) x = sf.x + sf.w - PANEL_W - MARGIN;
-    if (y + PANEL_H > sf.y + sf.h - MARGIN) y = sf.y + sf.h - PANEL_H - MARGIN;
-  }
-  await sd.window.setFrame({ x, y, w: PANEL_W, h: PANEL_H });
+  const y = (vf ? vf.y : (sf ? sf.y + barH : 0)) + barH;
+  await moveClamped(m.x - LEFT_BOX_W / 2, y, sf);
 }
 
 async function open(opts) {
@@ -274,7 +275,7 @@ $q.addEventListener("keydown", async (e) => {
     if (state.focused > 0) { state.focused -= 1; render(); }
     return;
   }
-  if (e.key === "Enter") { e.preventDefault(); await activateFocused(); return; }
+  if (e.key === "Enter") { e.preventDefault(); await refreshGen.settled(); await activateFocused(); return; }
   if (e.key === "Tab") {
     e.preventDefault();
     if (e.shiftKey) { if (!popStage()) await dismiss(); }
@@ -328,15 +329,13 @@ $q.addEventListener("keydown", async (e) => {
     }
     return;
   }
-  // Bare 1..9 — pick the Nth visible row and run its default verb.
-  // Mirrors keys.lua's itemQuickPick: NO modifier required, and digits
-  // are NEVER typed into the query. The HS palette is a global eventtap
-  // that owns its own text buffer; this is the closest we can get with
-  // an <input>. Trade-off: you can't type "1" into the query — but the
-  // user signed off on the HS behavior and this matches it 1:1.
+  // Bare 1..9 — pick the Nth visible row and run its default verb
+  // (keys.lua's itemQuickPick: no modifier). Inside an arithmetic query
+  // the digit is typed instead, so the calculator stays reachable.
   if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
-      && /^[1-9]$/.test(e.key)) {
+      && /^[1-9]$/.test(e.key) && digitPicksRow(state.stage, state.query)) {
     e.preventDefault();
+    await refreshGen.settled();
     const n = parseInt(e.key, 10);
     // Pick the Nth currently-visible row (relative to scroll), not the
     // Nth absolute item — matches the 1..9 badge the user sees.
@@ -354,15 +353,8 @@ $q.addEventListener("keydown", async (e) => {
 });
 
 // ───────────────────────────── lifecycle ──────────────────────────────────
-// Theme: imperative subscription instead of an attribute placeholder.
-// The `{{ sd.appearance.dark ? 'dark' : 'light' }}` template eval at mount
-// resolves to 'light' when the appearance channel hasn't pushed yet —
-// which on a dark-mode system left the palette with dark text on dark
-// glass until the first push (sometimes never, racing the WKWebView's
-// initial channel replay). Subscribe explicitly so the theme flips as
-// soon as the daemon hands us a value, and again on every system change.
-// The attribute goes on <html>, not body — index.css derives its color
-// tokens from --base on :root, so the override must land there too.
+// Theme follows the system appearance. The attribute goes on <html>, not
+// body — index.css derives its color tokens from --base on :root.
 sd.appearance.subscribe((a) => {
   document.documentElement.dataset.theme = (a && a.dark) ? "dark" : "light";
 });

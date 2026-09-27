@@ -29,7 +29,7 @@
 }
 
 /* Body IS the palette card — daemon owns the glass material, corner
-   radius, and 800x330 size via the manifest. JS may re-place the panel
+   radius, and size via the manifest. JS may re-place the panel
    via sd.window.setFrame (mouse-anchored). No background, border,
    border-radius, backdrop-filter, or box-shadow here. */
 html, body {
@@ -63,14 +63,14 @@ body {
 }
 .lead.back { font-size: 22px; line-height: 1; padding-bottom: 3px; }
 /* Selected-noun chip shown at the verb stage ("Safari ›" context). */
-.chip, #nounchip {
+#nounchip {
   flex: 0 0 auto;
   max-width: 240px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   background: var(--fill-sel);
   border-radius: 6px;
   padding: 3px 8px;
-  font-size: 12px; font-weight: 500;
+  font-size: 12px; font-weight: 600;
 }
 input#q {
   all: unset;
@@ -142,7 +142,7 @@ input#q::placeholder { color: var(--fg-3); }
 }
 .mark:empty { display: none; }
 .name {
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   flex: 0 1 auto; min-width: 0;
 }
@@ -217,4 +217,4 @@ input#q::placeholder { color: var(--fg-3); }
   display: inline-flex; align-items: center; gap: 6px;
   flex: 0 0 auto;
 }
-.primary .plabel { font-size: 12px; font-weight: 500; color: var(--fg); }
+.primary .plabel { font-size: 12px; font-weight: 600; color: var(--fg); }

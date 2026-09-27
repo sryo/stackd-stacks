@@ -4,6 +4,7 @@
 // interleavings, never selectable; the calc card is state.items[0] rendered
 // in card form, so keyboard nav treats it like any other row.
 import { sd } from "sd://runtime/api.js";
+import { titleRuns } from "./logic.js";
 
 const MAG_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none"
   stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
@@ -28,15 +29,16 @@ export function initRender(ctx) {
     updateFades();
   }, { passive: true });
 
-  function highlightTitle(title, positions) {
-    if (!positions || positions.length === 0) return title;
-    const out = [];
-    const set = new Set(positions);
-    for (let i = 0; i < title.length; i++) {
-      if (set.has(i)) out.push("<b>" + title[i] + "</b>");
-      else out.push(title[i]);
+  function appendHighlighted(el, title, positions) {
+    for (const run of titleRuns(title, positions)) {
+      if (run.bold) {
+        const b = document.createElement("b");
+        b.textContent = run.text;
+        el.append(b);
+      } else {
+        el.append(document.createTextNode(run.text));
+      }
     }
-    return out.join("");
   }
 
   async function iconFor(item) {
@@ -145,7 +147,7 @@ export function initRender(ctx) {
     const mark = document.createElement("span"); mark.className = "mark";
     if (item.markChar) mark.textContent = item.markChar;
     const name = document.createElement("span"); name.className = "name";
-    name.innerHTML = highlightTitle(item.title, item.matchPositions);
+    appendHighlighted(name, item.title || "", item.matchPositions);
     // Subtitle = menu path (menuitems) / window count (apps) / parent dir
     // (files). Trailing edge, tertiary.
     const sub = document.createElement("span"); sub.className = "sub";

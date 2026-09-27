@@ -19,12 +19,23 @@ import { startDragBracket, clearDragBracket, pinFromActualSize } from "./events.
 import { cancelAnimation } from "./animation.js";
 import { predictResizeFrame, previewArea, PIN_MIN_PX } from "./layouts.js";
 import { getWindowWeight, getCollapsedWindows, tileWindows } from "./tiler.js";
+import { stepFeel } from "./stepfeel.js";
 
 // Resize feel: vertical steps commit every 0.012 of trackpad travel (see
 // tttaps CFG.dragStepCommitThresholdV) at 12px each — ~1000px per unit of
 // travel, fine-grained enough that a drag reads as continuous growth.
 const RESIZE_STEP_PX = 12;
 const RESIZE_MIN_PX  = 100; // smallest the focused window may shrink to via gesture
+
+// Trackpad clicks (sd.haptic.actuate waveforms): `step` on each reorder swap
+// and every 48px of net resize, `end` once when a resize hits its size
+// clamp. Reaching the row's end doesn't click.
+const HAPTIC_WAVEFORM = { step: 1, end: 3 };
+const feel = stepFeel({ bucketPx: 48, gapMs: 35 });
+function click(verdict) {
+  const waveform = verdict && HAPTIC_WAVEFORM[verdict];
+  if (waveform) sd.haptic.actuate(waveform).catch(() => {});
+}
 
 // Gesture-resize bracket. The resize drag rides the SAME bracket as a mouse
 // drag (events.startDragBracket / endDragBracket): the first step opens it
@@ -123,17 +134,21 @@ function openGestureBracket() {
 
 // One resize step: deltaPx > 0 grows the focused window (up), < 0 shrinks it
 // (down). The neighbor that gives/takes the space is fixed at bracket-open, so
-// the direction is consistent regardless of the window's slot.
+// the direction is consistent regardless of the window's slot. Returns the
+// px the requested size actually moved (0 at a clamp or with nothing to
+// resize), or undefined when there's no focused window to open a bracket on.
 function stepPreview(deltaPx) {
   if (!gestureBracket) {
-    if (!openGestureBracket()) return;
+    if (!openGestureBracket()) return undefined;
   } else if (!state.dragInFlight) {
     // The bracket's 5s safety timeout cleared dragInFlight mid-gesture; keep the
     // accumulated state, just re-raise the tile gate.
     startDragBracket();
   }
   const g = gestureBracket;
-  if (!g.vf || g.neighborId == null) return; // solo/unknown: nothing to resize
+  if (!g.vf || g.neighborId == null) return 0; // solo/unknown: nothing to resize
+  const major = (fr) => (fr ? (g.horizontal ? fr.w : fr.h) : 0);
+  const shownBefore = major(g.predicted);
 
   // Clamp: window >= RESIZE_MIN_PX, neighbor >= PIN_MIN_PX. No app-minimum
   // guess — refusal pins are unreliable minimums (they blocked legit shrinks);
@@ -161,6 +176,7 @@ function stepPreview(deltaPx) {
     g.predicted = r.frame;
     if (previewHandle) previewHandle.setFrame(g.predicted).catch(() => {});
   }
+  return major(g.predicted) - shownBefore;
 }
 
 export function bind() {
@@ -181,18 +197,21 @@ export function bind() {
     // from the bracket (width on a row, height on a column).
     const dir = detail.direction;
     if (dir === "up" || dir === "down") {
-      stepPreview(dir === "up" ? RESIZE_STEP_PX : -RESIZE_STEP_PX);
+      const moved = stepPreview(dir === "up" ? RESIZE_STEP_PX : -RESIZE_STEP_PX);
+      if (moved !== undefined) click(feel.resize(moved, performance.now()));
     } else {
       // Reorder — never inside an open resize bracket (the recognizer's axis
       // lock makes a mixed stream near-impossible; belt to its suspenders).
       if (gestureBracket) return;
-      moveWindowInOrder(dir === "left" ? "backward" : "forward");
+      const moved = moveWindowInOrder(dir === "left" ? "backward" : "forward");
+      click(feel.reorder(!!moved, performance.now()));
     }
   });
 
   // Fingers lifted after a drag-active gesture. Only meaningful when WE opened
   // the bracket; mouse brackets close via the leftMouseUp eventtap.
   sd.bang.declare("sd.tttap.dragEnd").on(() => {
+    feel.reset();
     if (!gestureBracket) return;
     const g = gestureBracket;
     gestureBracket = null;

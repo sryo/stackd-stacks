@@ -132,6 +132,8 @@ function recentReorderFor(displayID) {
 
 // Swap focused window with its neighbor in tiling order. Direction-aware:
 // landscape "forward" = right neighbor, portrait "forward" = down neighbor.
+// True when the focused window swapped places; falsy when there was nothing
+// to swap with (row end, solo window, no focus).
 export function moveWindowInOrder(direction) {
   const w = focusedWin();
   if (!w) return;
@@ -210,6 +212,7 @@ export function moveWindowInOrder(direction) {
       if (p) sd.mouse.warp(p.x, p.y).catch(() => {});
     }, 50);
   }
+  return true;
 }
 
 // Focus next/previous window in tiling order on the current display.

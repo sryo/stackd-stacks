@@ -36,6 +36,7 @@ html, body {
   height: 100%;
   color: var(--fg);
   font: 14px var(--font);
+  font-weight: 500;
   user-select: none;
 }
 

@@ -23,6 +23,7 @@ body {
   align-items: center;
   justify-content: center;
   font: 14px var(--sd-font);
+  font-weight: 500;
   color: var(--sd-fg);
   user-select: none;
 }

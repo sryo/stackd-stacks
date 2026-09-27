@@ -12,16 +12,13 @@
   //   sd.tttap.dragStep — { fingers, direction }                each commit-distance within a drag
   //   sd.tttap.dragEnd  — { fingers, axis }                     all fingers lift after a drag-active gesture
   //
-  // Subscribers register the normal way:
-  //   handles: ["sd.tttap.tap"]  in manifest
-  //   window.onBang_sd_tttap_tap = (d) => { if (d.fingers === 5) ... };
+  // Consumers subscribe with sd.bang.declare(name).on(fn), which registers
+  // them with the daemon; no manifest `handles` entry needed:
+  //   sd.bang.declare("sd.tttap.tap").on((d) => { if (d.fingers === 5) ... });
+  //
+  // Emits go through plain sd.bang: declare() would also register this
+  // stack as a handler of its own bangs, echoing every dragStep back in.
   import { sd } from "sd://runtime/api.js";
-
-  // Declared handles so consumers pair via sd.bang.declare(name).on(fn)
-  // (declare().on() auto-registers with the daemon; no manifest handles).
-  const dragBang     = sd.bang.declare("sd.tttap.drag");
-  const dragStepBang = sd.bang.declare("sd.tttap.dragStep");
-  const dragEndBang  = sd.bang.declare("sd.tttap.dragEnd");
 
   const CFG = {
     gestureStartThreshold:   0.15,
@@ -170,7 +167,7 @@
       // dragEnd follows the real lift.
       if (gestureDragged && !dragEndEmitted) {
         dragEndEmitted = true;
-        dragEndBang.emit({ fingers: lastDragCluster || peakCount, axis: dragAxisLock });
+        sd.bang("sd.tttap.dragEnd", { fingers: lastDragCluster || peakCount, axis: dragAxisLock });
       }
       if (lastNonZeroTouchTime && currentTime - lastNonZeroTouchTime < CFG.phantomLiftWindow) {
         pendingPhantomLift = true;
@@ -327,10 +324,10 @@
             }
             gestureDragged = true;
             if (hasOneShot && !dragFired) {
-              dragBang.emit({ fingers: initialFingerCount, direction: dragDirection });
+              sd.bang("sd.tttap.drag", { fingers: initialFingerCount, direction: dragDirection });
             }
             if (hasStep) {
-              dragStepBang.emit({ fingers: initialFingerCount, direction: dragDirection });
+              sd.bang("sd.tttap.dragStep", { fingers: initialFingerCount, direction: dragDirection });
             }
             dragFired = true;
             // Cluster size at commit time — initialFingerCount decays as

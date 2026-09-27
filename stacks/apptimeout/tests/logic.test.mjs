@@ -8,7 +8,7 @@
 // first sighted tick.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tick, TIMEOUT_S, KILL_LIMIT } from "../logic.js";
+import { tick, isCandidate, TIMEOUT_S, KILL_LIMIT } from "../logic.js";
 
 const BOOT = 1000;
 
@@ -194,4 +194,11 @@ test("empty desktop with no regular apps running is not 'blind'", () => {
   const helper = app("Helper", { pid: 2, policy: "accessory" });
   const r = run(state, { apps: [helper], wins: [], now: BOOT });
   assert.equal(r.blind, false, "nothing killable running — emptiness is meaningless, not blindness");
+});
+
+test("isCandidate admits only regular .app bundles with a bundle id", () => {
+  assert.equal(isCandidate(app("Preview", { pid: 1 })), true);
+  assert.equal(isCandidate({ ...app("Helper", { pid: 2 }), bundleId: undefined }), false);
+  assert.equal(isCandidate(app("Agent", { pid: 3, policy: "accessory" })), false);
+  assert.equal(isCandidate(app("Panel", { pid: 4, url: "/System/Library/Frameworks/X.framework/XPCServices/Panel.xpc" })), false);
 });

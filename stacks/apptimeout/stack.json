@@ -2,6 +2,5 @@
   "id": "apptimeout",
   "name": "AppTimeout",
   "headless": true,
-  "permissions": ["settings", "menu"],
-  "handles": ["apptimeout.menu", "bar.requestRegister", "apptimeout.protect"]
+  "permissions": []
 }

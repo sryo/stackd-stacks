@@ -20,15 +20,11 @@
   // remaining time and toggles the protected list, persisted via
   // sd.settings("ignored") as { bundleId: displayName|null }.
   import { sd } from "sd://runtime/api.js";
-  import { tick, isApp, TIMEOUT_S, CHECK_INTERVAL_MS } from "./logic.js";
+  import { tick, isCandidate, TIMEOUT_S, CHECK_INTERVAL_MS } from "./logic.js";
 
   // Seed for first boot only; thereafter sd.settings("ignored") is the
-  // truth and the menu edits it. Keyed by bundle identifier, not display
-  // name — the Lua original matched on localizedName, which is
-  // locale-dependent (on this es-AR system "Calendar" arrives as
-  // "Calendario"), so allowed apps failed the check and got killed.
-  // Display names stored so apps that aren't running still render
-  // readably in the menu.
+  // truth and the menu edits it. Display names are stored so apps that
+  // aren't running still render readably in the menu.
   const DEFAULT_IGNORED = {
     "com.apple.finder":           "Finder",
     "org.m0k.transmission":       "Transmission",
@@ -134,6 +130,10 @@
     syncPill();
   }
 
+  // The menu and protect handlers read `ignored`, so they register only once
+  // it's loaded; a bang that arrives earlier finds no handler and is dropped.
+  await loadIgnored();
+
   sd.bang.declare("apptimeout.menu").on(async () => {
     const apps = sd.apps.running.value || [];
     const now = Math.floor(Date.now() / 1000);
@@ -147,7 +147,7 @@
       });
     }
     const running = apps
-      .filter(a => a.bundleId && a.activationPolicy === "regular" && isApp(a) && !state.windowlessSince.has(a.bundleId))
+      .filter(a => isCandidate(a) && !state.windowlessSince.has(a.bundleId))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (items.length && running.length) items.push({ separator: true });
     for (const a of running) {
@@ -188,7 +188,6 @@
     syncPill();
   });
 
-  await loadIgnored();
   // sd.timer.interval (not raw setInterval) so the loop is cleared on
   // hot-reload — a surviving ghost loop would keep running the app-killer
   // against a stale protect-list.

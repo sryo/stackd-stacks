@@ -17,7 +17,13 @@ export const KILL_LIMIT    = 3;
 // bundleURL comes from sd.apps.running (daemon exposes it for this).
 export const isApp = (app) => typeof app.bundleURL === "string" && app.bundleURL.endsWith(".app");
 
-const isCandidate = (a) => !!a.bundleId && a.activationPolicy === "regular" && isApp(a);
+// An app AppTimeout may monitor at all. Regular activation policy is
+// Hammerspoon's app:kind() == 1: accessory (LSUIElement) and prohibited
+// processes (Browser Helper, sandbox brokers) are skipped. The .app check
+// still matters on top of it: XPC helpers (openAndSavePanelService,
+// QuickLookUIService) briefly flip to .regular while presenting a panel.
+// Requiring a bundle id also keeps sd.apps.kill(undefined) from happening.
+export const isCandidate = (a) => !!a.bundleId && a.activationPolicy === "regular" && isApp(a);
 
 // One monitoring pass. `state` is owned by the caller and mutated in place:
 //   windowlessSince: Map bundleId → epoch seconds the countdown started
@@ -77,16 +83,7 @@ export function tick(state, { apps, wins, ignored, now, bootS }) {
   const kills = [], monitoring = [], stopped = [], gaveUpNow = [];
   const seen = new Set();
   for (const app of apps) {
-    // Skipping bundleId-less apps also avoids sd.apps.kill(undefined).
-    if (!app.bundleId || ignored[app.bundleId] !== undefined) continue;
-    // Equivalent to Hammerspoon's app:kind() == 1: skip accessory
-    // (LSUIElement) and prohibited (XPC helper) processes so we don't
-    // try to kill Browser Helper / sandbox brokers / etc.
-    if (app.activationPolicy !== "regular") continue;
-    // Only real .app bundles. XPC service helpers (openAndSavePanelService,
-    // QuickLookUIService) live in .xpc bundles and briefly flip to .regular
-    // while presenting a panel, so activationPolicy alone lets them through.
-    if (!isApp(app)) continue;
+    if (!isCandidate(app) || ignored[app.bundleId] !== undefined) continue;
     seen.add(app.bundleId);
     const count = winCount.get(app.pid) || 0;
     const isFrontmost = !!app.active;

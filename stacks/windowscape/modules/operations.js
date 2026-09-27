@@ -11,6 +11,7 @@ import { tileWindows } from "./tiler.js";
 import { crossDisplayDrop } from "./events.js";
 import { captureAndMinimize } from "./snapshot_create.js";
 import { cursorFollow, PIN_MIN_PX } from "./layouts.js";
+import { sortBySlot } from "./order.js";
 
 function focusedWinId() {
   const f = sd.windows.focused.peek();
@@ -120,6 +121,15 @@ export async function minimizeFocused() {
   // off-screen).
 }
 
+// The row order the last reorder produced, reused by the next step for
+// RECENT_REORDER_MS (see sortBySlot).
+const RECENT_REORDER_MS = 1000;
+let lastReorder = null;
+function recentReorderFor(displayID) {
+  if (!lastReorder || lastReorder.displayID !== displayID) return null;
+  return Date.now() - lastReorder.at < RECENT_REORDER_MS ? lastReorder.ids : null;
+}
+
 // Swap focused window with its neighbor in tiling order. Direction-aware:
 // landscape "forward" = right neighbor, portrait "forward" = down neighbor.
 export function moveWindowInOrder(direction) {
@@ -141,17 +151,14 @@ export function moveWindowInOrder(direction) {
   // gesture/hotkey feels dead.
   const tiled = state.lastTiledByDisplay[d.displayID];
   const tiledSet = tiled && tiled.length ? new Set(tiled.map((id) => +id)) : null;
-  const sorted = order
+  const sorted = sortBySlot(order
     .map((id) => state.windowsById[id])
     .filter((win) => win && win.frame && win.frame.h > cfg.collapsedWindowHeight)
     .filter((win) => !tiledSet || tiledSet.has(+win.id))
     .filter((win) => {
       const wd = displayForWindow(win);
       return wd && wd.displayID === d.displayID;
-    });
-  sorted.sort((a, b) => horizontal
-    ? (a.frame.x + a.frame.w / 2) - (b.frame.x + b.frame.w / 2)
-    : (a.frame.y + a.frame.h / 2) - (b.frame.y + b.frame.h / 2));
+    }), horizontal, state.lastTileTarget, recentReorderFor(d.displayID));
 
   const idx = sorted.findIndex((win) => win.id === w.id);
   if (idx === -1 || sorted.length < 2) return;
@@ -159,6 +166,7 @@ export function moveWindowInOrder(direction) {
   if (target < 0 || target >= sorted.length) return;
 
   [sorted[idx], sorted[target]] = [sorted[target], sorted[idx]];
+  lastReorder = { displayID: d.displayID, ids: sorted.map((win) => +win.id), at: Date.now() };
 
   // Splice the new sorted order back into the full per-space order list,
   // keeping off-display + collapsed + non-tiled entries in place. Slot

@@ -22,6 +22,7 @@
     // HOUR_HALF below (25 = ~half of 45px shake-peak box) is the
     // boundary-clamp budget.
     import { sd } from "sd://runtime/api.js";
+    import { cursorOnPanel } from "./logic.js";
 
     const IS_24H            = true;
     const RADIUS            = 30;
@@ -89,13 +90,6 @@
       refreshText();
     });
 
-    // Per-instance display info — Bridge injects sd.screen.current with this
-    // instance's display frame so each fullscreen panel knows its own bounds.
-    // sd.mouse is global, so we filter to "cursor on THIS display" and then
-    // translate global coords → panel-local before drawing.
-    const myScreen = sd.screen.current;
-    const SF = myScreen && myScreen.frame; // { x, y, w, h } in global coords
-
     // Triangle gamma — copied verbatim from jiggle/math.js. Inner angle's
     // complement (180°): straight-line triplets → 0°, sharp reversals → ~180°.
     function gamma(st, nd, rd) {
@@ -137,30 +131,22 @@
 
     sd.mouse.subscribe(m => {
       if (!m) return;
-      // Multi-display gate: only the panel on the display the cursor is on
-      // draws. The other panels stay invisible. SF.x/y are the global origin
-      // of this display; subtract to get panel-local coords. Without this
-      // filter, every panel rendered the cursor at its global coords, which
-      // for a secondary display fell OFF the primary panel's bounds.
-      if (!SF) return;
-      if (m.x < SF.x || m.x >= SF.x + SF.w || m.y < SF.y || m.y >= SF.y + SF.h) {
-        el.style.opacity = "0";
-        bar.style.opacity = "0";
-        if (cancelHide) cancelHide();
+      // Only the panel on the cursor's display draws; the others hide.
+      const local = cursorOnPanel(m, sd.screen.current);
+      if (!local) {
+        hideNow();
         return;
       }
-      const localX = m.x - SF.x;
-      const localY = m.y - SF.y;
       const a = minuteAngleDeg() * Math.PI / 180;
       // Translate the outer .hour div TO the orbit point itself — the
       // inner .text span's `transform: translate(-50%, -50%)` centers
       // the glyph box on that point. Anchor stays put through scale
       // changes because the box never reflows.
-      let x = localX + RADIUS * Math.sin(a);
-      let y = localY - RADIUS * Math.cos(a);
+      let x = local.x + RADIUS * Math.sin(a);
+      let y = local.y - RADIUS * Math.cos(a);
       // Boundary clamp — keep the peak (scale=1, ~45px) visual box on
       // screen by reserving HOUR_HALF padding around the orbit point.
-      const W = SF.w, H = SF.h;
+      const W = local.w, H = local.h;
       const M = EDGE_MARGIN + HOUR_HALF;
       if (x < M)         x = M;
       if (x > W - M)     x = W - M;

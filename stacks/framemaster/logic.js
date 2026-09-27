@@ -24,3 +24,11 @@ export function sameRects(a, b) {
 export function inFrame(f, x, y) {
   return !!f && x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h;
 }
+
+// The entries of `displays` that `screen` (sd.screen.current) sits on. Each
+// display runs its own FrameMaster instance, and each instance gates only its
+// own display's corners so one click fires one action.
+export function ownDisplays(displays, screen) {
+  if (!screen) return [];
+  return displays.filter((d) => d && d.displayID === screen.displayID);
+}

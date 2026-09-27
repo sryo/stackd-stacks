@@ -4,6 +4,7 @@
   "region": "fullscreen",
   "clickThrough": true,
   "level": "tooltip",
+  "display": "all",
   "permissions": [],
   "eventtap": [
     { "event": "leftMouseDown", "callback": "click", "consume": true, "requireRects": true },

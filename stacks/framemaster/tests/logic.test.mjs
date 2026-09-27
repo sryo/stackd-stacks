@@ -26,3 +26,11 @@ test("inFrame tells whether a corner lies on the panel's own display", () => {
   assert.equal(inFrame(primary.frame, 1512, 0), false);
   assert.equal(inFrame(null, 0, 0), false);
 });
+
+test("ownDisplays keeps only the display this instance's panel is on", async () => {
+  const { ownDisplays } = await import("../logic.js");
+  const list = [{ ...primary, displayID: 1 }, { ...side, displayID: 2 }];
+  assert.deepEqual(ownDisplays(list, { displayID: 2 }), [list[1]]);
+  assert.deepEqual(ownDisplays(list, { displayID: 9 }), []);
+  assert.deepEqual(ownDisplays(list, null), []);
+});

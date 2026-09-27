@@ -9,17 +9,14 @@
 //   bottom-left   click → new Finder window (or focus Finder);
 //                 shift → open / focus System Settings
 //
-// Corners fire on every display, but the panel lives on the primary display
-// only, so tooltips show for the primary display's corners. `display: "all"`
-// would duplicate the panel per display, and the tap-rect gate and its
-// enter/leave state are keyed per stack, not per instance: every instance
-// would run each click's action and only one would see enter/leave.
+// One instance runs per display and handles that display's corners, so each
+// corner's tooltip shows on its own display.
 //
 // `hs.dialog.blockAlert` (modal "Reopen?" prompt) → AppleScript
 // `display dialog` via sd.applescript.run, same UX (modal Reopen / Ignore).
 
 import { sd } from "sd://runtime/api.js";
-import { cornerRects, sameRects, inFrame } from "./logic.js";
+import { cornerRects, sameRects, inFrame, ownDisplays } from "./logic.js";
 
 const FLAGS = { shift: 0x020000 };
 // Width of the corner trigger band, in points. Matches FrameMaster.lua's
@@ -36,22 +33,27 @@ let displays = [];
 let lastKilledBundleId = null;
 let lastKilledAppName = null;
 
-// Push the corner band rects to the daemon so the consuming leftMouseDown
-// tap only swallows clicks inside a hot corner — anything outside passes
-// through to the focused app normally. Both the click tap and the mouseMoved
-// hover tap (opted into emitLeave, so it reports enter/leave) gate on the
-// same rects. display.all refires for changes that don't move any corner;
-// an unchanged set isn't re-pushed, since a push resets the hover gate's
-// enter/leave state.
+// Push this display's corner band rects to the daemon so the consuming
+// leftMouseDown tap only swallows clicks inside a hot corner — anything
+// outside passes through to the focused app normally. Both the click tap and
+// the mouseMoved hover tap (opted into emitLeave, so it reports enter/leave)
+// gate on the same rects. Every display runs its own instance with its own
+// gates, so each pushes only the corners of the display it sits on.
+// display.all refires for changes that don't move any corner; an unchanged
+// set isn't re-pushed, since a push resets the hover gate's enter/leave state.
 let pushedRects = null;
-sd.display.all.subscribe(list => {
-  displays = list || [];
-  const rects = cornerRects(displays, CORNER_BAND);
+function pushTapRects() {
+  const rects = cornerRects(ownDisplays(displays, sd.screen.current), CORNER_BAND);
   if (sameRects(rects, pushedRects)) return;
   pushedRects = rects;
   sd.events.setTapRects("click", rects);
   sd.events.setTapRects("hover", rects);
+}
+sd.display.all.subscribe(list => {
+  displays = list || [];
+  pushTapRects();
 });
+window.addEventListener("sd:screen", pushTapRects);
 
 function shiftHeld() { return (lastFlags & FLAGS.shift) !== 0; }
 

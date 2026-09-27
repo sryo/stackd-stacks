@@ -7,21 +7,19 @@
   //
   // If Music or iTunes launches, kill it; then launch Spotify instead.
   //
-  // The Lua also intercepts the systemDefined Play media key when Spotify
-  // isn't running and launches Spotify (consuming the event so Music doesn't
-  // open). stackd's EventTap is currently .listenOnly so handlers can't
-  // consume events — deferred until sd.eventtap.intercept lands.
+  // The Lua also intercepts the Play media key when Spotify isn't running
+  // and launches Spotify (consuming the event so Music doesn't open). Not
+  // ported: media keys arrive as systemDefined events, which manifest
+  // `eventtap` entries can't match yet.
   import { sd } from "sd://runtime/api.js";
 
   const BLOCKED = new Set(["com.apple.Music", "com.apple.iTunes"]);
   const SPOTIFY = "com.spotify.client";
 
-  // Kill Music/iTunes whenever they're seen, not just on new launches —
-  // the lua version watches the launch event only, but in practice users
-  // want this stronger guarantee (a Music process that survives a stack
-  // reload, or appears mid-session via some indirect launch path, should
-  // still get killed). Every snapshot fire, scan for any blocked app and
-  // kill it; the next snapshot will confirm it's gone.
+  // Kill Music/iTunes whenever they're seen, not just on new launches, so a
+  // Music process that survives a stack reload or appears through some
+  // indirect launch path still gets killed. Every snapshot fire, scan for
+  // any blocked app and kill it; the next snapshot will confirm it's gone.
   sd.apps.running.subscribe(async (apps) => {
     if (!apps) return;
     let killed = false;
@@ -35,7 +33,7 @@
       // Match the Lua's 0.1s delay — gives macOS time to register the kill
       // before launchOrFocus, otherwise the launch can race the death and
       // re-open Music briefly.
-      setTimeout(() => {
+      sd.timer.timeout(() => {
         // Re-read live state — the `apps` snapshot is ~100ms stale by now,
         // so Spotify may already be running (avoids a redundant relaunch).
         const running = (sd.apps.running.peek() || []).some(a => a.bundleId === SPOTIFY);

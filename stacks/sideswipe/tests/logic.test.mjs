@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { throttledLatest, detent } from "../logic.js";
+import { throttledLatest, detent, clickGate } from "../logic.js";
 
 // Same shape as sd.timer.throttle: leading call runs now, one trailing call
 // runs when the window expires, with the arguments of the call that
@@ -36,8 +36,9 @@ test("throttledLatest reports a rejected apply instead of leaving it unhandled",
   assert.deepEqual(errors, ["denied"]);
 });
 
-test("detent stays quiet on the first frame of a touch", () => {
-  assert.deepEqual(detent(undefined, 0.5), { step: 8, pattern: null });
+test("detent clicks on a touch's first frame, where the level jumps to the finger", () => {
+  assert.deepEqual(detent(undefined, 0.5), { step: 8, pattern: "alignment" });
+  assert.deepEqual(detent(undefined, 0), { step: 0, pattern: "levelChange" });
 });
 
 test("detent ticks alignment on each step crossed, levelChange at the ends", () => {
@@ -57,4 +58,19 @@ test("detent holds its step while the finger jitters on a boundary", () => {
 
 test("detent ticks once when a flick skips several steps in one frame", () => {
   assert.deepEqual(detent(2, 6 / 16), { step: 6, pattern: "alignment" });
+});
+
+test("clickGate drops step clicks closer than the gap and lets the next one through", () => {
+  const allow = clickGate(60);
+  assert.equal(allow("alignment", 0), true);
+  assert.equal(allow("alignment", 30), false);
+  assert.equal(allow("alignment", 59), false);
+  assert.equal(allow("alignment", 60), true);
+});
+
+test("clickGate always lets end-stop clicks through", () => {
+  const allow = clickGate(60);
+  assert.equal(allow("alignment", 0), true);
+  assert.equal(allow("levelChange", 10), true);
+  assert.equal(allow("alignment", 40), false);
 });

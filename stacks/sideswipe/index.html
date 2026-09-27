@@ -14,7 +14,7 @@
 </svg>
 <script type="module">
   import { sd } from "sd://runtime/api.js";
-  import { throttledLatest, detent } from "./logic.js";
+  import { throttledLatest, detent, clickGate } from "./logic.js";
 
   // Window is a Liquid Glass disc anchored bottom-center. We hide it at
   // alpha=0 by default and reveal on edge-swipe — sd.window.setAlpha is
@@ -28,6 +28,10 @@
     hudDuration:  1000,
     applyEveryMs: 50,
     detents:      16,
+    clickGapMs:   35,
+    // Raw actuator waveforms (sd.haptic.actuate): the public patterns get
+    // dropped for a finger on the pad's outer edge, where this stack lives.
+    waveforms:    { alignment: 1, levelChange: 6 },
     edges: { left: "brightness", right: "volume" }
   };
 
@@ -91,6 +95,7 @@
 
   const validTouches = new Map();
   const touchSteps   = new Map();
+  const allowClick   = clickGate(CFG.clickGapMs);
 
   sd.touchdevice.subscribe((snap) => {
     if (!snap) return;
@@ -124,7 +129,9 @@
       // throttled apply, so they land under the finger.
       const { step, pattern } = detent(touchSteps.get(id), level, CFG.detents);
       touchSteps.set(id, step);
-      if (pattern) sd.haptic.perform(pattern);
+      if (pattern && allowClick(pattern, performance.now())) {
+        sd.haptic.actuate(CFG.waveforms[pattern], snap.device);
+      }
       showHud(action.symbol, percent);
       break;
     }

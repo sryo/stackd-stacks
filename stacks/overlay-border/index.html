@@ -23,8 +23,9 @@
   // color — the first-paint flash before windowscape's bang arrives is the
   // documented tradeoff (no boot-handshake on a fast-path overlay).
   //
-  // Per-window corner radius via sd.windows.cornerHints — same mapping the
-  // legacy windowscape/outline.lua used on Tahoe.
+  // Per-window corner radius via sd.windows.cornerHints. On macOS 27 every
+  // standard window rounds at 16pt, toolbar or not (Tahoe's 26pt toolbar
+  // radius, which the legacy windowscape/outline.lua matched, is gone).
   import { sd } from "sd://runtime/api.js";
   import { forgetWindow } from "./logic.js";
 
@@ -131,9 +132,8 @@
   }
 
   function radiusFromHints(h) {
-    if (!h) return 16;
-    if (h.subrole === "AXSystemDialog" || h.role === "AXScrollArea") return 0;
-    return h.toolbarPresent ? 26 : 16;
+    if (h && (h.subrole === "AXSystemDialog" || h.role === "AXScrollArea")) return 0;
+    return 16;
   }
 
   // Boot spec: a single border <div> plus a `window.applyStyle` function the

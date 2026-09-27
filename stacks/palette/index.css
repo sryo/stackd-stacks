@@ -36,7 +36,6 @@ html, body {
   height: 100%;
   color: var(--fg);
   font: 14px var(--font);
-  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 

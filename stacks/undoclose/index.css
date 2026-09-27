@@ -24,7 +24,6 @@ body {
   justify-content: center;
   font: 14px var(--sd-font);
   color: var(--sd-fg);
-  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 

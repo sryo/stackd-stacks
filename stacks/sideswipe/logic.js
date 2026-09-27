@@ -13,3 +13,19 @@ export function throttledLatest(throttle, apply, ms, onError = () => {}) {
   }, ms);
   return (value) => { latest = value; fire(); };
 }
+
+// Quantize a 0..1 level into `steps` detents, the way the macOS volume and
+// brightness HUDs do, and say which trackpad click (sd.haptic pattern) the
+// move earned: none on a touch's first frame (`prev` undefined) or within
+// the current step, "alignment" for a new step, "levelChange" on reaching
+// either end. The step only moves once the level is `hysteresis` steps past
+// the rounding boundary, so a finger resting on one doesn't chatter.
+export function detent(prev, level, steps = 16, hysteresis = 0.15) {
+  const pos = level * steps;
+  if (prev !== undefined && Math.abs(pos - prev) < 0.5 + hysteresis) {
+    return { step: prev, pattern: null };
+  }
+  const step = Math.round(pos);
+  if (prev === undefined || step === prev) return { step, pattern: null };
+  return { step, pattern: step === 0 || step === steps ? "levelChange" : "alignment" };
+}

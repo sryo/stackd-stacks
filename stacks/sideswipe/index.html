@@ -14,7 +14,7 @@
 </svg>
 <script type="module">
   import { sd } from "sd://runtime/api.js";
-  import { throttledLatest } from "./logic.js";
+  import { throttledLatest, detent } from "./logic.js";
 
   // Window is a Liquid Glass disc anchored bottom-center. We hide it at
   // alpha=0 by default and reveal on edge-swipe — sd.window.setAlpha is
@@ -27,6 +27,7 @@
     edgePadding:  0.08,
     hudDuration:  1000,
     applyEveryMs: 50,
+    detents:      16,
     edges: { left: "brightness", right: "volume" }
   };
 
@@ -89,6 +90,7 @@
   }
 
   const validTouches = new Map();
+  const touchSteps   = new Map();
 
   sd.touchdevice.subscribe((snap) => {
     if (!snap) return;
@@ -116,13 +118,19 @@
       const pad = CFG.edgePadding;
       const pos = (activeEdge === "left" || activeEdge === "right") ? y : x;
       const percent = Math.max(0, Math.min(100, (pos - pad) / (1 - 2 * pad) * 100));
-      applyLevel({ action, level: percent / 100 });
+      const level = percent / 100;
+      applyLevel({ action, level });
+      // Clicks go out on the step crossing itself, not through the
+      // throttled apply, so they land under the finger.
+      const { step, pattern } = detent(touchSteps.get(id), level, CFG.detents);
+      touchSteps.set(id, step);
+      if (pattern) sd.haptic.perform(pattern);
       showHud(action.symbol, percent);
       break;
     }
 
     for (const id of validTouches.keys()) {
-      if (!currentIds.has(id)) validTouches.delete(id);
+      if (!currentIds.has(id)) { validTouches.delete(id); touchSteps.delete(id); }
     }
   });
 </script>

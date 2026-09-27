@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { throttledLatest } from "../logic.js";
+import { throttledLatest, detent } from "../logic.js";
 
 // Same shape as sd.timer.throttle: leading call runs now, one trailing call
 // runs when the window expires, with the arguments of the call that
@@ -34,4 +34,27 @@ test("throttledLatest reports a rejected apply instead of leaving it unhandled",
   set(1);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(errors, ["denied"]);
+});
+
+test("detent stays quiet on the first frame of a touch", () => {
+  assert.deepEqual(detent(undefined, 0.5), { step: 8, pattern: null });
+});
+
+test("detent ticks alignment on each step crossed, levelChange at the ends", () => {
+  assert.deepEqual(detent(8, 0.5), { step: 8, pattern: null });
+  assert.deepEqual(detent(8, 9 / 16), { step: 9, pattern: "alignment" });
+  assert.deepEqual(detent(1, 0), { step: 0, pattern: "levelChange" });
+  assert.deepEqual(detent(15, 1), { step: 16, pattern: "levelChange" });
+});
+
+test("detent holds its step while the finger jitters on a boundary", () => {
+  // 8.5/16 is exactly between steps 8 and 9; a touch sitting there must not
+  // click back and forth.
+  assert.deepEqual(detent(8, 8.55 / 16), { step: 8, pattern: null });
+  assert.deepEqual(detent(9, 8.45 / 16), { step: 9, pattern: null });
+  assert.deepEqual(detent(8, 8.7 / 16), { step: 9, pattern: "alignment" });
+});
+
+test("detent ticks once when a flick skips several steps in one frame", () => {
+  assert.deepEqual(detent(2, 6 / 16), { step: 6, pattern: "alignment" });
 });

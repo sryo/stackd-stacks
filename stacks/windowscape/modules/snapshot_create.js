@@ -13,15 +13,9 @@
 //                                  bitmap. Used by snapshots.js
 //                                  onBang_sd_window_minimized.
 //
-// Zoom-in animation: the tile element is created with `transform:
-// scale(0.5); opacity: 0` and the .in class flips both to identity via a
-// CSS transition (driven by snapshots.js's updateLayout). The CSS
-// animation duration roughly matches the original ANIMATION_INTERVAL ×
-// ANIMATION_STEPS.
-//
-// Ambient blur: not directly portable to a CSS transform on a single
-// tile. We approximate with a box-shadow + border that gives the tile a
-// "frosted" presence.
+// Both run through one queue: a capture that arrives while another is in
+// flight (minimize-all fires one bang per window) waits its turn instead of
+// being dropped.
 
 import { sd } from "sd://runtime/api.js";
 import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log } from "./core.js";
@@ -31,12 +25,10 @@ import {
   adjustedFrameForDisplay
 } from "./snapshots.js";
 import { areaChanged } from "./layouts.js";
+import { serialQueue } from "./sequencing.js";
+import { tileWindows } from "./tiler.js";
 
-// Lazy-import tiler so we don't create an eval-time cycle (snapshots.js ←→
-// tiler.js via reserved-frame adjustment).
-async function getTiler() {
-  return await import("./tiler.js");
-}
+const enqueue = serialQueue((job) => job());
 
 // Capture the window into the persistable state map. Common helper used by
 // both flows. Returns the snapshot data dict on success, null on failure.
@@ -94,20 +86,18 @@ async function captureCore(winId) {
   return data;
 }
 
-// Default capture path (no restoreData).
-// Grabs the snapshot, AX-minimizes, retiles. The CSS-driven zoom-in is
-// applied by snapshots.js updateLayout (tile is created with scale(0.5);
-// .in flips it to scale(1) via transition).
-export async function captureAndMinimize(winId) {
-  if (state.snapshotsState.isCreating) return;
+// Grabs the snapshot, AX-minimizes, retiles.
+export function captureAndMinimize(winId) {
+  return enqueue(() => captureAndMinimizeNow(winId));
+}
+
+async function captureAndMinimizeNow(winId) {
   state.snapshotsState.isCreating = true;
-  state.snapshotsState.isCreatingStart = Date.now();
   try {
     const data = await captureCore(winId);
     if (!data) return;
 
-    // AX-minimize. The window's frame collapses; lifecycle tick will drop
-    // it from windowsById on the next windowsAll push.
+    // AX-minimize.
     try { await sd.windows.minimize(winId, true); } catch (e) {
       // If AX-minimize fails (system dialog, transient app, etc.), back out.
       console.warn(`[WindowScape] minimize ${winId} failed:`, e);
@@ -123,29 +113,27 @@ export async function captureAndMinimize(winId) {
     state.snapshotsState.isCreating = false;
   }
 
-  // Retile after a 200ms delay so the just-minimized window has time to
-  // drop out of windowsById (lifecycle bang fires async).
-  setTimeout(async () => {
-    const tiler = await getTiler();
-    await tiler.tileWindows();
-  }, 200);
+  // Retile after a 200ms delay so the minimized bang (async) has marked
+  // the window minimized first.
+  setTimeout(() => tileWindows(), 200);
 }
 
 // Capture a window that JUST minimized via the OS (yellow dot click, Cmd+M,
 // Dock right-click, etc.). The lifecycle bang `sd.window.minimized` fires
 // after WindowServer finishes the genie; by then the window is no longer
-// onscreen, so we read its last-known frame/app/title from windowsById
-// before the next windowsAll push evicts it. CGSHWCaptureWindowList still
-// returns a clean bitmap of the minimized window's pre-genie contents.
+// onscreen, so its frame/app/title come from windowsById (the window list
+// keeps minimized windows). CGSHWCaptureWindowList still returns a clean bitmap of the minimized window's pre-genie contents.
 //
 // No second minimize call; no focus shift (the OS already shifted focus to
 // whichever window inherited it). Just bitmap + tile + retile to reserve
 // strip space.
-export async function captureForOSMinimize(winId) {
-  if (state.snapshotsState.isCreating) return;
+export function captureForOSMinimize(winId) {
+  return enqueue(() => captureForOSMinimizeNow(winId));
+}
+
+async function captureForOSMinimizeNow(winId) {
   if (state.snapshotsState.snapshots[winId]) return; // already tracked
   state.snapshotsState.isCreating = true;
-  state.snapshotsState.isCreatingStart = Date.now();
   let data = null;
   try {
     data = await captureCore(winId);
@@ -158,14 +146,13 @@ export async function captureForOSMinimize(winId) {
   // finished before that pass measured its area, the pass laid the row out
   // around the new rail and a second pass would only restart the same
   // animations; retile only when the rail changed the area after it.
-  setTimeout(async () => {
+  setTimeout(() => {
     const d = state.displays.find((x) => x.displayID === data.displayID);
     const area = d && (adjustedFrameForDisplay(d) || d.visibleFrame);
     if (d && !areaChanged(state.lastTileAreaByDisplay[d.displayID], area)) {
       log(`SNAP-RETILE-SKIP d${d.displayID} — last pass already used the rail`);
       return;
     }
-    const tiler = await getTiler();
-    await tiler.tileWindows();
+    tileWindows();
   }, 200);
 }

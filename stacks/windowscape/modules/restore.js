@@ -1,5 +1,5 @@
-// Session restore (layout only; snapshot rehydration
-// is deferred along with the snapshot system).
+// Session restore of the tiling layout (snapshots persist separately, in
+// snapshots.js).
 //
 // Save shape:
 //   { spaces: { "<spaceId>": [{ bundleId, title, weight }, ...], ... } }

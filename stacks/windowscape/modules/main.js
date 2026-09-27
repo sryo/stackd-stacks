@@ -1,7 +1,7 @@
 // Bootloader. Wires the modules and starts watchers.
 
 import { sd } from "sd://runtime/api.js";
-import { state, loadList, loadFixedWidthApps, updateWindowOrder, inclusionOf } from "./core.js";
+import { state, loadList, loadFixedWidthApps, updateWindowOrder, emitInclusion } from "./core.js";
 import { start as startEvents, startDragBracket, endDragBracket } from "./events.js";
 import { bind as bindKeybinds } from "./keybinds.js";
 import { bind as bindGestures } from "./gestures.js";
@@ -36,9 +36,9 @@ async function init() {
   // drag synth-poll bang. Sharing the eventtap callback so the daemon
   // doesn't install two taps for the same event.
   sd.events.on("snapshotsLeftClick", (payload) => {
-    // Payload carries the global click point. If it landed on a snapshot tile,
-    // onLeftClickEvent handles it (restore/drop) and returns true — do NOT also
-    // open the drag bracket, whose deferred tile pass otherwise fights the
+    // Payload carries the global click point. If it is a snapshot interaction
+    // (a tile, or anything while the context menu is open), onLeftClickEvent
+    // returns true — do NOT also open the drag bracket, whose deferred tile pass otherwise fights the
     // restore (window deminimizes, then the bracket re-tiles it — logged as
     // via=bracket-deferred). Only open the bracket for clicks that MISS the
     // strip (real window drags), where it detects titlebar double-clicks
@@ -46,10 +46,9 @@ async function init() {
     if (onLeftClickEvent(payload)) return;
     startDragBracket(payload);
   });
-  // Consuming tap: fires only when the click is over a snapshot tile rect
-  // (gate fed by snapshots.js reconcileOverlays) and swallows it, so the tile
-  // action runs without the click falling through to the desktop behind the
-  // click-through overlay.
+  // Consuming tap: fires only when the click is over a snapshot tile or the
+  // open context menu (gate fed by snapshots.js pushTapRects) and swallows it,
+  // so the action runs without the click falling through to what's behind.
   sd.events.on("snapshotsTileClick", onTileClickEvent);
   sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
   // No mouseMoved eventtap: firing at ~120Hz it starved every other stack's
@@ -74,10 +73,7 @@ async function init() {
     // resolves. Without this, the boot border briefly shows the default
     // "included" color for an excluded window.
     const fid = sd.windows.focused.peek()?.id;
-    if (fid != null) {
-      const w = state.windowsById[fid];
-      if (w) sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
-    }
+    if (fid != null) emitInclusion(state.windowsById[fid]);
     console.log("[WindowScape] initialized");
   }, 500);
 }

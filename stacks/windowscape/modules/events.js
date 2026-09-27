@@ -1,17 +1,16 @@
-// Event plumbing (slimmed: no AXObserver per-app yet, no right-click
-// eventtap for snapshots, no watchdog). The 1Hz lifecycle poll + the
-// windowsAll / focused signals drive everything here.
+// Event plumbing: the sd.windows.all / focusedChanged / spaces / display
+// channels, the window lifecycle bangs and the drag bracket drive everything
+// here.
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
-  state, log, evt, updateWindowOrder, isManaged, isFloating, inclusionOf, tileOpts, displayForWindow,
+  state, log, evt, updateWindowOrder, isManaged, isFloating, emitInclusion, tileOpts, displayForWindow,
   migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor, appMinFor
 } from "./core.js";
-import { isTileable } from "./tileable.js";
+import { isTileable, floatReason } from "./tileable.js";
 import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight, isDocked } from "./tiler.js";
 import { floatsToDock } from "./floatzone.js";
-import { floatReason } from "./tileable.js";
 import { PIN_MIN_PX, displaySetChanged, pairwisePins } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating, cancelAnimation } from "./animation.js";
@@ -19,15 +18,6 @@ import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "
 import { oobPinBlockReason, fullscreenExits, idsCachedOnSpaces, FS_EXIT_GRACE_MS } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 import { returnedOnscreen } from "./onscreen.js";
-
-// Push an inclusion verdict to the overlay-border stack so it can paint the
-// focused window's border in the included vs excluded palette. The bang is
-// user-defined (bare name, no `sd.` prefix); overlay-border caches per-id so
-// re-focus is free.
-function emitInclusionBang(w) {
-  if (!w || !w.id) return;
-  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
-}
 
 // Fixed-size floats dock into the float zone (floatzone.js) as soon as the
 // window list confirms them, and the tiles reflow once, right then.
@@ -247,7 +237,7 @@ async function handleWindowEvent() {
   // Refresh the focused window's inclusion verdict — overlay-border owns
   // the border render now, we just push the policy.
   const fid = sd.windows.focused.peek()?.id;
-  if (fid != null) emitInclusionBang(state.windowsById[fid]);
+  if (fid != null) emitInclusion(state.windowsById[fid]);
 }
 
 // Out-of-bracket resize debounce — replaces the removed 500ms drift-watch
@@ -420,7 +410,7 @@ export function start() {
     // Push inclusion verdict so overlay-border can paint the right palette.
     // The overlay attach itself is driven by overlay-border's own
     // focusedChanged subscription.
-    emitInclusionBang(state.windowsById[id] || w);
+    emitInclusion(state.windowsById[id] || w);
   });
 
   sd.spaces.all.subscribe(async (info) => {
@@ -468,9 +458,7 @@ export function start() {
   // Display geometry changes. macOS posts NSApplication.didChangeScreen­Parameters­
   // (which sd.display.all rides) BEFORE NSScreen metrics settle — reading
   // visibleFrame inside this callback often returns the OLD frame. We
-  // debounce 250ms before re-tiling for this exact reason, and reset
-  // tilingCount + clear any in-flight cooldowns so the post-debounce tile
-  // pass isn't blocked.
+  // debounce 250ms before re-tiling for this exact reason.
   let displayDebounce = null;
   // Cache the geometry signature so we can skip retiles when the only
   // thing that changed was brightness (sd.display.all re-pushes on every
@@ -516,14 +504,16 @@ export function start() {
       // The daemon re-pushes sd.windows.all after every display change;
       // wait (bounded) for one that postdates this change so frames reflect
       // where macOS moved the windows.
-      for (let i = 0; i < 10 && (state.windowsPushAt || 0) < displayChangedAt; i++) {
-        await new Promise((r) => setTimeout(r, 100));
+      try {
+        for (let i = 0; i < 10 && (state.windowsPushAt || 0) < displayChangedAt; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        state.windowSpacesCache = Object.create(null);
+        await refreshSpacesCache(Object.keys(state.windowsById).map(Number));
+      } finally {
+        // A failed space refresh must not leave every tile pass skipping.
+        state.displaySettling = false;
       }
-      state.windowSpacesCache = Object.create(null);
-      await refreshSpacesCache(Object.keys(state.windowsById).map(Number));
-      state.displaySettling = false;
-      // Clear stale tile cooldown so the retile actually runs.
-      state.tilingCount = 0;
       updateWindowOrder();
       state.tileReason = "display-change";
       tileWindows();

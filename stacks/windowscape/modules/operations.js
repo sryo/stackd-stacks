@@ -9,7 +9,8 @@ import {
 } from "./core.js";
 import { tileWindows } from "./tiler.js";
 import { crossDisplayDrop } from "./events.js";
-import { captureAndMinimize } from "./snapshots.js";
+import { captureAndMinimize } from "./snapshot_create.js";
+import { cursorFollow, PIN_MIN_PX } from "./layouts.js";
 
 function focusedWinId() {
   const f = sd.windows.focused.peek();
@@ -27,7 +28,6 @@ function focusedWin() {
 // principle is "user touched this tile's size, lock it." cycleWidth
 // removes the pin and resets to flex.
 const GROW_STEP_PX = 100;
-const PIN_MIN_PX   = 100;
 export function adjustFocusedPin(deltaPx) {
   const w = focusedWin();
   if (!w || !w.frame) return;
@@ -70,7 +70,6 @@ export function resetAllWeights() {
 }
 
 export function forceRetile() {
-  state.tilingCount = 0;
   tileWindows();
 }
 
@@ -115,7 +114,7 @@ export async function minimizeFocused() {
   // point. captureAndMinimize handles the snapshot grab and renders the
   // tile into the strip.
   await captureAndMinimize(movedId);
-  if (sibling != null) sd.windows.focus(sibling);
+  if (sibling != null) sd.windows.focus(sibling).catch(() => {});
   // Layout will re-flow on the next windowsAll tick (the minimized
   // window drops out of windowsById since its frame collapses to 0×0
   // off-screen).
@@ -193,19 +192,14 @@ export function moveWindowInOrder(direction) {
     mousePos.y >= oldFrame.y && mousePos.y <= oldFrame.y + oldFrame.h;
 
   tileWindows();
-  sd.windows.focus(w.id);
+  sd.windows.focus(w.id).catch(() => {});
 
   if (mouseWasInside) {
-    // tileWindows runs the AX setFrame batch synchronously inside sd.windows.batch,
-    // but the new frame snapshot lands on the next windowsAll tick. Re-read
-    // the moved window's frame after a short delay and translate the mouse.
+    // The pass records each window's target before it animates there; warp
+    // to the target, not the live frame, which is still mid-flight.
     setTimeout(() => {
-      const updated = state.windowsById[w.id];
-      if (!updated || !updated.frame) return;
-      const nf = updated.frame;
-      const newX = nf.x + (mousePos.x - oldFrame.x);
-      const newY = nf.y + (mousePos.y - oldFrame.y);
-      sd.mouse.warp(newX, newY);
+      const p = cursorFollow(mousePos, oldFrame, state.lastTileTarget[w.id]?.frame, state.windowsById[w.id]?.frame);
+      if (p) sd.mouse.warp(p.x, p.y).catch(() => {});
     }, 50);
   }
 }

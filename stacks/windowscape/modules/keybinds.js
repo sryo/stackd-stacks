@@ -4,7 +4,7 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, saveList, updateWindowOrder, inclusionOf, tileOpts, displayForWindow, log } from "./core.js";
+import { state, saveList, updateWindowOrder, emitInclusion, tileOpts, displayForWindow, log } from "./core.js";
 import { nextOverride } from "./tileable.js";
 import {
   grow, shrink, cycleWidth, resetAllWeights, forceRetile,
@@ -38,11 +38,10 @@ async function toggleFocusedWindowInList() {
   updateWindowOrder();
   await tileWindows();
   // Toggling exclusion flips the inclusion verdict for the focused window;
-  // push the new verdict so overlay-border re-skins immediately. Use
-  // inclusionOf against the freshly-mutated state.listedApps rather than
-  // inverting the local `listed` variable — the inverse depends on
-  // cfg.exclusionMode and inclusionOf already encapsulates that.
-  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(state.windowsById[f.id] || f));
+  // push the new verdict so overlay-border re-skins immediately. The verdict
+  // is recomputed from the freshly-mutated state.listedApps rather than by
+  // inverting `listed` — the inverse depends on cfg.exclusionMode.
+  emitInclusion(state.windowsById[f.id] || f);
 }
 
 // Per-window float toggle (tileable.js nextOverride). A window that
@@ -60,7 +59,7 @@ async function toggleFocusedWindowFloat() {
   updateWindowOrder();
   state.tileReason = "float-toggle";
   await tileWindows();
-  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
+  emitInclusion(w);
 }
 
 // Focus the next docked float on the focused window's display, newest

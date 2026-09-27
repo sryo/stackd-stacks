@@ -169,7 +169,6 @@ export const state = {
     snapshots:          Object.create(null),
     order:              [],            // insertion order across all displays
     isCreating:         false,
-    isCreatingStart:    0,
     stripScrollOffsets: Object.create(null)
   }
 };
@@ -190,7 +189,7 @@ export function fsTransitionBlockFor(d) {
 
 export function appKeyOf(winId) {
   const w = state.windowsById[winId];
-  return w ? (w.bundleId || w.app || String(winId)) : String(winId);
+  return w ? appKeyOfWindow(w) : String(winId);
 }
 export function appMinFor(winId, horizontal) {
   const m = state.appMins[appKeyOf(winId)];
@@ -287,6 +286,13 @@ export function isManaged(w) {
 // floating — the border paints each differently.
 export function inclusionOf(w) {
   return { winId: w.id, included: isManaged(w), floating: isFloating(w) };
+}
+
+// Push a window's inclusion verdict to overlay-border (a bare, user-defined
+// bang name). overlay-border caches per id, so a repeat is free.
+export function emitInclusion(w) {
+  if (!w || !w.id) return;
+  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
 }
 
 export async function learnPanelApp(w) {

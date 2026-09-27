@@ -19,18 +19,8 @@
 // .active to bail out, this module owns writes.
 
 import { sd } from "sd://runtime/api.js";
-import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, isManaged, inclusionOf, log } from "./core.js";
+import { state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, isManaged, emitInclusion, log, warn } from "./core.js";
 import { tileWindows } from "./tiler.js";
-
-// Belt-and-suspenders push to overlay-border so the border has the right
-// color even if the focused window's id didn't change across the
-// fullscreen flip (focusedChanged would have already pushed otherwise).
-function emitInclusionBang(winId) {
-  if (!winId) return;
-  const w = state.windowsById[winId];
-  if (!w) return;
-  sd.bang.declare('overlay-border.inclusion').emit(inclusionOf(w));
-}
 
 // Returns true if the window is on the same display + active space as the
 // fullscreened window. Used to decide which peers get parked.
@@ -117,21 +107,29 @@ export async function enterSimulatedFullscreen(winId) {
   fs.savedWeights = { ...state.windowWeights };
   fs.savedPinnedSizes = { ...state.pinnedSizes };
 
-  // Park peers + fullscreen the target in one atomic compositor flip.
-  await sd.windows.batch(async () => {
-    for (const pid of peerIds) {
-      await sd.windows.setFrame(pid, parkFrame);
-    }
-    await sd.windows.setFrame(winId, screenFrame);
-  });
+  // Park peers + fullscreen the target in one atomic compositor flip. If it
+  // fails, back out through exit: it restores whatever was parked and
+  // releases the tiler guard.
+  try {
+    await sd.windows.batch(async () => {
+      for (const pid of peerIds) {
+        await sd.windows.setFrame(pid, parkFrame);
+      }
+      await sd.windows.setFrame(winId, screenFrame);
+    });
+  } catch (e) {
+    warn(`fullscreen: park failed (${e}), exiting`);
+    await exitSimulatedFullscreen();
+    return;
+  }
 
   // Re-focus the fullscreened window — parking peers may have shifted focus
   // depending on app behavior. Idempotent if focus didn't move.
-  await sd.windows.focus(winId);
+  await sd.windows.focus(winId).catch(() => {});
 
   // Belt-and-suspenders bang to overlay-border in case the focus didn't
   // change (toggling fullscreen on the already-focused window).
-  emitInclusionBang(winId);
+  emitInclusion(state.windowsById[winId]);
 }
 
 export async function exitSimulatedFullscreen() {
@@ -179,13 +177,17 @@ export async function exitSimulatedFullscreen() {
   // The fullscreened window itself is included so it shrinks back to its
   // pre-enter size. Dead ids are silently skipped; the next tile pass
   // will reflow whatever remains.
-  await sd.windows.batch(async () => {
-    for (const idStr of Object.keys(savedFrames)) {
-      const id = +idStr;
-      if (!state.windowsById[id]) continue;
-      await sd.windows.setFrame(id, savedFrames[idStr]);
-    }
-  });
+  try {
+    await sd.windows.batch(async () => {
+      for (const idStr of Object.keys(savedFrames)) {
+        const id = +idStr;
+        if (!state.windowsById[id]) continue;
+        await sd.windows.setFrame(id, savedFrames[idStr]);
+      }
+    });
+  } catch (e) {
+    warn(`fullscreen: restore failed (${e}), retiling`);
+  }
 
   // Tile to settle any divergence between saved frames and current weight
   // distribution (e.g. peers that were added/removed while fullscreened).
@@ -195,12 +197,12 @@ export async function exitSimulatedFullscreen() {
   // alive; otherwise the focus signal will resolve to whatever macOS
   // promotes after the window closed.
   if (focusedWinId && state.windowsById[focusedWinId]) {
-    await sd.windows.focus(focusedWinId);
+    await sd.windows.focus(focusedWinId).catch(() => {});
   }
 
   // Belt-and-suspenders bang — same id may be focused, so focusedChanged
   // wouldn't fire, but the border needs to reset to the right palette.
-  if (focusedWinId) emitInclusionBang(focusedWinId);
+  if (focusedWinId) emitInclusion(state.windowsById[focusedWinId]);
 }
 
 // Exported keybind verb — flips between enter/exit based on current state.

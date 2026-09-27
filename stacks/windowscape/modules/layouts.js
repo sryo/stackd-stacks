@@ -253,3 +253,23 @@ export function areaChanged(last, area) {
   if (!last || !area) return true;
   return last.x !== area.x || last.y !== area.y || last.w !== area.w || last.h !== area.h;
 }
+
+// Work area and axis for the gesture-resize preview. `last` is the area the
+// display's previous tile pass laid out (state.lastTileAreaByDisplay), with
+// the snapshot rail and float zone already taken off, so the preview predicts
+// in the same box the commit's retile will use. `rail` is the rail-adjusted
+// frame (adjustedFrameForDisplay); the axis comes from it, as in the tiler.
+export function previewArea(d, last, rail) {
+  if (!d) return null;
+  const railFrame = rail || d.visibleFrame || d.frame;
+  return { area: last || railFrame, horizontal: railFrame.w > railFrame.h };
+}
+
+// Cursor position that keeps `mouse`'s offset within a window that moved
+// from `oldFrame`. The tile target is where the window lands (it may still be
+// animating); the live frame is the fallback. Null when neither is known.
+export function cursorFollow(mouse, oldFrame, target, live) {
+  const to = target || live;
+  if (!to) return null;
+  return { x: to.x + (mouse.x - oldFrame.x), y: to.y + (mouse.y - oldFrame.y) };
+}

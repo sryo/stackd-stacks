@@ -6,10 +6,10 @@
   "clickThrough": true,
   "display": "primary",
   "permissions": ["overlay"],
-  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.titleChanged", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved", "sd.window.resized", "sd.window.resizing"],
+  "handles": ["sd.window.created", "sd.window.destroyed", "sd.window.minimized", "sd.window.deminimized", "sd.window.moved", "sd.window.resized", "sd.window.resizing"],
   "eventtap": [
     { "event": "scrollWheel",      "callback": "snapshotsScroll" },
-    { "event": "rightMouseDown",   "callback": "snapshotsRightClick" },
+    { "event": "rightMouseDown",   "callback": "snapshotsRightClick", "consume": true, "requireRects": true },
     { "event": "leftMouseDown",    "callback": "snapshotsLeftClick" },
     { "event": "leftMouseDown",    "callback": "snapshotsTileClick", "consume": true, "requireRects": true },
     { "event": "leftMouseUp",      "callback": "dragMouseUp" }

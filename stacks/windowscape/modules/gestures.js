@@ -17,7 +17,7 @@ import { isFullscreenActive } from "./fullscreen.js";
 import { moveWindowInOrder } from "./operations.js";
 import { startDragBracket, clearDragBracket, pinFromActualSize } from "./events.js";
 import { cancelAnimation } from "./animation.js";
-import { predictResizeFrame, PIN_MIN_PX } from "./layouts.js";
+import { predictResizeFrame, previewArea, PIN_MIN_PX } from "./layouts.js";
 import { getWindowWeight, getCollapsedWindows, tileWindows } from "./tiler.js";
 
 // Resize feel: vertical steps commit every 0.012 of trackpad travel (see
@@ -58,10 +58,11 @@ function openGestureBracket() {
   // A tile animation still converging on this window would make the frozen row
   // context stale — settle it where it stands.
   cancelAnimation(w.id);
-  // Clamp/axis against the snapshot-rail-adjusted work area, matching the tiler
-  // (a gesture-grow must not extend under the strip).
-  const vf = (d && (adjustedFrameForDisplay(d) || d.visibleFrame || d.frame)) || null;
-  const horizontal = vf ? vf.w > vf.h : (d ? d.frame.w > d.frame.h : true);
+  // Predict in the area the tiler last laid this row out in (snapshot rail
+  // and float zone applied), so a gesture-grow never extends under either.
+  const pa = d && previewArea(d, state.lastTileAreaByDisplay[d.displayID], adjustedFrameForDisplay(d));
+  const vf = pa ? pa.area : null;
+  const horizontal = pa ? pa.horizontal : true;
 
   // Frozen row context — tile passes defer while the bracket is open, so the
   // membership/order the preview predicts against is the one the commit uses.
@@ -112,9 +113,10 @@ function openGestureBracket() {
   // the time create resolves, drop the orphan.
   sd.overlay.region({ rect: { ...w.frame }, html: PREVIEW_HTML, css: PREVIEW_CSS })
     .then((h) => {
-      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.predicted); }
-      else if (h) h.remove();
-    });
+      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.predicted).catch(() => {}); }
+      else if (h) h.remove().catch(() => {});
+    })
+    .catch(() => {});
   log(`GESTURE bracket-open id=${w.id}`);
   return gestureBracket;
 }
@@ -157,7 +159,7 @@ function stepPreview(deltaPx) {
   });
   if (r.frame) {
     g.predicted = r.frame;
-    if (previewHandle) previewHandle.setFrame(g.predicted);
+    if (previewHandle) previewHandle.setFrame(g.predicted).catch(() => {});
   }
 }
 
@@ -194,7 +196,7 @@ export function bind() {
     if (!gestureBracket) return;
     const g = gestureBracket;
     gestureBracket = null;
-    if (previewHandle) { previewHandle.remove(); previewHandle = null; }
+    if (previewHandle) { previewHandle.remove().catch(() => {}); previewHandle = null; }
     const major = (fr) => (g.horizontal ? fr.w : fr.h);
     const dMajor = g.predicted ? Math.abs(major(g.predicted) - g.aBase) : 0;
     // Self-contained commit: tear the bracket down (dropping any stray candidate

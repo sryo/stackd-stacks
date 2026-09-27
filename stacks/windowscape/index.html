@@ -16,21 +16,10 @@
 </head>
 <body>
   <!-- The focused-window outline is drawn by the overlay-border stack
-       (subscribes to sd.windows.focusedChanged + listens for our
-       overlay-border.inclusion bang). This document hosts the snapshot
-       strip(s) — bottom-anchored thumbnails of minimized windows.
-       snapshots.js builds the strip DOM dynamically into <body>; no
-       static markup is needed.
-
-       Panel notes:
-         - region:"fullscreen" + display:"primary" → the WebView covers the
-           primary display. Strips for other displays will render off-screen
-           (documented primitive gap in modules/snapshots.js).
-         - clickThrough:true at the window level. snapshots.js flips it to
-           false dynamically (sd.mouse-driven, per-tile rects) so DOM
-           mousedown on tiles fires while empty screen still passes through
-           to the app behind. snapshotsLeftClick eventtap is still used for
-           drag-bracket bookkeeping (independent of WebView geometry). -->
+       (fed by our overlay-border.inclusion bang). Snapshot strips render in
+       per-display sd.overlay.region panels (modules/snapshots.js). This
+       click-through panel covers the primary display and only hosts the
+       snapshot context menu; all input arrives through eventtaps. -->
   <script type="module" src="./modules/main.js"></script>
 </body>
 </html>

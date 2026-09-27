@@ -11,10 +11,22 @@ import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal }
 import { dockNewFloats } from "./events.js";
 import { planFloatZone } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { tileWeighted, specFromState, renormalizedPins, innerSpanFor } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
+import { coalescingRunner } from "./sequencing.js";
+
+// A window more than REFUSAL_PX off its tile target refused it (app-imposed
+// min/max). Must equal the settled-echo cutoff in events.js (dMajor <= 20): a
+// deviation the echo filter won't swallow has to be contained as a refusal
+// pin, or it leaks to the out-of-bracket resize path as a phantom user resize
+// and ripples junk pins across the row. A higher threshold (e.g. 50px) leaves
+// a dead zone — Terminal's min width refusing a flex target by ~28px would
+// sit as a permanent overlap AND feed the resize machinery. The floor stays
+// above grid-snap noise (Terminal rounds width to character cells, ≤ ~7px)
+// and PASS-1's 5px skip tolerance.
+const REFUSAL_PX = 20;
 
 export function getWindowWeight(winId) {
   if (state.windowWeights[winId] != null) return state.windowWeights[winId];
@@ -412,18 +424,6 @@ async function tileWindowsInternal(snap, reason) {
     // write the actual size to state.pinnedSizes. The next layout pass
     // will respect it; flex siblings absorb the freed space naturally
     // via resolveFlex.
-    //
-    // REFUSAL_PX must equal the settled-echo cutoff in events.js
-    // (dMajor <= 20): a deviation the echo filter won't swallow MUST be
-    // contained here as a refusal pin, or it leaks to the out-of-bracket
-    // resize path as a phantom user resize and ripples junk pins across
-    // the row. A higher threshold (e.g. 50px) leaves a 20-50px dead zone —
-    // Terminal's min width refusing a 268px flex target by ~28px sits as
-    // a permanent overlap (under 50 → never pinned) AND feeds the resize
-    // machinery (over 20 → not an echo).
-    // The floor stays above grid-snap noise (Terminal rounds width to
-    // character cells, ≤ ~7px) and PASS-1's 5px skip tolerance.
-    const REFUSAL_PX = 20;
     const axis = horizontal ? "w" : "h";
     const refused = nonCollapsed.filter((id) => {
       // Pinned windows can refuse their pin too (pairwise transfer can ask
@@ -445,7 +445,7 @@ async function tileWindowsInternal(snap, reason) {
     learnFixedWidths(refused.map((id) => [id, targets.find((t) => t.winId === id).frame, actuals[+id]]), horizontal);
 
     for (const id of refused) {
-      state.pinnedSizes[id] = Math.max(50, actuals[+id][axis]);
+      state.pinnedSizes[id] = Math.max(PIN_MIN_PX, actuals[+id][axis]);
       state.refusalPins.add(+id);
       learnAppMin(id, horizontal, actuals[+id][axis]);
       // Update the recorded target to what the app actually accepted.
@@ -498,7 +498,7 @@ async function tileWindowsInternal(snap, reason) {
       const dMajor2 = Math.abs(horizontal ? a.w - t.frame.w : a.h - t.frame.h);
       if (dMajor2 > REFUSAL_PX) {
         learnFixedWidths([[t.winId, t.frame, a]], horizontal);
-        state.pinnedSizes[+t.winId] = Math.max(50, a[axis]);
+        state.pinnedSizes[+t.winId] = Math.max(PIN_MIN_PX, a[axis]);
         state.refusalPins.add(+t.winId);
         learnAppMin(t.winId, horizontal, a[axis]);
         state.lastTileTarget[+t.winId] = { frame: { ...a } };
@@ -642,7 +642,6 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
     if (tries < 5) setTimeout(() => sweepRefusalsAfterSettle(displayID, gen, ids, population, horizontal, tries + 1), 100);
     return;
   }
-  const REFUSAL_PX = 20; // keep equal to PASS-2 / the settled-echo cutoff
   const entries = [];
   for (const id of ids) {
     const target = state.lastTileTarget?.[id]?.frame;
@@ -665,7 +664,7 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
   const targetOf = Object.fromEntries(entries.map((e) => [e.id, e.target]));
   learnFixedWidths(refused.map(([id, live]) => [id, targetOf[id], live]), horizontal);
   for (const [id, live] of refused) {
-    state.pinnedSizes[id] = Math.max(50, horizontal ? live.w : live.h);
+    state.pinnedSizes[id] = Math.max(PIN_MIN_PX, horizontal ? live.w : live.h);
     state.refusalPins.add(+id);
     learnAppMin(id, horizontal, horizontal ? live.w : live.h);
     // Same containment trick as PASS-2: record what the app actually
@@ -679,8 +678,15 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
   await tileWindows();
 }
 
+// A trigger that lands while a pass is running doesn't start a second,
+// overlapping pass: it queues exactly one more pass after the current one.
+const runTilePass = coalescingRunner(tilePass);
+export function tileWindows() {
+  return runTilePass();
+}
+
 let tilingTimer = null;
-export async function tileWindows() {
+async function tilePass() {
   // Drag-in-flight guard — events.js sets this while a drag is active
   // so unrelated triggers (focusedChanged, sd.windows.all push, etc.)
   // don't yank the dragged window out from under the cursor.
@@ -719,6 +725,7 @@ export async function tileWindows() {
   // gliding toward an older target would keep going. Stop them first. An
   // animated pass needs no cancel — its writes supersede in flight.
   state.tilingCount = 1;
+  if (tilingTimer) { clearTimeout(tilingTimer); tilingTimer = null; }
   if (snap) await cancelAllAnimations();
   try {
     await tileWindowsInternal(snap, reason);

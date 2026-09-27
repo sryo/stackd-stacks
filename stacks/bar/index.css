@@ -20,7 +20,7 @@ html, body {
   height: 100%;
   color: var(--bar-fg);
   font: var(--bar-font-size) -apple-system, system-ui;
-  -webkit-font-smoothing: antialiased;
+  font-weight: 500;
   user-select: none;
   cursor: default;
   overflow: hidden;

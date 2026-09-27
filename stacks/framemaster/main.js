@@ -3,88 +3,52 @@
 //
 // Corner map (mirror of FrameMaster.md):
 //   top-left      click → close window (Cmd+W); shift → kill9 + reopen prompt
-//   top-right     click → toggle fullscreen (WindowScape sim-fullscreen if loaded);
+//   top-right     click → toggle native fullscreen;
 //                 shift → zoom (fill visibleFrame without entering fullscreen)
-//   bottom-right  click → minimize (WindowScape snapshot-minimize if loaded);
-//                 shift → hide entire app
+//   bottom-right  click → minimize; shift → hide entire app
 //   bottom-left   click → new Finder window (or focus Finder);
 //                 shift → open / focus System Settings
 //
-// Daemon-side gaps (faithful-as-possible, not faithful-to-the-letter):
-//   * Menu-bar edge consume + dock edge consume: the FrameMaster.lua approach
-//     consumed mouseMoved inside a position band along each screen edge.
-//     The current EventTapPredicate only matches on keyCode / flagsMask /
-//     flagsAny — there's no x/y zone match. A consuming eventtap with no `if` would
-//     swallow every mouseMoved (cursor frozen), so this is deferred until
-//     the daemon ships a generic `inRect` predicate. `sd.menubar.suppress()`
-//     exists but it hides the bar entirely rather than blocking the hover-
-//     reveal, which is a different behavior.
-//   * `hs.dialog.blockAlert` (modal "Reopen?" prompt) → AppleScript
-//     `display dialog` via sd.applescript.run, same UX (modal Reopen / Ignore).
+// Corners fire on every display, but the panel lives on the primary display
+// only, so tooltips show for the primary display's corners. `display: "all"`
+// would duplicate the panel per display, and the tap-rect gate and its
+// enter/leave state are keyed per stack, not per instance: every instance
+// would run each click's action and only one would see enter/leave.
+//
+// `hs.dialog.blockAlert` (modal "Reopen?" prompt) → AppleScript
+// `display dialog` via sd.applescript.run, same UX (modal Reopen / Ignore).
 
 import { sd } from "sd://runtime/api.js";
+import { cornerRects, sameRects, inFrame } from "./logic.js";
 
 const FLAGS = { shift: 0x020000 };
 // Width of the corner trigger band, in points. Matches FrameMaster.lua's
 // `cfg.buffer = 4`. Bigger bands cause accidental fires near the menu bar.
 const CORNER_BAND = 4;
-const TIP_HIDE_MS = 750;
 const TOOLTIP_MAX_LEN = 50;
 const REOPEN_AFTER_KILL = true;
-
-// WindowScape integration. Same `pcall(require, "WindowScape")` shape as the
-// Spoon: probe for a loaded sibling stack at startup, fall back gracefully
-// when absent. The bus is sd.bang — WindowScape (if loaded) handles
-// `sd.windowscape.simulatedFullscreen.toggle` / `.snapshotMinimize` and
-// returns whether the call succeeded. We assume the bangs may not be
-// registered and fall back to native if `sd.bang` rejects.
-let windowScapeProbed = false;
-let windowScapeAvailable = false;
-async function probeWindowScape() {
-  if (windowScapeProbed) return windowScapeAvailable;
-  windowScapeProbed = true;
-  try {
-    const r = await sd.bang("sd.windowscape.ping", {});
-    windowScapeAvailable = r === true || (r && r.ok === true);
-  } catch (_) {
-    windowScapeAvailable = false;
-  }
-  return windowScapeAvailable;
-}
 
 const tip = document.getElementById("tip");
 let armed = null;
 let armedPoint = null;
 let lastFlags = 0;
-let hideTimer = null;
 let displays = [];
 let lastKilledBundleId = null;
 let lastKilledAppName = null;
 
-// Push the 4-per-display corner band rects to the daemon so the consuming
-// leftMouseDown tap only swallows clicks inside a hot corner — anything
-// outside passes through to the focused app normally. Re-pushed on every
-// display change so dock moves / resolution changes don't leave stale gates.
-function computeCornerRects() {
-  const out = [];
-  const b = CORNER_BAND;
-  for (const d of displays) {
-    const f = d.frame; if (!f) continue;
-    out.push({ x: f.x,             y: f.y,             w: b, h: b });   // top-left
-    out.push({ x: f.x + f.w - b,   y: f.y,             w: b, h: b });   // top-right
-    out.push({ x: f.x,             y: f.y + f.h - b,   w: b, h: b });   // bottom-left
-    out.push({ x: f.x + f.w - b,   y: f.y + f.h - b,   w: b, h: b });   // bottom-right
-  }
-  return out;
-}
-
+// Push the corner band rects to the daemon so the consuming leftMouseDown
+// tap only swallows clicks inside a hot corner — anything outside passes
+// through to the focused app normally. Both the click tap and the mouseMoved
+// hover tap (opted into emitLeave, so it reports enter/leave) gate on the
+// same rects. display.all refires for changes that don't move any corner;
+// an unchanged set isn't re-pushed, since a push resets the hover gate's
+// enter/leave state.
+let pushedRects = null;
 sd.display.all.subscribe(list => {
   displays = list || [];
-  const rects = computeCornerRects();
-  // Both the leftMouseDown consume tap (click→action) and the mouseMoved
-  // observer tap (hover→enter/leave) gate on the same corner-band rects.
-  // The mouseMoved tap is opted into emitLeave so it fires {phase:"enter"}
-  // when the cursor crosses INTO a corner and {phase:"leave"} on the way out.
+  const rects = cornerRects(displays, CORNER_BAND);
+  if (sameRects(rects, pushedRects)) return;
+  pushedRects = rects;
   sd.events.setTapRects("click", rects);
   sd.events.setTapRects("hover", rects);
 });
@@ -175,14 +139,18 @@ function tooltipText(corner) {
   return "";
 }
 
+// Returns false when the corner isn't on this panel's display.
 function placeTip(corner, x, y) {
+  const own = sd.screen.current && sd.screen.current.frame;
+  if (!inFrame(own, x, y)) return false;
   const d = displayForPoint(x, y);
-  if (!d) return;
+  if (!d) return false;
   // Use visibleFrame, not frame — matches HS FrameMaster.lua which calls
   // hs.screen:frame() (which in HS-land already excludes the menu bar and
   // dock). Using the full d.frame puts top tooltips at y=0 (behind the
   // system menu bar), so they're either invisible or clipped.
-  const f = d.visibleFrame || d.frame;
+  const v = d.visibleFrame || d.frame;
+  const f = { x: v.x - own.x, y: v.y - own.y, w: v.w, h: v.h };
   tip.dataset.corner = corner;
   tip.style.removeProperty("left");
   tip.style.removeProperty("right");
@@ -210,24 +178,19 @@ function placeTip(corner, x, y) {
       tip.style.transform = "translate(-100%, -100%)";
       break;
   }
+  return true;
 }
 
 function showTip(corner, x, y, customText) {
   const text = customText != null ? customText : tooltipText(corner);
-  if (!text) { hideTip(); return; }
-  placeTip(corner, x, y);
+  if (!text || !placeTip(corner, x, y)) { hideTip(); return; }
   tip.textContent = truncate(text);
+  // Stays up until the hover tap reports the cursor leaving the corner.
   tip.classList.add("show");
-  // No auto-hide timer — the cursor-leave handler in the `hover` eventtap
-  // callback (phase === "leave") calls hideTip when the cursor exits the
-  // corner band. Auto-hiding mid-hover would make the tooltip flicker out
-  // while the user is still on the corner.
-  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
 }
 
 function hideTip() {
   tip.classList.remove("show");
-  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,16 +246,11 @@ async function doTopRight(win) {
     // Zoom — fill visibleFrame without entering native fullscreen, same as
     // hs.window:toggleZoom. visibleFrame already accounts for menu bar + dock.
     if (win && win.frame) {
-      const d = displayForPoint(win.frame.x, win.frame.y);
+      const d = sd.display.forWindow(win);
       const target = (d && d.visibleFrame) || (d && d.frame);
       if (target) await sd.windows.setFrame(win.id, target);
     }
     return `Zoomed ${windowName(win)}`;
-  }
-  if (await probeWindowScape()) {
-    try { await sd.bang("sd.windowscape.simulatedFullscreen.toggle", {}); }
-    catch (_) { /* fall through to native */ }
-    return `Toggled Fullscreen for ${windowName(win)}`;
   }
   // Native fullscreen via Ctrl+Cmd+F (matches FrameMaster.lua line 170).
   await sd.events.key("ctrl+cmd+f");
@@ -309,11 +267,6 @@ async function doBottomRight(win, app) {
   if (shiftHeld()) {
     if (app && app.bundleId) await sd.apps.hide(app.bundleId);
     return `Hid ${windowName(win)}`;
-  }
-  if (await probeWindowScape()) {
-    try { await sd.bang("sd.windowscape.snapshotMinimize", {}); }
-    catch (_) { /* fall through to native */ }
-    return `Minimized ${windowName(win)}`;
   }
   await sd.windows.minimize(win.id, true);
   return `Minimized ${windowName(win)}`;
@@ -346,20 +299,18 @@ const actions = {
 // INTO any corner rect; `leave` fires once when mouseMoved exits (point is
 // now outside all rects, but the previous event was inside — the daemon
 // synthesizes the fire at the boundary so JS hears about it). `move` fires
-// for subsequent in-rect events; we ignore it here because the tooltip
-// placement is set on enter and tracks the armed corner via lastFlags
-// re-renders.
+// for subsequent in-rect events; the tooltip placement is set on enter and
+// flagsChanged re-renders its text when shift is held.
 //
-// CORNER_BAND-thin rects mean enter/leave fires at the rising/falling edge
-// of a 4px band — same shape sd.mouse polling produced, minus the 30Hz
-// idle wake-up. Multi-monitor: each display contributes 4 corner rects, so
-// crossing from one display's bottom-right to another's top-left fires
-// leave-then-enter naturally.
+// The rects are unioned across displays, so sliding from one display's
+// corner straight into an adjacent display's corner is a `move`, not
+// leave-then-enter; a move that lands on a different corner re-arms.
 sd.events.on("hover", (e) => {
   if (!e) return;
-  if (e.phase === "enter") {
+  if (e.phase === "enter" || e.phase === "move") {
     const corner = cornerForPoint(e.x, e.y);
     if (!corner) return;   // race: displays changed between rect push and event
+    if (e.phase === "move" && corner === armed) return;
     armed = corner;
     armedPoint = { x: e.x, y: e.y };
     showTip(corner, e.x, e.y);
@@ -368,8 +319,6 @@ sd.events.on("hover", (e) => {
     armedPoint = null;
     hideTip();
   }
-  // phase === "move": no-op. The tooltip is already placed at the enter
-  // point; flagsChanged re-renders the text when shift is held.
 });
 
 // ---------------------------------------------------------------------------

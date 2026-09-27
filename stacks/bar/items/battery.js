@@ -1,19 +1,12 @@
 import { sd } from "sd://runtime/api.js";
 
-let cached = "";
-
 export default {
   id: "battery",
   side: "right",
   order: 50,
-  interval: 0,
-  setup(refresh) {
-    sd.battery.subscribe((b) => {
-      if (!b) { cached = ""; refresh(); return; }
-      const prefix = b.charging ? "{sf:bolt.fill} " : "";
-      cached = `${prefix}${Math.round(b.percent)}%`;
-      refresh();
+  setup(set) {
+    return sd.battery.subscribe((b) => {
+      set(b ? `${b.charging ? "{sf:bolt.fill} " : ""}${Math.round(b.percent)}%` : "");
     });
-  },
-  update() { return cached; }
+  }
 };

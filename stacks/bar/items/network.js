@@ -1,55 +1,33 @@
 import { sd } from "sd://runtime/api.js";
 
-// Network status — mirrors Rebar's network.lua:
-//   * "offline" when net.path.status is not "satisfied"
-//   * SSID when associated; "Wi-Fi" if SSID hidden by Location TCC
-//   * "Ethernet" for any other reachable transport
-// Rebar layered hs.network.reachability + hs.network.primaryInterfaces +
-// hs.wifi.currentNetwork. We replace the first two with sd.net.path (whose
-// `interfaces[0]` is the preferred route, same role as primaryInterfaces).
+// "offline" when the network path isn't satisfied; otherwise the SSID on
+// Wi-Fi ("Wi-Fi" when Location access hides it), "Ethernet" for any other
+// wired route. sd.net.path's interfaces[0] is the preferred route.
 
-let wifi = null, lan = null, path = null;
-let cached = "";
-
-function recompute(refresh) {
-  // Treat unknown path as "online" so the bar doesn't flash "offline" during
-  // the first few hundred ms before NWPathMonitor publishes.
-  const reachable = !path || path.status === "satisfied";
-  if (!reachable) { setIf(refresh, "offline"); return; }
-
+function label(wifi, lan, path) {
+  // An unknown path counts as online so the bar doesn't flash "offline"
+  // before NWPathMonitor first publishes.
+  if (path && path.status !== "satisfied") return "offline";
   const primary = path && Array.isArray(path.interfaces) ? path.interfaces[0] : null;
   const ssid = wifi && wifi.ssid;
-
-  if (primary === "wifi" || (!primary && ssid)) {
-    if (ssid) { setIf(refresh, ssid); return; }
-    // wifi.signal != 0 → associated but SSID hidden behind Location TCC.
-    if (wifi && wifi.signal != null && wifi.signal !== 0) {
-      setIf(refresh, "Wi-Fi"); return;
-    }
-    setIf(refresh, "Wi-Fi"); return;
-  }
-  if (primary === "wired" || primary === "other" || (lan && lan.ipv4)) {
-    setIf(refresh, "Ethernet"); return;
-  }
-  if (primary === "cellular") { setIf(refresh, "Cellular"); return; }
-  setIf(refresh, "offline");
-}
-
-function setIf(refresh, val) {
-  if (cached === val) return;
-  cached = val;
-  refresh();
+  if (primary === "wifi" || (!primary && ssid)) return ssid || "Wi-Fi";
+  if (primary === "wired" || primary === "other" || (lan && lan.ipv4)) return "Ethernet";
+  if (primary === "cellular") return "Cellular";
+  return "offline";
 }
 
 export default {
   id: "network",
   side: "right",
   order: 55,
-  interval: 0,
-  setup(refresh) {
-    sd.net.wifi.subscribe((w) => { wifi = w; recompute(refresh); });
-    sd.net.lan.subscribe ((l) => { lan  = l; recompute(refresh); });
-    sd.net.path.subscribe((p) => { path = p; recompute(refresh); });
-  },
-  update() { return cached; }
+  setup(set) {
+    let wifi = null, lan = null, path = null;
+    const update = () => set(label(wifi, lan, path));
+    const unsubs = [
+      sd.net.wifi.subscribe((w) => { wifi = w; update(); }),
+      sd.net.lan.subscribe((l) => { lan = l; update(); }),
+      sd.net.path.subscribe((p) => { path = p; update(); })
+    ];
+    return () => unsubs.forEach((u) => u());
+  }
 };

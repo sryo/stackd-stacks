@@ -16,21 +16,18 @@ const KNOWN = {
   "Dutch":                "NL"
 };
 
-let cached = "";
+function abbreviate(layout) {
+  return KNOWN[layout] || layout.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
+}
 
 export default {
   id: "inputsource",
   side: "right",
   order: 75,
-  interval: 0,
-  setup(refresh) {
-    sd.input.layout.subscribe((info) => {
+  setup(set) {
+    return sd.input.layout.subscribe((info) => {
       const layout = info && (info.layout || info.name);
-      if (!layout) { cached = ""; refresh(); return; }
-      if (KNOWN[layout]) { cached = KNOWN[layout]; refresh(); return; }
-      cached = layout.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
-      refresh();
+      set(layout ? abbreviate(layout) : "");
     });
-  },
-  update() { return cached; }
+  }
 };

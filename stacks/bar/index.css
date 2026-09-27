@@ -1,5 +1,4 @@
 :root {
-  --bar-bg: transparent;
   --bar-fg: rgba(235, 235, 235, 0.92);
   --bar-shadow: rgba(0, 0, 0, 0.55);
   --bar-font-size: 13px;
@@ -30,7 +29,6 @@ html, body {
   position: relative;
   height: 100%;
   width: 100%;
-  background: var(--bar-bg);
 }
 
 .zone {
@@ -57,7 +55,7 @@ html, body {
 .bar.no-notch .zone[data-side="center-right"] { left: 50%; }
 
 /* The viewport is exactly the menubar strip, so a 100vh line box makes each
-   item — and the hit rect core.js measures from it — span the full strip
+   item, and the hover rect core.js sends the daemon, span the full strip
    height while the label stays vertically centered. */
 .item {
   padding: 0 8px;
@@ -80,15 +78,10 @@ html, body {
   -webkit-mask: var(--sf-url) center / contain no-repeat;
   mask: var(--sf-url) center / contain no-repeat;
 }
-/* The item-gap is the *space between* items, so apply it after every item
-   except the last in each zone. flex `gap` would do this for us but breaks
-   on the empty-item-hidden case in fullscreen-peek. */
 .item + .item { margin-left: var(--bar-item-gap); }
 
-/* Now-playing pills (active rich pill + per-app secondaries) sit snug
-   together to read as one cluster. The 6px gap is just enough to keep
-   the labels from touching while staying clearly distinct from the
-   default 14px gap that separates them from unrelated bar items. */
+/* Now-playing pills sit closer together than other items so they read as
+   one cluster. */
 .item[data-item-id^="nowplaying:"] + .item[data-item-id^="nowplaying:"] {
   margin-left: 6px;
 }
@@ -96,4 +89,3 @@ html, body {
 .item.bold { font-weight: 600; letter-spacing: -0.01em; }
 
 .bar.fs-minimal { display: none; }
-.bar.fs-peek    { display: block; }

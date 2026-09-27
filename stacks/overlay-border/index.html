@@ -26,6 +26,7 @@
   // Per-window corner radius via sd.windows.cornerHints — same mapping the
   // legacy windowscape/outline.lua used on Tahoe.
   import { sd } from "sd://runtime/api.js";
+  import { forgetWindow } from "./logic.js";
 
   // --- config (persisted via sd.settings) ---------------------------------
   const DEFAULTS = {
@@ -83,7 +84,7 @@
   // entries default to `true` so an unknown window paints the included color.
   const inclusionByWinId = new Map();
   // cornerHints per window id. Only answers that resolved the AX element
-  // (non-null role) are kept; dropped when the window is destroyed.
+  // (non-null role) are kept. Both maps drop a window when it's destroyed.
   const hintsByWinId = new Map();
 
   // Fullscreen detection — sd.spaces.all entries (L10) carry displayID, so
@@ -304,9 +305,7 @@
     if (focusedWin && detail.winId === focusedWin.id && prev !== next) refreshStyle();
   });
 
-  sd.windows.destroyed.subscribe((detail) => {
-    if (detail && typeof detail.id === "number") hintsByWinId.delete(detail.id);
-  });
+  sd.windows.destroyed.subscribe((detail) => forgetWindow(detail, inclusionByWinId, hintsByWinId));
 
   // --- main subscription -------------------------------------------------
   (async () => {

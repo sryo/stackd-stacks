@@ -56,8 +56,12 @@ html, body {
 .bar.no-notch .zone[data-side="center-left"] { display: none; }
 .bar.no-notch .zone[data-side="center-right"] { left: 50%; }
 
+/* The viewport is exactly the menubar strip, so a 100vh line box makes each
+   item — and the hit rect core.js measures from it — span the full strip
+   height while the label stays vertically centered. */
 .item {
   padding: 0 8px;
+  line-height: 100vh;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }

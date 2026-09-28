@@ -1,7 +1,7 @@
 // Pure decisions behind the snapshot strip (modules/snaprules.js).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { keepPersistedSnapshot, menuClickAction, clampMenuOrigin, scrolledOffset } from "../modules/snaprules.js";
+import { keepPersistedSnapshot, menuClickAction, clampMenuOrigin, scrolledOffset, railRect, menuHeight } from "../modules/snaprules.js";
 
 const entry = { app: "Notes", image: "data:" };
 
@@ -26,22 +26,22 @@ test("an order id with no saved entry is dropped", () => {
   assert.equal(keepPersistedSnapshot({ entry: undefined, live: undefined, axMinimized: true }), false);
 });
 
-// The observer tap sees every leftMouseDown; the consuming tap sees the ones
-// over a tile or the open menu. Either may fire first.
-test("menu closed: only the consuming tap acts, on a tile", () => {
-  assert.equal(menuClickAction({ tap: "consume", menuOpen: false, inMenu: false, onRow: false, onTile: true }), "tile");
+// The observer tap sees every leftMouseDown; the rail and the menu overlays
+// receive their own clicks directly. Either may arrive first.
+test("menu closed: only the direct click acts, on a tile", () => {
+  assert.equal(menuClickAction({ tap: "direct", menuOpen: false, inMenu: false, onRow: false, onTile: true }), "tile");
   assert.equal(menuClickAction({ tap: "observe", menuOpen: false, inMenu: false, onRow: false, onTile: true }), "none");
 });
 
 test("menu open: a click on a thumbnail dismisses the menu and never acts on the tile", () => {
-  const verdicts = ["observe", "consume"].map((tap) =>
+  const verdicts = ["observe", "direct"].map((tap) =>
     menuClickAction({ tap, menuOpen: true, inMenu: false, onRow: false, onTile: true }));
   assert.ok(!verdicts.includes("tile"));
   assert.deepEqual(verdicts.filter((v) => v !== "none"), ["dismiss"]);
 });
 
-test("menu open: a row click runs the row exactly once, whichever tap fires first", () => {
-  const verdicts = ["observe", "consume"].map((tap) =>
+test("menu open: a row click runs the row exactly once, whichever arrives first", () => {
+  const verdicts = ["observe", "direct"].map((tap) =>
     menuClickAction({ tap, menuOpen: true, inMenu: true, onRow: true, onTile: true }));
   assert.deepEqual(verdicts.filter((v) => v !== "none"), ["row"]);
 });
@@ -51,7 +51,7 @@ test("menu open: a click elsewhere dismisses from the observer tap", () => {
 });
 
 test("menu open: a click on the menu's padding or separator does nothing", () => {
-  for (const tap of ["observe", "consume"]) {
+  for (const tap of ["observe", "direct"]) {
     assert.equal(menuClickAction({ tap, menuOpen: true, inMenu: true, onRow: false, onTile: false }), "none");
   }
 });
@@ -87,4 +87,29 @@ test("strip scroll uses the dominant axis, so a sideways swipe scrolls a row", (
 test("a payload without deltas leaves the offset alone", () => {
   assert.equal(scrolledOffset(100, {}), 100);
   assert.equal(scrolledOffset(undefined, { deltaY: -5 }), 5);
+});
+
+// The rail overlay takes real clicks, so it covers only its thumbnails (plus
+// a margin for their shadow), never the empty rest of the reserved band.
+const band = { x: 2420, y: 57, w: 140, h: 1607 };
+const railTile = (gy, gh = 100) => ({ gx: 2432, gy, gw: 120, gh });
+
+test("railRect hugs the thumbnails, not the whole band", () => {
+  const r = railRect({ reserved: band, tiles: [railTile(65), railTile(169)] }, 8);
+  assert.deepEqual(r, { x: 2424, y: 57, w: 136, h: 220 });
+});
+
+test("railRect is clipped to the band when thumbnails scroll past it", () => {
+  const r = railRect({ reserved: band, tiles: [railTile(-300, 900), railTile(604, 1500)] }, 8);
+  assert.deepEqual(r, { x: 2424, y: band.y, w: 136, h: band.h });
+});
+
+test("railRect is null with nothing to cover", () => {
+  assert.equal(railRect({ reserved: band, tiles: [] }, 8), null);
+  assert.equal(railRect({ reserved: band, tiles: [railTile(5000)] }, 8), null);
+});
+
+test("menuHeight adds rows, separators and padding", () => {
+  const items = [{}, {}, null, {}, {}, {}];
+  assert.equal(menuHeight(items, { rowH: 26, sepH: 9, pad: 4 }), 4 + 5 * 26 + 9 + 4);
 });

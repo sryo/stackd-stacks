@@ -13,17 +13,17 @@ export function keepPersistedSnapshot({ entry, live, axMinimized }) {
   return !(live && live.isMinimized === false);
 }
 
-/// What one tap does with a leftMouseDown, given the context menu's state.
-///   tap    : "observe" (the non-consuming tap, every click) or "consume"
-///            (the rect-gated tap, clicks over a tile or the open menu)
+/// What one view of a leftMouseDown does, given the context menu's state.
+///   tap    : "observe" (the non-consuming eventtap, every click) or "direct"
+///            (the click the rail or menu overlay itself received)
 ///   inMenu : click inside the menu's rect; onRow: on one of its rows
 ///   onTile : click on a thumbnail
-/// Returns "tile" | "row" | "dismiss" | "none". Both taps fire for a click
-/// over a tile or the menu, in no set order, so each click is claimed by
-/// exactly one of them and the menu state is read, not changed, by the other.
+/// Returns "tile" | "row" | "dismiss" | "none". A click on a tile or the menu
+/// arrives both ways, in no set order, so each click is claimed by exactly
+/// one of them and the menu state is read, not changed, by the other.
 /// While the menu is open a thumbnail click only dismisses it.
 export function menuClickAction({ tap, menuOpen, inMenu, onRow, onTile }) {
-  if (!menuOpen) return tap === "consume" && onTile ? "tile" : "none";
+  if (!menuOpen) return tap === "direct" && onTile ? "tile" : "none";
   if (tap === "observe") return inMenu || onTile ? "none" : "dismiss";
   if (inMenu) return onRow ? "row" : "none";
   return "dismiss";
@@ -48,4 +48,23 @@ export function clampMenuOrigin(p, size, bounds, margin = 4) {
 export function scrolledOffset(cur, { deltaX = 0, deltaY = 0 } = {}) {
   const d = Math.abs(deltaX) > Math.abs(deltaY) ? deltaX : deltaY;
   return (cur || 0) - d;
+}
+
+/// Global rect for a strip's rail overlay: its thumbnails' bounding box grown
+/// by `margin` (room for their shadow), clipped to the reserved band. The
+/// overlay takes real clicks, so it must not cover the band's empty rest,
+/// where desktop icons sit. null when no thumbnail is inside the band.
+export function railRect({ reserved, tiles }, margin) {
+  if (!tiles.length) return null;
+  const x0 = Math.max(reserved.x, Math.min(...tiles.map((t) => t.gx)) - margin);
+  const y0 = Math.max(reserved.y, Math.min(...tiles.map((t) => t.gy)) - margin);
+  const x1 = Math.min(reserved.x + reserved.w, Math.max(...tiles.map((t) => t.gx + t.gw)) + margin);
+  const y1 = Math.min(reserved.y + reserved.h, Math.max(...tiles.map((t) => t.gy + t.gh)) + margin);
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/// Context menu height: `items` rows, with null entries as separators.
+export function menuHeight(items, { rowH, sepH, pad }) {
+  return items.reduce((h, it) => h + (it ? rowH : sepH), pad * 2);
 }

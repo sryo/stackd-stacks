@@ -7,18 +7,19 @@
 // clicks it to restore (or closeAll/restoreAll/clearAll bulk-acts).
 //
 // Architecture:
-// - Rendering: one click-through sd.overlay.region per display that hosts
-//   thumbnails, placed on that display's reserved strip band. Tile geometry
-//   is computed analytically (computeStrip) and drives both the overlay HTML
-//   and the eventtap hit-testing, so a click lands where a tile is drawn.
-// - Input: all eventtap-routed (stack.json `eventtap`). Clicks and
-//   right-clicks over a tile or the open context menu are consumed through
-//   rect-gated taps; scroll uses the scrollWheel payload's deltas.
+// - Rendering: one interactive sd.overlay.region per display that hosts
+//   thumbnails, covering just the thumbnails inside that display's reserved
+//   strip band (railRect). Tile geometry is computed analytically
+//   (computeStrip) and drives both the overlay HTML and hit-testing, so a
+//   click lands where a tile is drawn.
+// - Input: the rail takes real clicks, so whatever macOS draws above it (a
+//   notification banner) gets its clicks first. Its page posts left-clicks,
+//   right-clicks and scrolls back through window.stack.post (onRailMessage).
 // - Refresh timer: every 5s each tracked window is re-captured so the
 //   preview stays current. Tiles whose display shows a native fullscreen
 //   space are skipped (snapgate.js): their strip isn't drawn.
-// - Context menu: DOM in this stack's own panel (primary display), clamped
-//   inside that panel.
+// - Context menu: its own interactive region overlay at the cursor, clamped
+//   inside that display.
 // - State persistence: sd.settings.set/get. Image dataURLs persist directly.
 
 import { sd } from "sd://runtime/api.js";
@@ -26,7 +27,7 @@ import { cfg } from "./config.js";
 import { state, log, isManaged } from "./core.js";
 import { refreshBlockedByFullscreen } from "./snapgate.js";
 import { tooltipLines, tooltipRect } from "./tooltip.js";
-import { keepPersistedSnapshot, menuClickAction, clampMenuOrigin, scrolledOffset } from "./snaprules.js";
+import { keepPersistedSnapshot, menuClickAction, clampMenuOrigin, scrolledOffset, railRect, menuHeight } from "./snaprules.js";
 import { overlaySlots } from "./sequencing.js";
 import { captureForOSMinimize } from "./snapshot_create.js";
 import { tileWindows } from "./tiler.js";
@@ -45,11 +46,6 @@ const RAIL_LEVEL = "utility";
 const ZOOM_IN_MS      = 280;
 const RESTORE_FADE_MS = 180;
 
-// Rect-gated consuming taps (stack.json, requireRects): the daemon swallows
-// clicks and right-clicks over the rects pushed here — the visible tiles plus
-// the open context menu — so they never fall through to what's behind.
-const TILE_TAP  = "snapshotsTileClick";
-const RIGHT_TAP = "snapshotsRightClick";
 
 let refreshTimerHandle = null;
 let saveTimerHandle = null;
@@ -192,14 +188,13 @@ export function screenForStripAt(x, y) {
 // Per-display strip rendering — sd.overlay.region
 //
 // Each display that hosts snapshots gets its own free-region overlay (a
-// borderless click-through WebView the daemon places at an absolute GLOBAL
-// rect). The overlay sits exactly on that display's reserved strip band, so
-// the rail renders on the SAME display the window was minimized from. Tile
-// positions are computed
-// analytically here (computeStrip); the SAME geometry drives both the
-// rendered HTML and the eventtap hit-testing (tileAt), so a click can never
-// land where a tile isn't drawn. Overlays are ignoresMouseEvents=true, so all
-// interaction is eventtap-routed (see onLeftClick/onScroll/onRightClick).
+// borderless WebView the daemon places at an absolute GLOBAL rect) on that
+// display's reserved strip band, so the rail renders on the SAME display the
+// window was minimized from. The overlay covers only the thumbnails
+// (railRect), since it takes real clicks and the band's empty rest is where
+// desktop icons sit. Tile positions are computed analytically here
+// (computeStrip); the SAME geometry drives both the rendered HTML and the
+// hit-testing (tileAt), so a click can never land where a tile isn't drawn.
 // ----------------------------------------------------------------------------
 
 const OVERLAY_CSS = `
@@ -269,34 +264,59 @@ function escAttr(s) {
 }
 
 // Tiles as absolutely-positioned HTML in the overlay's local space
-// (0,0 = strip top-left = reserved.{x,y} in global coords).
-function buildTilesHtml(strip) {
+// (0,0 = `at`, the rail rect's top-left in global coords).
+function buildTilesHtml(strip, at) {
   const origin = strip.isLandscape ? "right center" : "center bottom";
   let html = "";
   for (const t of strip.tiles) {
-    const lx = t.gx - strip.reserved.x;
-    const ly = t.gy - strip.reserved.y;
+    const lx = t.gx - at.x;
+    const ly = t.gy - at.y;
     const img = t.data.image ? `<img src="${escAttr(t.data.image)}">` : "";
     html += `<div class="ws-tile in" style="left:${lx}px;top:${ly}px;width:${t.gw}px;height:${t.gh}px;transform-origin:${origin}" data-win="${t.winId}">${img}<div class="ws-close"></div></div>`;
   }
   return html;
 }
 
-// One region overlay per display that hosts snapshots, positioned on the
-// reserved band. Only a changed rect or changed tile HTML reaches the daemon.
+// Posts the rail's own clicks, right-clicks (ctrl-click included) and
+// scrolls to onRailMessage, in the overlay's local coords. Wheel deltas are
+// negated to the eventtap's sign (positive = content toward the start).
+const RAIL_SCRIPT = `<script>(function(){
+  function post(kind,e,extra){var o={kind:kind,x:e.clientX,y:e.clientY,shift:e.shiftKey};
+    for(var k in extra)o[k]=extra[k];window.stack.post(o);}
+  document.addEventListener('mousedown',function(e){if(e.button===0&&!e.ctrlKey)post('down',e);},true);
+  document.addEventListener('contextmenu',function(e){e.preventDefault();post('right',e);},true);
+  document.addEventListener('wheel',function(e){e.preventDefault();
+    post('wheel',e,{deltaX:-e.deltaX,deltaY:-e.deltaY});},{capture:true,passive:false});
+})();</script>`;
+
+// displayID -> the rail overlay's current global rect, to map its messages'
+// local coords back to global.
+const railRects = Object.create(null);
+
+// One region overlay per display that hosts snapshots, covering its
+// thumbnails. Only a changed rect or changed tile HTML reaches the daemon.
 const overlays = overlaySlots({
-  create: (strip) => sd.overlay.region({ rect: strip.reserved, html: `<div id="ws-tiles"></div>`, css: OVERLAY_CSS, level: RAIL_LEVEL }),
+  create: (strip) => sd.overlay.region({
+    rect: railRect(strip, PADDING) || strip.reserved,
+    html: `<div id="ws-tiles"></div>${RAIL_SCRIPT}`,
+    css: OVERLAY_CSS, level: RAIL_LEVEL, interactive: true,
+  }).then((h) => {
+    if (h) h.onMessage((m) => onRailMessage(strip.displayID, m));
+    return h;
+  }),
   paint: paintOverlay,
   dispose: (h) => { h.remove().catch(() => {}); },
 });
 
 function paintOverlay(e, strip) {
-  const r = strip.reserved;
+  const r = railRect(strip, PADDING);
+  if (!r) return;
+  railRects[strip.displayID] = r;
   if (!e.lastRect || e.lastRect.x !== r.x || e.lastRect.y !== r.y || e.lastRect.w !== r.w || e.lastRect.h !== r.h) {
     e.handle.setFrame(r).catch(() => {});
     e.lastRect = { ...r };
   }
-  const html = buildTilesHtml(strip);
+  const html = buildTilesHtml(strip, r);
   if (html !== e.lastHtml) {
     e.lastHtml = html;
     e.handle.eval(`(function(){var el=document.getElementById('ws-tiles');if(el)el.innerHTML=${JSON.stringify(html)};})();`).catch(() => {});
@@ -304,16 +324,9 @@ function paintOverlay(e, strip) {
   }
 }
 
-// Snapshot of the current strip layout per display — cached for the eventtap
+// Snapshot of the current strip layout per display — cached for the
 // hit-testers (tileAt) so they don't recompute geometry on every mouse event.
 let stripsByDisplayCache = Object.create(null);
-let tileRects = [];
-
-function pushTapRects() {
-  const rects = menu ? [...tileRects, menu.rect] : tileRects;
-  sd.events.setTapRects(TILE_TAP, rects).catch(() => {});
-  sd.events.setTapRects(RIGHT_TAP, rects).catch(() => {});
-}
 
 function reconcileOverlays() {
   const activeSet = activeSpaceIDSet();
@@ -322,16 +335,11 @@ function reconcileOverlays() {
     const strip = computeStrip(d, activeSet);
     if (strip) wanted[d.displayID] = strip;
   }
+  // Same computeStrip pass feeds the overlays and the hit-test cache, so
+  // the two agree.
   stripsByDisplayCache = wanted;
-  // Same computeStrip pass feeds the overlays, the hit-test cache and the
-  // consume gates, so all three agree.
-  tileRects = [];
-  for (const did of Object.keys(wanted))
-    for (const t of wanted[did].tiles)
-      tileRects.push({ x: t.gx, y: t.gy, w: t.gw, h: t.gh });
-  pushTapRects();
   for (const did of overlays.keys()) {
-    if (!wanted[did]) overlays.remove(did);
+    if (!wanted[did]) { overlays.remove(did); delete railRects[did]; }
   }
   for (const idStr of Object.keys(wanted)) {
     overlays.sync(+idStr, wanted[idStr]);
@@ -424,39 +432,44 @@ export function hideTooltip() {
 }
 
 // ----------------------------------------------------------------------------
-// Context menu — DOM in this stack's own panel.
+// Context menu — its own interactive region overlay.
 // ----------------------------------------------------------------------------
 
-// { el, rows: [{ el, fn }], rect } — rect in global coords, part of the
-// consuming tap rects while the menu is open.
+// { rows: [fn], rect, handle: Promise<region | null> } — rect in global coords.
 let menu = null;
 
-// Global frame of this stack's panel (region:"fullscreen" on the primary
-// display); the menu is drawn and clamped inside it.
-function panelFrame() {
-  const f = typeof window !== "undefined" && window.__sd_screen && window.__sd_screen.frame;
-  return f || { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
-}
+const MENU_W     = 180;
+const MENU_ROW_H = 26;
+const MENU_SEP_H = 9;
+const MENU_PAD   = 4;
+const MENU_CSS = `
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent;
+    -webkit-user-select:none;user-select:none;cursor:default}
+  #m{position:absolute;inset:0;box-sizing:border-box;padding:${MENU_PAD}px 0;
+    background:rgba(30,30,30,0.95);color:#fff;border:1px solid rgba(255,255,255,0.15);
+    border-radius:6px;font:13px -apple-system,BlinkMacSystemFont,sans-serif}
+  .r{height:${MENU_ROW_H}px;line-height:${MENU_ROW_H}px;padding:0 16px}
+  .r:hover{background:rgba(255,255,255,0.12)}
+  .s{height:1px;margin:${(MENU_SEP_H - 1) / 2}px 0;background:rgba(255,255,255,0.12)}
+`;
+const MENU_SCRIPT = `<script>
+  document.addEventListener('click',function(e){var r=e.target.closest('.r');
+    if(r)window.stack.post({kind:'row',i:+r.dataset.i});});
+  document.addEventListener('contextmenu',function(e){e.preventDefault();});
+</script>`;
 
 function inRect(r, x, y) {
   return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
-export function showContextMenu(winId) {
+// Global frame of the display containing `p`, for clamping the menu.
+function displayFrameAt(p) {
+  const d = state.displays.find((d) => d.frame && inRect(d.frame, p.x, p.y));
+  return d ? d.frame : (state.displays[0] && state.displays[0].frame);
+}
+
+export function showContextMenu(winId, at) {
   hideContextMenu();
-  const m = document.createElement("div");
-  Object.assign(m.style, {
-    position: "fixed",
-    background: "rgba(30,30,30,0.95)",
-    color: "white",
-    border: "1px solid rgba(255,255,255,0.15)",
-    borderRadius: "6px",
-    padding: "4px 0",
-    font: "13px -apple-system, BlinkMacSystemFont, sans-serif",
-    zIndex: "1000",
-    minWidth: "160px",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.4)"
-  });
   const items = [
     { label: "Restore",     fn: () => restoreFromSnapshot(winId) },
     { label: "Close",       fn: () => closeFromSnapshot(winId) },
@@ -465,63 +478,50 @@ export function showContextMenu(winId) {
     { label: "Close All",   fn: () => closeAll() },
     { label: "Clear All",   fn: () => clearAll() }
   ];
-  // The panel is click-through, so rows get no DOM events: clicks are
-  // routed from the eventtaps and matched against each row's rect.
-  const rows = [];
-  for (const it of items) {
-    if (!it) {
-      const sep = document.createElement("div");
-      Object.assign(sep.style, {
-        height: "1px",
-        margin: "4px 0",
-        background: "rgba(255,255,255,0.12)"
-      });
-      m.appendChild(sep);
-      continue;
-    }
-    const row = document.createElement("div");
-    row.textContent = it.label;
-    Object.assign(row.style, {
-      padding: "6px 16px",
-      userSelect: "none"
-    });
-    m.appendChild(row);
-    rows.push({ el: row, fn: it.fn });
-  }
-  document.body.appendChild(m);
-  const bounds = panelFrame();
-  const size = { w: m.offsetWidth || 160, h: m.offsetHeight || 200 };
-  const p = sd.mouse.peek() || { x: bounds.x + 100, y: bounds.y + 100 };
+  const p = at || sd.mouse.peek();
+  if (!p) return;
+  const bounds = displayFrameAt(p);
+  if (!bounds) return;
+  const size = { w: MENU_W, h: menuHeight(items, { rowH: MENU_ROW_H, sepH: MENU_SEP_H, pad: MENU_PAD }) };
   const o = clampMenuOrigin(p, size, bounds);
-  m.style.left = `${o.x - bounds.x}px`;
-  m.style.top  = `${o.y - bounds.y}px`;
-  menu = { el: m, rows, rect: { x: o.x, y: o.y, w: size.w, h: size.h } };
-  pushTapRects();
-}
-
-function menuRowAt(x, y) {
-  const b = panelFrame();
-  for (const r of menu.rows) {
-    const rc = r.el.getBoundingClientRect();
-    if (inRect({ x: rc.left + b.x, y: rc.top + b.y, w: rc.width, h: rc.height }, x, y)) return r;
+  const rows = [];
+  let html = `<div id="m">`;
+  for (const it of items) {
+    if (!it) { html += `<div class="s"></div>`; continue; }
+    html += `<div class="r" data-i="${rows.length}">${escAttr(it.label)}</div>`;
+    rows.push(it.fn);
   }
-  return null;
+  html += `</div>${MENU_SCRIPT}`;
+  const entry = { rows, rect: { x: o.x, y: o.y, w: size.w, h: size.h }, handle: null };
+  menu = entry;
+  entry.handle = sd.overlay.region({ rect: entry.rect, html, css: MENU_CSS, level: "popUpMenu", interactive: true })
+    .then((h) => {
+      if (h && menu !== entry) { h.remove().catch(() => {}); return null; }
+      if (h) h.onMessage((m) => {
+        if (menu !== entry || !m || m.kind !== "row") return;
+        const fn = rows[m.i];
+        hideContextMenu();
+        if (fn) fn();
+      });
+      return h;
+    })
+    .catch(() => null);
 }
 
 function hideContextMenu() {
   if (!menu) return;
-  menu.el.remove();
+  const pending = menu.handle;
   menu = null;
-  pushTapRects();
+  if (pending) pending.then((h) => { if (h) h.remove().catch(() => {}); });
 }
 
-// Routes one tap's view of a leftMouseDown through snaprules.menuClickAction.
+// Routes one view of a leftMouseDown through snaprules.menuClickAction. Menu
+// rows act through the menu overlay's own messages, never through here.
 function clickAction(tap, x, y) {
   const inMenu = !!menu && inRect(menu.rect, x, y);
-  const row = inMenu ? menuRowAt(x, y) : null;
   const hit = tileAt(x, y);
-  const action = menuClickAction({ tap, menuOpen: !!menu, inMenu, onRow: !!row, onTile: !!hit });
-  return { action, row, hit };
+  const action = menuClickAction({ tap, menuOpen: !!menu, inMenu, onRow: false, onTile: !!hit });
+  return { action, hit };
 }
 
 // ----------------------------------------------------------------------------
@@ -662,11 +662,19 @@ function startRefreshTimer() {
 }
 
 // ----------------------------------------------------------------------------
-// Scroll handling.
-// Registered as `eventtap` in stack.json; the callback is wired by main.js.
+// Rail input — the rail overlay's own clicks and scrolls (RAIL_SCRIPT).
 // ----------------------------------------------------------------------------
 
-export function onScrollWheelEvent(payload) {
+function onRailMessage(displayID, m) {
+  const r = railRects[displayID];
+  if (!r || !m) return;
+  const x = r.x + m.x, y = r.y + m.y;
+  if (m.kind === "down") onRailClick({ x, y, shift: !!m.shift });
+  else if (m.kind === "right") onRailRightClick({ x, y });
+  else if (m.kind === "wheel") onRailScroll({ x, y, deltaX: m.deltaX, deltaY: m.deltaY });
+}
+
+function onRailScroll(payload) {
   if (state.snapshotsState.order.length === 0) return;
   const { x, y } = payload || {};
   if (x == null || y == null) return;
@@ -680,7 +688,7 @@ export function onScrollWheelEvent(payload) {
 // Find which snapshot tile (if any) sits under a global (x, y). Walks the
 // live per-display strip layout (stripsByDisplayCache, rebuilt on every
 // reconcileOverlays pass) whose tiles already carry global-space rects
-// (gx/gy/gw/gh) — exactly the coordinate space an OS-level eventtap reports.
+// (gx/gy/gw/gh) — the coordinate space an OS-level eventtap reports.
 function tileAt(x, y) {
   for (const did of Object.keys(stripsByDisplayCache)) {
     const strip = stripsByDisplayCache[did];
@@ -694,11 +702,11 @@ function tileAt(x, y) {
   return null;
 }
 
-// Non-consuming leftMouseDown observer. Tile and menu-row actions run in
-// onTileClickEvent, fired by the consuming snapshotsTileClick tap so the
-// click is swallowed. Here we only dismiss an open context menu on a click
-// elsewhere and report whether the click is a snapshot interaction, so
-// main.js skips the drag bracket for it (a tile click is never a window drag).
+// Non-consuming leftMouseDown observer (every click, anywhere). Tile actions
+// run in onRailClick and menu rows in the menu overlay; here we only dismiss
+// an open context menu on a click elsewhere and report whether the click is a
+// snapshot interaction, so main.js skips the drag bracket for it (a tile
+// click is never a window drag).
 export function onLeftClickEvent(payload) {
   const { x, y } = payload || {};
   if (x == null || y == null) return false;
@@ -712,14 +720,11 @@ export function onLeftClickEvent(payload) {
 // in OVERLAY_CSS; a 20px top-left corner is its deliberate click target.
 const CLOSE_HIT_PX = 20;
 
-// Consuming leftMouseDown tap (stack.json snapshotsTileClick, requireRects).
-// The daemon only fires — and swallows — this over a tile or the open menu
-// (pushTapRects). While the menu is open a tile click only dismisses it.
-export function onTileClickEvent(payload) {
-  const { x, y } = payload || {};
-  if (x == null || y == null) return;
-  const { action, row, hit } = clickAction("consume", x, y);
-  if (action === "row") { hideContextMenu(); row.fn(); return; }
+// A left-click the rail itself received. While the menu is open a tile click
+// only dismisses it.
+function onRailClick(payload) {
+  const { x, y } = payload;
+  const { action, hit } = clickAction("direct", x, y);
   if (action === "dismiss") { hideContextMenu(); return; }
   if (action !== "tile") return;
   // Top-left close dot → close the underlying window (destructive; deliberate
@@ -728,9 +733,8 @@ export function onTileClickEvent(payload) {
     closeFromSnapshot(hit.winId);
     return;
   }
-  // Shift-click drops the snapshot without restoring. SHIFT_MASK = NX
-  // left-shift flag bit.
-  if (payload.flags && (payload.flags & (1 << 17))) {
+  // Shift-click drops the snapshot without restoring.
+  if (payload.shift) {
     cleanupResources(hit.winId);
     updateLayout();
     return;
@@ -759,14 +763,11 @@ export function onMouseMoveEvent(payload) {
   if (hit) showTooltipFor(hit).catch(() => {}); else hideTooltip();
 }
 
-// Consuming rightMouseDown tap (stack.json snapshotsRightClick, requireRects):
-// fires only over a tile or the open menu. On a tile it opens the context
-// menu (Restore / Close / Restore All / Close All / Clear All).
-export function onRightClickEvent(payload) {
-  const { x, y } = payload || {};
-  if (x == null || y == null) return;
+// A right-click (or ctrl-click) the rail itself received: on a tile it opens
+// the context menu (Restore / Close / Restore All / Close All / Clear All).
+function onRailRightClick({ x, y }) {
   const hit = tileAt(x, y);
-  if (hit) showContextMenu(hit.winId);
+  if (hit) showContextMenu(hit.winId, { x, y });
 }
 
 // ----------------------------------------------------------------------------

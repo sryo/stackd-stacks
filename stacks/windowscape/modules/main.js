@@ -10,10 +10,7 @@ import { scheduleSave, loadLayout } from "./restore.js";
 import {
   init as initSnapshots,
   updateLayout as updateSnapshotsLayout,
-  onScrollWheelEvent,
-  onRightClickEvent,
-  onLeftClickEvent,
-  onTileClickEvent
+  onLeftClickEvent
 } from "./snapshots.js";
 
 async function init() {
@@ -25,13 +22,10 @@ async function init() {
 
   // Hook the manifest-declared eventtap callbacks (see stack.json's
   // `eventtap` array). The Bridge invokes onTap_<name> for each match.
-  // Left-click + mouse-move are routed here (not via DOM) because the
-  // stack panel is clickThrough:true and the WebView never receives the
-  // events natively.
-  sd.events.on("snapshotsScroll",     onScrollWheelEvent);
-  sd.events.on("snapshotsRightClick", onRightClickEvent);
-  // leftMouseDown does TWO things: (1) snapshots strip click-handling, and
-  // (2) opens the drag bracket so the next leftMouseUp can close it and
+  // These are global, non-consuming observers: the snapshot rail and its
+  // context menu take their own clicks (snapshots.js).
+  // leftMouseDown does TWO things: (1) dismisses the snapshot context menu
+  // on a click elsewhere, and (2) opens the drag bracket so the next leftMouseUp can close it and
   // we decide resize-vs-reorder ONCE per drag instead of once per intra-
   // drag synth-poll bang. Sharing the eventtap callback so the daemon
   // doesn't install two taps for the same event.
@@ -46,10 +40,6 @@ async function init() {
     if (onLeftClickEvent(payload)) return;
     startDragBracket(payload);
   });
-  // Consuming tap: fires only when the click is over a snapshot tile or the
-  // open context menu (gate fed by snapshots.js pushTapRects) and swallows it,
-  // so the action runs without the click falling through to what's behind.
-  sd.events.on("snapshotsTileClick", onTileClickEvent);
   sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
   // No mouseMoved eventtap: firing at ~120Hz it starved every other stack's
   // sd.mouse / sd.windows.all push. Snapshot-tile hover rides the 30Hz

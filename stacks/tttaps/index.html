@@ -302,7 +302,18 @@
             dragArmed     = true;
             dragDirection = avgDy > 0 ? "up" : "down";
           }
-        } else if (!dragAxisLock) {
+        } else {
+          // Armed: the on-axis sign picks the direction each frame. Commit
+          // compares |travel|, so a direction latched at arm time would fire
+          // "left" for fingers that armed left, reversed, and crossed the
+          // commit distance going right.
+          if (dragDirection === "left" || dragDirection === "right") {
+            dragDirection = avgDx > 0 ? "right" : "left";
+          } else {
+            dragDirection = avgDy > 0 ? "up" : "down";
+          }
+        }
+        if (dragArmed && !dragAxisLock) {
           const flipThresh = CFG.dragArmThreshold * CFG.directionFlipMultiplier;
           if (dragDirection === "left" || dragDirection === "right") {
             if (absY > flipThresh && absY > absX && agreeY) {

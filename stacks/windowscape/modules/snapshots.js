@@ -38,6 +38,9 @@ export const COLUMN_WIDTH  = 140;
 export const REFRESH_INTERVAL = 5000;     // ms — slow refresh
 export const MIN_TILE_HEIGHT = 30;
 export const MAX_TILE_HEIGHT = 200;
+// Above every app window, below the Dock and Notification Center banners
+// (which a right-edge rail would otherwise cover).
+const RAIL_LEVEL = "utility";
 
 const ZOOM_IN_MS      = 280;
 const RESTORE_FADE_MS = 180;
@@ -282,7 +285,7 @@ function buildTilesHtml(strip) {
 // One region overlay per display that hosts snapshots, positioned on the
 // reserved band. Only a changed rect or changed tile HTML reaches the daemon.
 const overlays = overlaySlots({
-  create: (strip) => sd.overlay.region({ rect: strip.reserved, html: `<div id="ws-tiles"></div>`, css: OVERLAY_CSS }),
+  create: (strip) => sd.overlay.region({ rect: strip.reserved, html: `<div id="ws-tiles"></div>`, css: OVERLAY_CSS, level: RAIL_LEVEL }),
   paint: paintOverlay,
   dispose: (h) => { h.remove().catch(() => {}); },
 });
@@ -386,7 +389,7 @@ let tipShownFor = null;     // winId the tooltip currently describes
 
 function tipHandle(rect) {
   if (!tipRegion) {
-    tipRegion = sd.overlay.region({ rect, html: `<div id="tip"><div id="b"></div></div>`, css: TIP_CSS })
+    tipRegion = sd.overlay.region({ rect, html: `<div id="tip"><div id="b"></div></div>`, css: TIP_CSS, level: RAIL_LEVEL })
       .catch(() => null);
   }
   return tipRegion;

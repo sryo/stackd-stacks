@@ -48,6 +48,19 @@ html, body {
 .zone[data-side="center-left"]  { right: calc(50% + var(--bar-notch-pad-w) / 2 + var(--bar-notch-gap)); flex-direction: row; }
 .zone[data-side="center-right"] { left:  calc(50% + var(--bar-notch-pad-w) / 2 + var(--bar-notch-gap)); flex-direction: row; }
 
+/* core.js caps each center zone's max-width at the room left before the
+   side zone it grows toward; past that its items shrink and ellipsize
+   rather than draw over their neighbors. */
+.zone[data-side="center-left"],
+.zone[data-side="center-right"] { overflow: hidden; }
+.zone[data-side="center-left"] .item,
+.zone[data-side="center-right"] .item {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Non-notched displays don't reserve a center gap; center-right starts at 50%
    and center-left is hidden. core.js folds center-left items into center-right
    on these screens so nothing's lost. */

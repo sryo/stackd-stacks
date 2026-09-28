@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { volumeLabel } from "../logic.js";
 
 test("built-in output shows only the level", () => {
-  assert.equal(volumeLabel({ deviceName: "MacBook Pro Speakers", volume: 0.5, muted: false }, "Built-in"),
+  assert.equal(volumeLabel({ deviceName: "MacBook Pro Speakers", volume: 0.5, muted: false }, "builtIn"),
     "{sf:speaker.wave.2.fill} 50%");
 });
 

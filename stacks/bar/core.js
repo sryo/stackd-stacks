@@ -1,6 +1,6 @@
 import { sd } from "sd://runtime/api.js";
 import ITEMS from "./items/index.js";
-import { isPrimaryScreen, nextPeekMode, interactiveRects, isNotched, zoneItems } from "./logic.js";
+import { isPrimaryScreen, nextPeekMode, interactiveRects, isNotched, zoneItems, centerZoneMax } from "./logic.js";
 
 const SETTINGS_KEY = "enabledOverride";
 
@@ -110,8 +110,23 @@ function relayout() {
       return el;
     }));
   }
+  capCenterZones();
   $bar.classList.toggle("fs-minimal", state.mode === "fullscreen-minimal");
   scheduleInteractiveRects();
+}
+
+// The zones are positioned independently, so a center zone would otherwise
+// draw over the side zone it grows toward. Its items ellipsize instead.
+function capCenterZones() {
+  const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--bar-item-gap")) || 0;
+  const cap = (zone, side, anchorKey, sideKey) => {
+    zone.style.maxWidth = "";
+    if (!side.childElementCount) return;
+    const max = centerZoneMax(zone.getBoundingClientRect()[anchorKey], side.getBoundingClientRect()[sideKey], gap);
+    zone.style.maxWidth = max + "px";
+  };
+  cap(zones["center-right"], zones.right, "left", "left");
+  cap(zones["center-left"], zones.left, "right", "right");
 }
 
 function setValue(id, val) {

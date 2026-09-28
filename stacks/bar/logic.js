@@ -78,7 +78,7 @@ export function nowPlayingPills(media, procs) {
 
 export function volumeLabel(output, transport) {
   if (!output) return "";
-  const builtIn = transport == null || transport === "Built-in";
+  const builtIn = transport == null || transport === "builtIn";
   // "Mateo's AirPods Max" → "AirPods Max"
   const name = builtIn ? "" : (output.deviceName || "").replace(/^[^']+'s\s+/, "");
   const parts = [output.muted ? "{sf:speaker.slash.fill}" : "{sf:speaker.wave.2.fill}"];
@@ -86,6 +86,14 @@ export function volumeLabel(output, transport) {
   if (output.muted) parts.push("muted");
   else if (output.volume != null) parts.push(`${Math.round(output.volume * 100)}%`);
   return parts.join(" ");
+}
+
+// Room a center zone has before it runs into the side zone it grows toward.
+// `anchorEdge` is the zone's fixed edge (at the notch or the screen middle),
+// `sideEdge` the facing edge of the side zone's outermost item; either
+// direction works, so center-left and center-right share it.
+export function centerZoneMax(anchorEdge, sideEdge, gap) {
+  return Math.max(0, Math.abs(sideEdge - anchorEdge) - gap);
 }
 
 export function rainPollDelay(fetched) {

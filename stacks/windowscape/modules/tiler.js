@@ -15,6 +15,7 @@ import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, pinHomeKey
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
+import { tileSkipReason } from "./tilegate.js";
 import { coalescingRunner } from "./sequencing.js";
 
 // A window more than REFUSAL_PX off its tile target refused it (app-imposed
@@ -107,15 +108,12 @@ function scheduleGraceRepass(deadline) {
   const delay = Math.max(50, deadline - Date.now() + 100);
   graceRepassTimer = setTimeout(() => {
     graceRepassTimer = null;
-    // tileWindows() bails at its drag / simulated-fullscreen / snapshot
-    // guards without re-arming us. If the re-pass fires mid-guard it would be
-    // lost, and the reserved slot never evicts — native-fullscreen idle
-    // produces no further events to re-trigger a pass, which is the exact
-    // hole this re-pass exists to heal. Re-arm until the guard clears.
-    if (state.dragInFlight
-        || state.displaySettling
-        || (state.fullscreenState && state.fullscreenState.active)
-        || (state.snapshotsState && state.snapshotsState.isCreating)) {
+    // tileWindows() bails at its gates (tilegate.js) without re-arming us.
+    // If the re-pass fires mid-gate it would be lost, and the reserved slot
+    // never evicts — native-fullscreen idle produces no further events to
+    // re-trigger a pass, which is the exact hole this re-pass exists to
+    // heal. Re-arm until the gate opens.
+    if (tileSkipReason(state)) {
       scheduleGraceRepass(Date.now() + 200);
       return;
     }
@@ -700,33 +698,25 @@ export function tileWindows() {
   return runTilePass();
 }
 
+const SKIP_LOG = {
+  "booting": "booting (init tiles once ready)",
+  "drag": "drag in flight (deferred)",
+  "fullscreen": "simulated fullscreen active",
+  "display-settling": "display change settling",
+  "snapshot": "snapshot in flight",
+};
+
 let tilingTimer = null;
 async function tilePass() {
-  // Drag-in-flight guard — events.js sets this while a drag is active
-  // so unrelated triggers (focusedChanged, sd.windows.all push, etc.)
-  // don't yank the dragged window out from under the cursor.
-  if (state.dragInFlight) {
-    // Don't lose the pass: ANY click opens a bracket (global eventtap), so
-    // a created/destroyed event landing mid-click would otherwise skip its
-    // retile forever — handleWindowEvent already committed lastKnownIds, so
-    // no later diff re-fires it. endDragBracket runs the deferred pass.
-    state.tileDeferred = true;
-    log("skip tiling — drag in flight (deferred)");
-    return;
-  }
-  if (state.fullscreenState && state.fullscreenState.active) {
-    log("skip tiling — simulated fullscreen active");
-    return;
-  }
-  // Between a display change and its settle, windowsById still holds
-  // pre-change frames (macOS has moved windows between displays) — any
-  // pass now would put windows back where they were. The settle tiles.
-  if (state.displaySettling) {
-    log("skip tiling — display change settling");
-    return;
-  }
-  if (state.snapshotsState && state.snapshotsState.isCreating) {
-    log("skip tiling — snapshot in flight");
+  const skip = tileSkipReason(state);
+  if (skip) {
+    // Don't lose a drag-held pass: ANY click opens a bracket (global
+    // eventtap), so a created/destroyed event landing mid-click would
+    // otherwise skip its retile forever — handleWindowEvent already
+    // committed lastKnownIds, so no later diff re-fires it. endDragBracket
+    // runs the deferred pass.
+    if (skip === "drag") state.tileDeferred = true;
+    log(`skip tiling — ${SKIP_LOG[skip]}`);
     return;
   }
   state.tileDeferred = false;

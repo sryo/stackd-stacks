@@ -67,6 +67,8 @@ async function init() {
     // starts the refresh + save timers, wires the OS minimize/deminimize
     // bangs so externally-driven minimize doesn't desync.
     await initSnapshots();
+    state.booting = false;
+    state.tileReason = "boot";
     await tileWindows();
     // Push the focused window's inclusion verdict to overlay-border so it
     // can paint the right palette before its own first focusedChanged tick

@@ -127,6 +127,9 @@ export const state = {
   // True from a display-geometry change until its settle pass has fresh
   // window frames; tileWindows() skips while set.
   displaySettling:    false,
+  // True until init has restored the saved order and snapshot rail; tile
+  // passes wait for init's own (tilegate.js).
+  booting:            true,
   // The id of the window the user is currently dragging — captured from the
   // first moved/resized bang inside a leftMouseDown→leftMouseUp bracket
   // (events.js startDragBracket / endDragBracket). Mid-drag bangs overwrite

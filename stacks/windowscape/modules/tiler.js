@@ -11,7 +11,7 @@ import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal }
 import { dockNewFloats } from "./events.js";
 import { planFloatZone } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -68,6 +68,9 @@ export function pruneStaleWeights() {
   }
   for (const k of state.refusalPins) {
     if (!live.has(+k)) state.refusalPins.delete(k);
+  }
+  for (const k of Object.keys(state.pinHomes)) {
+    if (!live.has(+k)) delete state.pinHomes[k];
   }
   for (const k of Object.keys(state.offscreenSince)) {
     if (!live.has(+k)) delete state.offscreenSince[k];
@@ -264,6 +267,18 @@ async function tileWindowsInternal(snap, reason) {
     state.lastTileAreaByDisplay[d.displayID] = { ...screenFrame };
     const horizontal = railFrame.w > railFrame.h;
     if (zonePlan) placeZone(d.displayID, zonePlan, snap);
+
+    // A pin sized for another display or orientation (the window moved, or
+    // this display rotated) would skew this row; drop it and let the window
+    // flex. Then stamp every tile with this row's home for its next pin.
+    const home = pinHomeKey(d.displayID, horizontal);
+    const leftBehind = pinsFromElsewhere({ ids: nonCollapsed, pins: state.pinnedSizes, homes: state.pinHomes, here: home });
+    for (const id of leftBehind) {
+      log(`PIN-DROP id=${id} ${state.pinHomes[id]}→${home} px=${state.pinnedSizes[id]}`);
+      delete state.pinnedSizes[id];
+      state.refusalPins.delete(+id);
+    }
+    for (const id of nonCollapsed) state.pinHomes[id] = home;
 
     // Fixed-width apps (System Settings) tile at the width they refused to
     // grow past, as an exact basis rather than a floor to grow from.

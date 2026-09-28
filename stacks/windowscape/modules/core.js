@@ -18,6 +18,9 @@ export const state = {
   // grow/shrink/cycleWidth verbs. Cleared by cycleWidth (focused only) and
   // resetWeights (all). hy3:base mechanic.
   pinnedSizes:        Object.create(null),
+  // winId -> pinHomeKey (display + axis) of the row it was last tiled in.
+  // A pin only applies under its home (tiler.js PIN-DROP).
+  pinHomes:           Object.create(null),
   // Ids whose pinnedSizes entry came from a REFUSAL (PASS-2 / anim sweep /
   // OOB containment) rather than a user resize. Refusal pins encode an
   // app's real minimum — the PIN-CLAMP oversubscription reset must shed

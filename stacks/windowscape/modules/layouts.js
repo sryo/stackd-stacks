@@ -149,6 +149,19 @@ export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN
   return out;
 }
 
+// A pin is a size on one display's major axis; its home names that display
+// and axis. A pin whose window is now tiled under a different home (moved
+// display, or the display flipped orientation) no longer applies there.
+export function pinHomeKey(displayID, horizontal) {
+  return `${displayID}:${horizontal ? "H" : "V"}`;
+}
+
+// Ids pinned under a home other than `here`. A pin with no recorded home
+// (restored from settings, carried to a recreated window) is kept.
+export function pinsFromElsewhere({ ids, pins, homes, here }) {
+  return ids.filter((id) => pins[id] != null && homes[id] != null && homes[id] !== here);
+}
+
 // Build a tile's solver spec from the persisted state maps: a user pin →
 // `basis`, an AX-refusal pin → `min` (the app's floor), else a flex `weight`.
 // The last-grabbed pin (`lastId`) is marked active so it's held under overflow.

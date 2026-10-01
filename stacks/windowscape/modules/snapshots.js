@@ -15,9 +15,10 @@
 // - Input: the rail takes real clicks, so whatever macOS draws above it (a
 //   notification banner) gets its clicks first. Its page posts left-clicks,
 //   right-clicks and scrolls back through window.stack.post (onRailMessage).
-// - Refresh timer: every 5s each tracked window is re-captured so the
-//   preview stays current. Tiles whose display shows a native fullscreen
-//   space are skipped (snapgate.js): their strip isn't drawn.
+// - Live thumbnails: every drawn tile holds an sd.windows.stream, and each
+//   frame swaps that tile's <img> in place inside the rail overlay. Tiles
+//   whose display shows a native fullscreen space don't stream (snapgate.js):
+//   their strip isn't drawn.
 // - Context menu: its own interactive region overlay at the cursor, clamped
 //   inside that display.
 // - State persistence: sd.settings.set/get. Image dataURLs persist directly.
@@ -25,7 +26,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { state, log, isManaged } from "./core.js";
-import { refreshBlockedByFullscreen } from "./snapgate.js";
+import { liveStreamIds } from "./snapgate.js";
 import { tooltipLines, tooltipRect } from "./tooltip.js";
 import { keepPersistedSnapshot, menuClickAction, clampMenuOrigin, scrolledOffset, railRect, menuHeight } from "./snaprules.js";
 import { overlaySlots } from "./sequencing.js";
@@ -36,7 +37,6 @@ import { tileWindows } from "./tiler.js";
 export const PADDING       = 8;
 export const GAP           = 4;
 export const COLUMN_WIDTH  = 140;
-export const REFRESH_INTERVAL = 5000;     // ms — slow refresh
 export const MIN_TILE_HEIGHT = 30;
 export const MAX_TILE_HEIGHT = 200;
 // Above every app window, below the Dock and Notification Center banners
@@ -47,7 +47,6 @@ const ZOOM_IN_MS      = 280;
 const RESTORE_FADE_MS = 180;
 
 
-let refreshTimerHandle = null;
 let saveTimerHandle = null;
 
 // ----------------------------------------------------------------------------
@@ -287,6 +286,8 @@ const RAIL_SCRIPT = `<script>(function(){
   document.addEventListener('contextmenu',function(e){e.preventDefault();post('right',e);},true);
   document.addEventListener('wheel',function(e){e.preventDefault();
     post('wheel',e,{deltaX:-e.deltaX,deltaY:-e.deltaY});},{capture:true,passive:false});
+  window.__wsFrames=function(fs){for(var i=0;i<fs.length;i++){
+    var img=document.querySelector('.ws-tile[data-win="'+fs[i][0]+'"] img');if(img)img.src=fs[i][1];}};
 })();</script>`;
 
 // displayID -> the rail overlay's current global rect, to map its messages'
@@ -344,6 +345,7 @@ function reconcileOverlays() {
   for (const idStr of Object.keys(wanted)) {
     overlays.sync(+idStr, wanted[idStr]);
   }
+  syncLiveStreams(wanted);
 }
 
 // Re-render every strip to match snapshotsState.
@@ -609,56 +611,60 @@ export async function closeAll() {
 }
 
 // ----------------------------------------------------------------------------
-// Refresh timer.
+// Live thumbnails.
 // ----------------------------------------------------------------------------
 
-// Displays whose tiles the refresh is currently skipping, so the pause/resume
-// log fires once per transition instead of once per tile per tick.
-const refreshPausedDisplays = new Set();
+const STREAM_FPS = 15;
+// Device pixels: the tile's CSS width at 2x.
+const STREAM_WIDTH = (COLUMN_WIDTH - PADDING * 2) * 2;
 
-function noteRefreshPause(displayID, blocked) {
-  if (blocked === refreshPausedDisplays.has(displayID)) return;
-  if (blocked) refreshPausedDisplays.add(displayID);
-  else refreshPausedDisplays.delete(displayID);
-  log(`SNAP-REFRESH d${displayID} ${blocked ? "paused (fullscreen space)" : "resumed"}`);
-}
+// winId -> { stream, unsub } for every tile drawn right now.
+const liveStreams = new Map();
+// displayID -> { busy, next: Map(winId -> dataURL) }. One overlay eval in
+// flight per rail; frames that land meanwhile coalesce newest-wins per tile.
+const railFrames = new Map();
 
-async function refreshSnapshots() {
-  if (state.snapshotsState.isCreating) return;
-  const ids = [...state.snapshotsState.order];
-  if (ids.length === 0) return;
-  let anyChanged = false;
-  for (const winId of ids) {
-    const data = state.snapshotsState.snapshots[winId];
-    if (!data) continue;
-    // Per snapshot, not per pass: with two displays the one on a desktop
-    // keeps its visible strip fresh while the fullscreen one goes quiet.
-    // Read live each iteration, since the awaits below span space flips.
-    const blocked = refreshBlockedByFullscreen(data.displayID, state.displays, state.spacesByDisplay);
-    noteRefreshPause(data.displayID, blocked);
-    if (blocked) continue;
-    try {
-      const snap = await sd.windows.snapshot(winId, { format: "jpeg", quality: 0.7 });
-      if (snap && snap.dataURL && snap.dataURL !== data.image) {
-        // Tiles live in the per-display region overlays (buildTilesHtml embeds
-        // the dataURL inline in the tile HTML), so a fresh image repaints by
-        // re-running the overlay diff — NOT by mutating a DOM <img>.
-        // reconcileOverlays() below repaints only overlays whose HTML actually
-        // changed (paintOverlay's html !== lastHtml gate), so this is cheap.
-        data.image = snap.dataURL;
-        anyChanged = true;
-      }
-    } catch (_) { /* window may be off-screen / unsnapshottable — skip */ }
+function syncLiveStreams(strips) {
+  const want = new Set(liveStreamIds(strips, state.displays, state.spacesByDisplay));
+  for (const [winId, live] of liveStreams) {
+    if (want.has(winId)) continue;
+    liveStreams.delete(winId);
+    live.unsub();
+    live.stream.stop().catch(() => {});
+    log(`SNAP-LIVE stop ${winId}`);
   }
-  if (anyChanged) {
-    reconcileOverlays();
-    scheduleSnapshotSave();
+  for (const winId of want) {
+    if (liveStreams.has(winId)) continue;
+    const stream = sd.windows.stream(winId, { fps: STREAM_FPS, width: STREAM_WIDTH, quality: 0.7 });
+    const unsub = stream.subscribe((f) => onLiveFrame(winId, f));
+    liveStreams.set(winId, { stream, unsub });
+    log(`SNAP-LIVE start ${winId}`);
   }
 }
 
-function startRefreshTimer() {
-  if (refreshTimerHandle) return;
-  refreshTimerHandle = setInterval(refreshSnapshots, REFRESH_INTERVAL);
+function onLiveFrame(winId, frame) {
+  const data = state.snapshotsState.snapshots[winId];
+  if (!data || !frame || !frame.dataURL || !liveStreams.has(winId)) return;
+  // Kept current so a full repaint (layout change) and the persisted
+  // snapshot both show the latest frame.
+  data.image = frame.dataURL;
+  let q = railFrames.get(data.displayID);
+  if (!q) { q = { busy: false, next: new Map() }; railFrames.set(data.displayID, q); }
+  q.next.set(winId, frame.dataURL);
+  flushRailFrames(data.displayID);
+}
+
+async function flushRailFrames(displayID) {
+  const q = railFrames.get(displayID);
+  if (!q || q.busy || q.next.size === 0) return;
+  const h = overlays.handle(displayID);
+  if (!h) { q.next.clear(); return; }
+  const frames = [...q.next];
+  q.next.clear();
+  q.busy = true;
+  try { await h.eval(`window.__wsFrames&&window.__wsFrames(${JSON.stringify(frames)})`); } catch (_) {}
+  q.busy = false;
+  flushRailFrames(displayID);
 }
 
 // ----------------------------------------------------------------------------
@@ -839,7 +845,7 @@ async function loadPersistedSnapshots() {
 // Init
 // ----------------------------------------------------------------------------
 
-// Wires the refresh timer, loads persisted state, paints the initial strips.
+// Loads persisted state and paints the initial strips (which start their live streams).
 export async function init() {
   sd.mouse.subscribe(onMouseMoveEvent);
   // sd.window.{minimized,deminimized,destroyed} fire when the OS changes a
@@ -897,7 +903,6 @@ export async function init() {
   }
 
   await loadPersistedSnapshots();
-  startRefreshTimer();
   updateLayout();
 }
 

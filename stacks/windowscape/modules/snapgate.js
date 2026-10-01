@@ -16,3 +16,15 @@ export function refreshBlockedByFullscreen(displayID, displays, spacesByDisplay)
   const d = displays.find((d) => d.displayID === displayID);
   return !!(d && spacesByDisplay[d.uuid]?.isFullscreen);
 }
+
+/// Window ids whose thumbnails should stream live: every tile drawn in a
+/// strip, except strips on a display that shows a fullscreen space.
+///   strips : { [displayID]: { displayID, tiles: [{ winId }] } }
+export function liveStreamIds(strips, displays, spacesByDisplay) {
+  const ids = [];
+  for (const strip of Object.values(strips || {})) {
+    if (refreshBlockedByFullscreen(strip.displayID, displays, spacesByDisplay)) continue;
+    for (const t of strip.tiles) ids.push(t.winId);
+  }
+  return ids;
+}

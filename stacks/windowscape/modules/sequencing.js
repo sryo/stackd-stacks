@@ -70,5 +70,5 @@ export function overlaySlots({ create, paint, dispose }) {
     slots.delete(key);
     if (e.handle) dispose(e.handle);
   }
-  return { sync, remove, keys: () => [...slots.keys()] };
+  return { sync, remove, keys: () => [...slots.keys()], handle: (key) => slots.get(key)?.handle ?? null };
 }

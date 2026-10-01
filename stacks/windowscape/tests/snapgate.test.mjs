@@ -4,7 +4,7 @@
 // missing evidence (unknown display, no Spaces info yet) never blocks.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { refreshBlockedByFullscreen } from "../modules/snapgate.js";
+import { refreshBlockedByFullscreen, liveStreamIds } from "../modules/snapgate.js";
 
 const displays = [
   { displayID: 1, uuid: "AAAA" },
@@ -44,4 +44,20 @@ test("pre-Spaces-info startup (empty / missing snapshots) → not blocked", () =
 
 test("isFullscreen absent on the entry → not blocked", () => {
   assert.equal(refreshBlockedByFullscreen(1, displays, { AAAA: { active: 3 } }), false);
+});
+
+test("liveStreamIds: every drawn tile streams", () => {
+  const strips = { 1: { displayID: 1, tiles: [{ winId: 10 }, { winId: 11 }] },
+                   2: { displayID: 2, tiles: [{ winId: 20 }] } };
+  assert.deepEqual(liveStreamIds(strips, displays, { AAAA: desktop, BBBB: desktop }), [10, 11, 20]);
+});
+
+test("liveStreamIds: a strip on a fullscreen display doesn't stream", () => {
+  const strips = { 1: { displayID: 1, tiles: [{ winId: 10 }] },
+                   2: { displayID: 2, tiles: [{ winId: 20 }] } };
+  assert.deepEqual(liveStreamIds(strips, displays, { AAAA: fullscreen, BBBB: desktop }), [20]);
+});
+
+test("liveStreamIds: no strips → nothing streams", () => {
+  assert.deepEqual(liveStreamIds({}, displays, {}), []);
 });

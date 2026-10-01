@@ -1,14 +1,14 @@
 // Palette — faithful port of the user's Hammerspoon Palette.
 // Two-stage noun→verb command palette with subsequence matcher + frecency
 // boost + row quickpicks + verb quickpicks. Sources: menuitems / apps /
-// installedapps / calc / shellrunner / files. Mirrors the lua structure at
+// installedapps / calc / shellrunner / files / stacks. Mirrors the lua structure at
 // ~/.hammerspoon/Palette/.
 //
 // Trigger: Ctrl+Cmd+Space hotkey, or `sd.bang('palette.open')` from any
 // stack.
 import { sd } from "sd://runtime/api.js";
 import { rank } from "./matcher.js";
-import { createGeneration, digitPicksRow, clampToScreen } from "./logic.js";
+import { createGeneration, digitPicksRow, clampToScreen, stackItems } from "./logic.js";
 import { recents } from "./recents.js";
 import {
   SELF, appsSource, menuItemsSource, installedSource, calcSource,
@@ -235,12 +235,13 @@ async function open(opts) {
   }
   state.openOwnerApp = owner;
   // Static sources fan out concurrently.
-  const [menuItems, apps, installed] = await Promise.all([
+  const [menuItems, apps, installed, stacks] = await Promise.all([
     menuItemsSource.list().catch(() => []),
     appsSource.list().catch(() => []),
-    installedSource.list().catch(() => [])
+    installedSource.list().catch(() => []),
+    sd.stacks.list().then((l) => stackItems(l, "palette"), () => [])
   ]);
-  const raw = menuItems.concat(apps).concat(installed);
+  const raw = menuItems.concat(apps).concat(installed).concat(stacks);
   state.open = true; state.stage = "noun"; state.query = ""; state.raw = raw;
   state.focused = 0; state.history = []; state.selectedItem = null;
   $q.value = "";

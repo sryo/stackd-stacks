@@ -2,7 +2,7 @@
 // no DOM, so they run under plain `node --test tests/`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { titleRuns, createGeneration, mapLimit, digitPicksRow, clampToScreen } from "../modules/logic.js";
+import { titleRuns, createGeneration, mapLimit, digitPicksRow, clampToScreen, stackItems } from "../modules/logic.js";
 
 test("titleRuns: merges adjacent matched chars into bold runs", () => {
   assert.deepEqual(titleRuns("Safari", [0, 1, 4]), [
@@ -116,4 +116,18 @@ test("clampToScreen: respects a non-origin display frame", () => {
 
 test("clampToScreen: no screen frame leaves the point untouched", () => {
   assert.deepEqual(clampToScreen(-5, -5, 800, 470, null, 8), { x: -5, y: -5 });
+});
+
+test("stackItems: disable rows for loaded stacks, enable rows for parked ones", () => {
+  const items = stackItems({ loaded: ["windowscape", "palette"], disabled: ["bar"] }, "palette");
+  assert.deepEqual(items.map((i) => [i.title, i.defaultVerb, i.payload.stackId]), [
+    ["Disable stack: windowscape", "disablestack", "windowscape"],
+    ["Enable stack: bar", "enablestack", "bar"],
+  ]);
+  assert.ok(items.every((i) => i.hideOnEmptyQuery && i.source === "stacks"));
+});
+
+test("stackItems: a missing or failed list yields no rows", () => {
+  assert.deepEqual(stackItems(null, "palette"), []);
+  assert.deepEqual(stackItems({}, "palette"), []);
 });

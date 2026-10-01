@@ -70,3 +70,24 @@ export function clampToScreen(x, y, w, h, sf, margin) {
   y = Math.min(y, sf.y + sf.h - h - margin);
   return { x: Math.max(x, sf.x + margin), y: Math.max(y, sf.y + margin) };
 }
+
+// Palette rows for stack management, from sd.stacks.list(): "Disable stack"
+// for every loaded stack except the palette itself (it would vanish
+// mid-command), "Enable stack" for every parked one. Hidden until the user
+// types, so they don't crowd the default list.
+export function stackItems(list, self) {
+  const loaded = (list && list.loaded) || [];
+  const disabled = (list && list.disabled) || [];
+  const row = (id, action) => ({
+    id:               `stack:${action}:${id}`,
+    title:            `${action === "disable" ? "Disable" : "Enable"} stack: ${id}`,
+    subtitle:         action === "disable" ? "Running stack" : "Disabled stack",
+    source:           "stacks",
+    payload:          { stackId: id },
+    defaultVerb:      action === "disable" ? "disablestack" : "enablestack",
+    verbs:            [action === "disable" ? "disablestack" : "enablestack"],
+    hideOnEmptyQuery: true
+  });
+  return loaded.filter((id) => id !== self).map((id) => row(id, "disable"))
+    .concat(disabled.map((id) => row(id, "enable")));
+}

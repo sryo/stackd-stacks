@@ -99,6 +99,24 @@ export const VERBS = {
       sd.proc.exec("/bin/zsh", ["-lc", cmd]).catch(() => {});
     }
   },
+  disablestack: {
+    id: "disablestack", label: "Disable",
+    async run(item) {
+      const id = item.payload && item.payload.stackId;
+      if (!id) return;
+      const r = await sd.stacks.disable(id);
+      if (!r || !r.ok) console.error("palette: disable failed", id, r && r.error);
+    }
+  },
+  enablestack: {
+    id: "enablestack", label: "Enable",
+    async run(item) {
+      const id = item.payload && item.payload.stackId;
+      if (!id) return;
+      const r = await sd.stacks.enable(id);
+      if (!r || !r.ok) console.error("palette: enable failed", id, r && r.error);
+    }
+  },
   askmuse: {
     id: "askmuse", label: "Ask Muse",
     async run(item) {

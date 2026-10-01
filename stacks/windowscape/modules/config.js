@@ -23,6 +23,9 @@ export const cfg = {
   floatZone:             true,
   floatZoneMaxFrac:      0.35,
   floatZoneMinDisplayW:  1800,
+  // Minimized windows become live thumbnails in a strip at the display edge.
+  // Off: minimize goes to the Dock as usual and no strip space is reserved.
+  minimizeRail:          false,
   debugLogging:          true,
   widthDefault:          1.0
 };

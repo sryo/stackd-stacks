@@ -1,6 +1,7 @@
 // Bootloader. Wires the modules and starts watchers.
 
 import { sd } from "sd://runtime/api.js";
+import { cfg } from "./config.js";
 import { state, loadList, loadFixedWidthApps, updateWindowOrder, emitInclusion } from "./core.js";
 import { start as startEvents, startDragBracket, endDragBracket } from "./events.js";
 import { bind as bindKeybinds } from "./keybinds.js";
@@ -56,7 +57,7 @@ async function init() {
     // Boot the snapshot subsystem — loads persisted tiles, paints strip(s),
     // starts the refresh + save timers, wires the OS minimize/deminimize
     // bangs so externally-driven minimize doesn't desync.
-    await initSnapshots();
+    if (cfg.minimizeRail) await initSnapshots();
     state.booting = false;
     state.tileReason = "boot";
     await tileWindows();

@@ -43,3 +43,13 @@ export function sortBySlot(wins, horizontal, targets, recent) {
   };
   return [...wins].sort((a, b) => center(a) - center(b));
 }
+
+/// Whether a window's cached Space list is stale for the display its frame
+/// is on: the list lacks that display's active Space but holds another
+/// display's active Space. That happens when the window changed displays
+/// without a drag (the OS pushing a window it couldn't fit, an app moving
+/// itself) — the list was read on the old display.
+export function staleSpacesFor(cached, activeSpace, otherActiveSpaces) {
+  if (!cached || cached.length === 0 || cached.includes(activeSpace)) return false;
+  return otherActiveSpaces.some((s) => cached.includes(s));
+}

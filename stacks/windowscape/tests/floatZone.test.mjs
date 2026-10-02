@@ -3,7 +3,7 @@
 // Fixtures are real window sizes.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { planFloatZone, floatsToDock } from "../modules/floatzone.js";
+import { planFloatZone, floatsToDock, zoneCapable } from "../modules/floatzone.js";
 
 const area = { x: 0, y: 57, w: 2560, h: 1607 };
 const calc     = { id: 1, w: 230, h: 408 };
@@ -119,4 +119,19 @@ test("already docked, dragged loose, hidden or minimized → not docked", () => 
   assert.deepEqual(floatsToDock({ floats: [f(1)], docked: new Set(), loose: new Set([1]) }), []);
   assert.deepEqual(floatsToDock({ floats: [f(1, { onscreen: false })], ...none }), []);
   assert.deepEqual(floatsToDock({ floats: [f(1, { minimized: true })], ...none }), []);
+});
+
+// ── zone-capable displays ──
+// The zone only exists on wide landscape displays (planZoneFor). A panel
+// "docked" on a portrait or narrow display is never placed, and being docked
+// keeps it from returning to its app's own frame — it stays wherever its
+// refused tile left it, on top of the tiles.
+test("zoneCapable: wide landscape displays hold a zone, portrait and narrow ones don't", () => {
+  assert.equal(zoneCapable({ w: 2560, h: 1440 }, 1800), true);
+  assert.equal(zoneCapable({ w: 1080, h: 2560 }, 1800), false);
+  assert.equal(zoneCapable({ w: 1710, h: 1112 }, 1800), false);
+});
+
+test("a panel on a display with no zone is not docked", () => {
+  assert.deepEqual(floatsToDock({ floats: [f(1, { zoneCapable: false }), f(2)], ...none }), [2]);
 });

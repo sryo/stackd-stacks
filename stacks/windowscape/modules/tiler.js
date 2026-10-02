@@ -9,11 +9,11 @@ import { cfg } from "./config.js";
 import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor, tileOpts, learnFixedWidth, learnPanelApp, fixedWidthPxOf, isFloating } from "./core.js";
 import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal } from "./tileable.js";
 import { dockNewFloats } from "./events.js";
-import { planFloatZone } from "./floatzone.js";
+import { planFloatZone, zoneCapable } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
 import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
-import { pickRefusals } from "./motion.js";
+import { pickRefusals, confirmRefusals, pinRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 import { tileSkipReason } from "./tilegate.js";
 import { coalescingRunner } from "./sequencing.js";
@@ -300,6 +300,7 @@ async function tileWindowsInternal(snap, reason) {
       pins: state.pinnedSizes,
       refusalSet: state.refusalPins,
       inner: innerSpanFor(screenFrame, horizontal, nonCollapsed.length, collapsed.length),
+      minOf: (id) => appMinFor(id, horizontal),
     });
     if (healed) {
       const was = nonCollapsed.reduce((s, id) => s + state.pinnedSizes[id], 0);
@@ -450,16 +451,15 @@ async function tileWindowsInternal(snap, reason) {
       const dW = Math.abs(a.w - t.frame.w), dH = Math.abs(a.h - t.frame.h);
       return horizontal ? dW > REFUSAL_PX : dH > REFUSAL_PX;
     });
-    if (learnPanels(nonCollapsed.map((id) => [id, targets.find((t) => t.winId === id)?.frame, actuals[+id]]), horizontal)) {
-      setTimeout(dockNewFloats, 0);
+    if (learnPanels(nonCollapsed.map((id) => [id, targets.find((t) => t.winId === id)?.frame, actuals[+id]]))) {
+      setTimeout(panelsLearned, 0);
       continue;
     }
     if (refused.length === 0 || refused.length >= nonCollapsed.length) continue;
     learnFixedWidths(refused.map((id) => [id, targets.find((t) => t.winId === id).frame, actuals[+id]]), horizontal);
 
+    pinRefusals(state.pinnedSizes, state.refusalPins, refused.map((id) => [id, actuals[+id]]), horizontal, PIN_MIN_PX);
     for (const id of refused) {
-      state.pinnedSizes[id] = Math.max(PIN_MIN_PX, actuals[+id][axis]);
-      state.refusalPins.add(+id);
       learnAppMin(id, horizontal, actuals[+id][axis]);
       // Update the recorded target to what the app actually accepted.
       // Leaving the PASS-1 target in place makes the out-of-bracket resize
@@ -511,8 +511,7 @@ async function tileWindowsInternal(snap, reason) {
       const dMajor2 = Math.abs(horizontal ? a.w - t.frame.w : a.h - t.frame.h);
       if (dMajor2 > REFUSAL_PX) {
         learnFixedWidths([[t.winId, t.frame, a]], horizontal);
-        state.pinnedSizes[+t.winId] = Math.max(PIN_MIN_PX, a[axis]);
-        state.refusalPins.add(+t.winId);
+        pinRefusals(state.pinnedSizes, state.refusalPins, [[+t.winId, a]], horizontal, PIN_MIN_PX);
         learnAppMin(t.winId, horizontal, a[axis]);
         state.lastTileTarget[+t.winId] = { frame: { ...a } };
         log(`PASS2-FLEX-REFUSED id=${t.winId} pinned=${state.pinnedSizes[+t.winId]}px`);
@@ -542,12 +541,21 @@ function learnFixedWidths(entries, horizontal) {
 // A window short of its tile on the cross axis with no fullscreen button is
 // a panel: its app is learned, and its no-fullscreen-button windows float
 // and dock from then on. Returns whether any was learned.
-function learnPanels(entries, horizontal) {
+// A new panel leaves the tiling either way: docked into a zone, or — on a
+// display with no zone — back to its app's own frame (restoreFloated), which
+// only a tile pass runs.
+function panelsLearned() {
+  dockNewFloats({ retile: false });
+  state.tileReason = "panel";
+  tileWindows();
+}
+
+function learnPanels(entries) {
   let any = false;
   for (const [id, target, live] of entries) {
     const w = state.windowsById[id];
     if (!w || !target || !live || tileOpts(w).collapsible) continue;
-    if (!isPanelRefusal(w, target, live, horizontal, 20)) continue;
+    if (!isPanelRefusal(w, target, live, 20)) continue;
     evt(`PANEL ${id} (${(w.app || "?").slice(0, 18)}) target=${target.w}x${target.h} live=${live.w}x${live.h}`);
     learnPanelApp(w);
     any = true;
@@ -563,7 +571,7 @@ const ZONE_HOLD_MS = 800;
 
 function planZoneFor(d, area) {
   if (!cfg.floatZone) return null;
-  if (!(d.frame.w > d.frame.h) || d.frame.w < cfg.floatZoneMinDisplayW) return null;
+  if (!zoneCapable(d.frame, cfg.floatZoneMinDisplayW)) return null;
   const space = activeSpaceOnDisplay(d.uuid);
   const members = [];
   for (const id of state.floatZone[d.displayID] || []) {
@@ -668,17 +676,29 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
   // minimum from) them deforms every tile after the exit.
   const blocked = fsTransitionBlockFor(state.displays.find((d) => d.displayID === displayID));
   if (blocked) { evt(`ANIM-PASS2-FS-BAIL d${displayID} why=${blocked}`); return; }
-  if (learnPanels(entries.map((e) => [e.id, e.target, e.live]), horizontal)) {
-    dockNewFloats();
+  if (learnPanels(entries.map((e) => [e.id, e.target, e.live]))) {
+    panelsLearned();
     return;
   }
-  const refused = pickRefusals(entries, horizontal, REFUSAL_PX, population);
-  if (refused.length === 0) return;
+  const flagged = pickRefusals(entries, horizontal, REFUSAL_PX, population);
+  if (flagged.length === 0) return;
   const targetOf = Object.fromEntries(entries.map((e) => [e.id, e.target]));
+  // An animation can settle with its last write not yet landed; one direct
+  // write tells a window that missed its target from one that refuses it.
+  const reapplied = [];
+  for (const [id, live] of flagged) {
+    const probed = await sd.windows.setFrameProbed(id, targetOf[id]).catch(() => null);
+    reapplied.push({ id, target: targetOf[id], actual: probed?.actual || null, live });
+  }
+  if (!current() || state.dragInFlight) return;
+  const refused = confirmRefusals(reapplied, horizontal, REFUSAL_PX);
+  for (const { id } of reapplied) {
+    if (!refused.some(([rid]) => rid === id)) evt(`ANIM-REFUSAL-CLEARED id=${id} — took its target on re-apply`);
+  }
+  if (refused.length === 0) return;
   learnFixedWidths(refused.map(([id, live]) => [id, targetOf[id], live]), horizontal);
+  pinRefusals(state.pinnedSizes, state.refusalPins, refused, horizontal, PIN_MIN_PX);
   for (const [id, live] of refused) {
-    state.pinnedSizes[id] = Math.max(PIN_MIN_PX, horizontal ? live.w : live.h);
-    state.refusalPins.add(+id);
     learnAppMin(id, horizontal, horizontal ? live.w : live.h);
     // Same containment trick as PASS-2: record what the app actually
     // accepted so the resize machinery sees a settled target, not a

@@ -81,9 +81,14 @@ export function planFloatZone({ area, members, gap = 0, pad = 8, maxW }) {
 // so the tiles make room as a direct result of opening one. User-floated
 // windows (ctrl+cmd+p) and ones dragged out of the zone stay put.
 // floats: [{id, reason, onscreen, minimized}], reason from floatReason.
+// The zone only lives on landscape displays at least `minW` wide.
+export function zoneCapable(frame, minW) {
+  return !!frame && frame.w > frame.h && frame.w >= minW;
+}
+
 export function floatsToDock({ floats, docked, loose }) {
   return floats
-    .filter((f) => f.reason !== "user" && f.onscreen !== false && !f.minimized &&
+    .filter((f) => f.reason !== "user" && f.zoneCapable !== false && f.onscreen !== false && !f.minimized &&
       !docked.has(f.id) && !loose.has(f.id))
     .map((f) => f.id);
 }

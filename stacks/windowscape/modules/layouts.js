@@ -34,17 +34,23 @@ export function tileWeighted(screenFrame, nonCollapsed, collapsed, horizontal, s
     if (numCollapsed > 0) {
       // Justify collapsed widgets across the full rail width: leftmost at
       // screenFrame.x, rightmost flush against the right edge, evenly spaced.
+      // Widths are the app's own (Stickies refuses width writes), so when
+      // they add up past the rail the widgets overlap at an even step
+      // instead of running off the right edge.
       const cy = screenFrame.y + mainH;
       const sizes = collapsed.map((id) => {
         const live = sizeOf ? sizeOf(id) : null;
-        return (live && live.w > 0) ? live.w : 200;
+        return Math.min((live && live.w > 0) ? live.w : 200, screenFrame.w);
       });
       const totalContent = sizes.reduce((s, w) => s + w, 0);
       const slack = screenFrame.w - totalContent;
+      const right = screenFrame.x + screenFrame.w;
+      const overlapStep = numCollapsed > 1 ? (screenFrame.w - sizes[numCollapsed - 1]) / (numCollapsed - 1) : 0;
       const gap = numCollapsed > 1 ? Math.max(0, slack / (numCollapsed - 1)) : 0;
       let cx = screenFrame.x;
       for (let i = 0; i < numCollapsed; i++) {
-        out.push({ winId: collapsed[i], frame: { x: Math.round(cx), y: cy, w: sizes[i], h: cfg.collapsedWindowHeight } });
+        const x = slack >= 0 ? cx : Math.min(screenFrame.x + i * overlapStep, right - sizes[i]);
+        out.push({ winId: collapsed[i], frame: { x: Math.round(x), y: cy, w: sizes[i], h: cfg.collapsedWindowHeight } });
         cx += sizes[i] + gap;
       }
     }
@@ -109,9 +115,9 @@ export function innerSpanFor(screenFrame, horizontal, numNon, numCollapsed) {
 // unchanged, user pins ≥ floor), or null when the row has an unpinned flex
 // sibling (it absorbs the difference instead), has nothing scalable, or
 // already agrees with the axis.
-export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN_PX, tolerance = 4 }) {
+export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN_PX, tolerance = 4, minOf = null }) {
   if (!ids || ids.length < 2 || !(inner > 0)) return null;
-  const user = [], userPx = [];
+  let user = [], userPx = [];
   let floorSum = 0, total = 0;
   for (const id of ids) {
     const p = pins[id];
@@ -126,6 +132,17 @@ export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN
   const out = Object.create(null);
   for (const id of ids) out[id] = pins[id];
 
+  // A user pin the scale would take under its app's minimum holds at that
+  // minimum like a refusal floor; the rest rescale into what remains.
+  for (;;) {
+    const room = inner - floorSum;
+    const sum = userPx.reduce((s, v) => s + v, 0);
+    const held = user.filter((id, k) => sum > 0 && (minOf?.(id) || 0) > (userPx[k] * room) / sum);
+    if (held.length === 0 || held.length === user.length) break;
+    for (const id of held) { out[id] = minOf(id); floorSum += minOf(id); }
+    userPx = userPx.filter((_, k) => !held.includes(user[k]));
+    user = user.filter((id) => !held.includes(id));
+  }
   const budget = inner - floorSum;
   const scalableSum = userPx.reduce((s, v) => s + v, 0);
   if (budget <= floor * user.length || scalableSum <= 0) {
@@ -285,4 +302,14 @@ export function cursorFollow(mouse, oldFrame, target, live) {
   const to = target || live;
   if (!to) return null;
   return { x: to.x + (mouse.x - oldFrame.x), y: to.y + (mouse.y - oldFrame.y) };
+}
+
+// Minimums for one gesture's predictions: the app minimums, with the
+// squeezed neighbor floored at `neighborHeld` — the size it held above its
+// last target, which a previous swipe asked it to go under.
+export function gestureMinOf(appMinOf, neighborId, neighborHeld) {
+  return (id) => {
+    const base = appMinOf(id) || 0;
+    return neighborHeld != null && +id === +neighborId ? Math.max(base, neighborHeld) : base;
+  };
 }

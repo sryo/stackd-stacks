@@ -51,3 +51,30 @@ export function pickRefusals(entries, horizontal, px, population) {
   }
   return refused.length >= population ? [] : refused;
 }
+
+/// Refusals that survive a second write: [[id, size], ...]. entries:
+/// [{ id, target, actual, live? }] — `actual` is the frame read back after
+/// re-applying `target`, `live` the settle reading that flagged it, kept
+/// when the re-apply couldn't be read.
+export function confirmRefusals(entries, horizontal, px) {
+  const out = [];
+  for (const { id, target, actual, live } of entries) {
+    const seen = actual || live;
+    if (!seen) continue;
+    const d = Math.abs(horizontal ? seen.w - target.w : seen.h - target.h);
+    if (d > px) out.push([id, seen]);
+  }
+  return out;
+}
+
+/// Pin each refused window at the size its app held it to. A window the
+/// user never sized gets that size as a floor (refusalSet) and stays
+/// flexible above it; one the user sized keeps it as its own pin, since the
+/// app only clamped the size the user asked for. Mutates pins/refusalSet.
+export function pinRefusals(pins, refusalSet, refused, horizontal, floor) {
+  for (const [id, live] of refused) {
+    const userPinned = pins[id] != null && !refusalSet.has(+id);
+    pins[id] = Math.max(floor, horizontal ? live.w : live.h);
+    if (!userPinned) refusalSet.add(+id);
+  }
+}

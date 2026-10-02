@@ -4,7 +4,7 @@
 // back in the slot it left instead of at the end of the row.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nextSpaceOrder, sortBySlot } from "../modules/order.js";
+import { nextSpaceOrder, sortBySlot, staleSpacesFor } from "../modules/order.js";
 
 test("newcomers append after the existing order", () => {
   assert.deepEqual(nextSpaceOrder([1, 2], [1, 2, 3], new Set()), [1, 2, 3]);
@@ -83,4 +83,24 @@ test("sortBySlot ignores a recent order for a different set of windows", () => {
     { id: 3, frame: { x: 1400, y: 0, w: 600, h: 800 } },
   ];
   assert.deepEqual(sortBySlot(wins, true, {}, [2, 1]).map((w) => w.id), [1, 2, 3]);
+});
+
+// A window the OS (not a drag) moved to another display still carries the
+// Space list read on its old display. A window can't sit on one display while
+// living in another display's active Space, so that list is stale.
+test("spaces cached from another display's active Space are stale", () => {
+  assert.equal(staleSpacesFor([30], 10, [30]), true);
+});
+
+test("spaces that include the display's active Space are current", () => {
+  assert.equal(staleSpacesFor([10], 10, [30]), false);
+});
+
+test("an inactive Space elsewhere is a real other-Space window, not stale", () => {
+  assert.equal(staleSpacesFor([11], 10, [30]), false);
+});
+
+test("an unread or empty Space list is never stale", () => {
+  assert.equal(staleSpacesFor(undefined, 10, [30]), false);
+  assert.equal(staleSpacesFor([], 10, [30]), false);
 });

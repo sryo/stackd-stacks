@@ -8,9 +8,9 @@ import {
   state, log, evt, updateWindowOrder, isManaged, isFloating, emitInclusion, tileOpts, displayForWindow,
   migrateWindowId, activeSpaceOnDisplay, tileFrameForDisplay, fsTransitionBlockFor, appMinFor
 } from "./core.js";
-import { isTileable, floatReason } from "./tileable.js";
+import { isTileable, floatReason, collapsedChanged, isRailShuffle } from "./tileable.js";
 import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight, isDocked } from "./tiler.js";
-import { floatsToDock } from "./floatzone.js";
+import { floatsToDock, zoneCapable } from "./floatzone.js";
 import { PIN_MIN_PX, displaySetChanged, pairwisePins } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating, cancelAnimation } from "./animation.js";
@@ -27,9 +27,11 @@ export function dockNewFloats({ retile = true } = {}) {
   for (const id in state.windowsById) {
     const w = state.windowsById[id];
     if (!isFloating(w)) continue;
+    const d = displayForWindow(w);
     floats.push({
       id: +id,
       reason: floatReason(w, tileOpts(w)),
+      zoneCapable: !!d && zoneCapable(d.frame, cfg.floatZoneMinDisplayW),
       onscreen: w.onscreen,
       minimized: w.isMinimized === true || state.minimizedIds.has(+id),
     });
@@ -284,6 +286,15 @@ function armOobResizeTimer(id, entry) {
     const w = state.windowsById[id];
     const d = w && displayForWindow(w);
     if (!tgt || !d) return;
+    if (collapsedChanged(tgt, live, cfg.collapsedWindowHeight)) {
+      const collapsing = live.h <= cfg.collapsedWindowHeight;
+      evt(`${collapsing ? "COLLAPSE" : "EXPAND"} id=${id} → retile`);
+      if (zoomSuspect && +zoomSuspect.id === +id) zoomSuspect = null;
+      state.tileReason = `${collapsing ? "collapse" : "expand"}(${id})`;
+      state.snapNextTile = true;
+      await tileWindows();
+      return;
+    }
     const horizontal = d.frame.w > d.frame.h;
     const dMajor = Math.abs(horizontal ? live.w - tgt.w : live.h - tgt.h);
     if (dMajor <= 20) return; // a pass already put it back
@@ -643,11 +654,7 @@ export function start() {
     // internal x-arrangement), NOT a user drag. Short-circuit those — but
     // still hydrated above so the strip math sees current x.
     const cw = state.windowsById[+detail.id];
-    if (cw && cw.frame && cw.frame.h <= cfg.collapsedWindowHeight) {
-      const tgt = state.lastTileTarget?.[+detail.id]?.frame;
-      const yDrift = tgt ? Math.abs(cw.frame.y - tgt.y) : 0;
-      if (yDrift <= cfg.collapsedWindowHeight) return;
-    }
+    if (cw && isRailShuffle(state.lastTileTarget?.[+detail.id]?.frame, cw.frame, cfg.collapsedWindowHeight)) return;
     // Filter to windows windowscape actually tiles. The synth poll fires
     // moved/resized bangs for every CGWindowList entry — including AppKit
     // service windows like CursorUIViewService autocomplete renderers,

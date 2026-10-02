@@ -3,7 +3,7 @@
 // → tileWeighted) so the gesture preview equals the committed frame.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { predictResizeFrame, specFromState, PIN_MIN_PX } from "../modules/layouts.js";
+import { predictResizeFrame, specFromState, PIN_MIN_PX, gestureMinOf } from "../modules/layouts.js";
 import { resolveFlex } from "../modules/flex.js";
 
 const SF = { x: 0, y: 0, w: 1000, h: 900 }; // vertical stack → major axis = height
@@ -83,4 +83,26 @@ test("specFromState feeds the app-min cache as a floor (max with any per-window 
   assert.equal(specOf(2).min, 500, "app-min becomes the floor for an un-pinned window");
   assert.equal(specOf(3).min, 700, "per-window refusal (700) wins over app-min (300)");
   assert.equal(specOf(2).basis, null, "app-min never pins the window");
+});
+
+// A gesture's floor for the neighbor it squeezes: what the neighbor held at
+// above its last target (an app minimum the previous swipe went under). Only
+// the neighbor, and only for this gesture — the focused window growing past a
+// stale target is no minimum, and a misread must not outlive the gesture.
+test("gestureMinOf: the squeezed neighbor floors at the size it held", () => {
+  const minOf = gestureMinOf((id) => (id === 7 ? 100 : 0), 16786, 252);
+  assert.equal(minOf(16786), 252);
+  assert.equal(minOf(42), 0, "the focused window gets no gesture floor");
+  assert.equal(minOf(7), 100, "known app minimums pass through");
+});
+
+test("gestureMinOf: a known app minimum above the held size wins", () => {
+  assert.equal(gestureMinOf(() => 400, 5, 252)(5), 400);
+});
+
+test("gestureMinOf: no held size leaves the app minimums alone", () => {
+  const base = (id) => (id === 5 ? 300 : 0);
+  const minOf = gestureMinOf(base, 5, null);
+  assert.equal(minOf(5), 300);
+  assert.equal(minOf(6), 0);
 });

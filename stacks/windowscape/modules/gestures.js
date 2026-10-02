@@ -12,14 +12,16 @@
 
 import { sd } from "sd://runtime/api.js";
 import { state, log, displayForWindow, appMinFor } from "./core.js";
+import { heldAbove } from "./tileable.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
 import { isFullscreenActive } from "./fullscreen.js";
 import { moveWindowInOrder } from "./operations.js";
 import { startDragBracket, clearDragBracket, pinFromActualSize } from "./events.js";
-import { cancelAnimation } from "./animation.js";
-import { predictResizeFrame, previewArea, PIN_MIN_PX } from "./layouts.js";
+import { cancelAnimation, isAnimating } from "./animation.js";
+import { predictResizeFrame, previewArea, PIN_MIN_PX, gestureMinOf } from "./layouts.js";
 import { getWindowWeight, getCollapsedWindows, tileWindows } from "./tiler.js";
 import { stepFeel } from "./stepfeel.js";
+import { createPreviewKeeper } from "./previewkeeper.js";
 
 // Resize feel: vertical steps commit every 0.012 of trackpad travel (see
 // tttaps CFG.dragStepCommitThresholdV) at 12px each — ~1000px per unit of
@@ -49,7 +51,17 @@ let gestureBracket = null;
 // GLOBAL rect, so it lands on whichever display holds the focused window.
 // Styled to read as overlay-border's ring (8px blue, 16px radius); the overlay
 // panel IS the rect, so .ring fills it (inset:0).
-let previewHandle = null;
+const SHOW_RING = `document.querySelector(".ring").style.display = ""`;
+const HIDE_RING = `document.querySelector(".ring").style.display = "none"`;
+const preview = createPreviewKeeper({
+  create: (rect) => sd.overlay.region({ rect, html: PREVIEW_HTML, css: PREVIEW_CSS }),
+  show: (h, rect) => { h.setFrame(rect).catch(() => {}); h.eval(SHOW_RING).catch(() => {}); },
+  hide: (h) => { h.eval(HIDE_RING).catch(() => {}); },
+  remove: (h) => { h.remove().catch(() => {}); },
+  setFrame: (h, rect) => { h.setFrame(rect).catch(() => {}); },
+  schedule: (fn, ms) => setTimeout(fn, ms),
+  cancel: (t) => clearTimeout(t),
+});
 const PREVIEW_HTML = `<div class="ring"></div>`;
 const PREVIEW_CSS = [
   ".ring {",
@@ -104,6 +116,13 @@ function openGestureBracket() {
       ?? (bLive ? major(bLive) : null);
   }
 
+  // A gesture's swipes commit faster than the refusal sweep runs, so a
+  // neighbor the last swipe took under its minimum is still holding larger
+  // now: floor it there for this gesture, or the next swipe goes further.
+  // Read live — the cached frame misses an animation's landing, and a stale
+  // pre-animation size reads as a minimum that shoves the window back.
+  const neighborTarget = neighborId == null ? null : state.lastTileTarget?.[+neighborId]?.frame;
+
   startDragBracket();
   gestureBracket = {
     winId: w.id,
@@ -115,19 +134,17 @@ function openGestureBracket() {
     reqMajor: aBase,
     edge,
     neighborId,
+    neighborHeld: null,
     bBase,
     predicted: { ...w.frame }
   };
-  // Create the preview overlay at the frozen frame (GLOBAL coords). Async: the
-  // first few steps may land before it resolves — the handle guard below and
-  // the next step's setFrame cover the gap. If the bracket already closed by
-  // the time create resolves, drop the orphan.
-  sd.overlay.region({ rect: { ...w.frame }, html: PREVIEW_HTML, css: PREVIEW_CSS })
-    .then((h) => {
-      if (gestureBracket && h) { previewHandle = h; h.setFrame(gestureBracket.predicted).catch(() => {}); }
-      else if (h) h.remove().catch(() => {});
-    })
-    .catch(() => {});
+  preview.begin({ ...w.frame });
+  if (neighborTarget) {
+    const g = gestureBracket;
+    sd.windows.frame(neighborId).then((live) => {
+      if (gestureBracket === g) g.neighborHeld = heldAbove(neighborTarget, live, horizontal, 5, isAnimating(neighborId));
+    }).catch(() => {});
+  }
   log(`GESTURE bracket-open id=${w.id}`);
   return gestureBracket;
 }
@@ -167,14 +184,14 @@ function stepPreview(deltaPx) {
     nonCollapsed: g.nonCollapsed, collapsed: g.collapsed,
     weightOf: getWindowWeight, sizeOf,
     pins: state.pinnedSizes, refusalSet: state.refusalPins,
-    appMinOf: (id) => appMinFor(id, g.horizontal),
+    appMinOf: gestureMinOf((id) => appMinFor(id, g.horizontal), g.neighborId, g.neighborHeld),
     activeId: g.winId, requestedSize: g.reqMajor, aBase: g.aBase,
     neighborId: g.neighborId, bBase: g.bBase,
     floor: PIN_MIN_PX
   });
   if (r.frame) {
     g.predicted = r.frame;
-    if (previewHandle) previewHandle.setFrame(g.predicted).catch(() => {});
+    preview.move(g.predicted);
   }
   return major(g.predicted) - shownBefore;
 }
@@ -215,7 +232,7 @@ export function bind() {
     if (!gestureBracket) return;
     const g = gestureBracket;
     gestureBracket = null;
-    if (previewHandle) { previewHandle.remove().catch(() => {}); previewHandle = null; }
+    preview.end();
     const major = (fr) => (g.horizontal ? fr.w : fr.h);
     const dMajor = g.predicted ? Math.abs(major(g.predicted) - g.aBase) : 0;
     // Self-contained commit: tear the bracket down (dropping any stray candidate

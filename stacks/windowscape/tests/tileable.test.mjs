@@ -6,7 +6,7 @@
 // button but tiles fine above its minimum width.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { floatReason, isTileable, nextOverride, refusedGrowth, fixedWidthPin, isPanelRefusal } from "../modules/tileable.js";
+import { floatReason, isTileable, nextOverride, refusedGrowth, fixedWidthPin, isPanelRefusal, collapsedChanged, isRailShuffle, heldAbove } from "../modules/tileable.js";
 
 const doc        = { id: 1, isStandard: true, isResizable: true,  canFullscreen: true };
 const calculator = { id: 2, isStandard: true, isResizable: false, canFullscreen: false };
@@ -82,14 +82,80 @@ const getInfo = { id: 7, isStandard: true, isResizable: true, canFullscreen: fal
 
 test("isPanelRefusal: no fullscreen button and short of the tile's cross axis", () => {
   const tile = { w: 400, h: 1607 };
-  assert.equal(isPanelRefusal(getInfo, tile, { w: 400, h: 829 }, true, 20), true);
-  assert.equal(isPanelRefusal(settings, tile, { w: 400, h: 1607 }, true, 20), false, "grows to full height");
-  assert.equal(isPanelRefusal(doc, tile, { w: 400, h: 829 }, true, 20), false, "fullscreen-capable");
-  assert.equal(isPanelRefusal(getInfo, tile, { w: 400, h: 1600 }, true, 20), false, "within rounding");
+  assert.equal(isPanelRefusal(getInfo, tile, { w: 400, h: 829 }, 20), true);
+  assert.equal(isPanelRefusal(settings, tile, { w: 400, h: 1607 }, 20), false, "grows to full height");
+  assert.equal(isPanelRefusal(doc, tile, { w: 400, h: 829 }, 20), false, "fullscreen-capable");
+  assert.equal(isPanelRefusal(getInfo, tile, { w: 400, h: 1600 }, 20), false, "within rounding");
 });
 
 test("an app learned as a panel app floats its windows without a fullscreen button", () => {
   assert.equal(floatReason(getInfo, { panelApp: true }), "panel");
   assert.equal(floatReason(doc, { panelApp: true }), null, "the app's document windows still tile");
   assert.equal(floatReason({ ...getInfo, isResizable: false }, { panelApp: true, collapsible: true }), null);
+});
+
+
+test("collapsedChanged: expand and collapse both count, plain resizes don't", () => {
+  const rail = { x: 0, y: 1100, w: 512, h: 12 };
+  const tile = { x: 0, y: 38, w: 512, h: 1074 };
+  assert.equal(collapsedChanged(rail, tile, 12), true);
+  assert.equal(collapsedChanged(tile, rail, 12), true);
+  assert.equal(collapsedChanged(tile, { ...tile, h: 900 }, 12), false);
+  assert.equal(collapsedChanged(rail, rail, 12), false);
+});
+
+test("isRailShuffle: a collapsed note moving along the rail is the app's own shuffle", () => {
+  const rail = { x: 0, y: 1100, w: 512, h: 12 };
+  assert.equal(isRailShuffle(rail, { ...rail, x: 600 }, 12), true);
+  assert.equal(isRailShuffle(null, rail, 12), true);
+});
+
+test("isRailShuffle: a tile that just collapsed in place is not a shuffle", () => {
+  const tile = { x: 1140, y: 38, w: 570, h: 1062 };
+  assert.equal(isRailShuffle(tile, { x: 1140, y: 38, w: 570, h: 12 }, 12), false);
+});
+
+test("isRailShuffle: a collapsed note dragged off the rail, or an expanded one, is not", () => {
+  const rail = { x: 0, y: 1100, w: 512, h: 12 };
+  assert.equal(isRailShuffle(rail, { ...rail, y: 500 }, 12), false);
+  assert.equal(isRailShuffle(rail, { ...rail, h: 900 }, 12), false);
+});
+
+// A gesture step's target can land under a window's minimum while the
+// gesture is still running (no refusal sweep between steps); the window
+// holding larger than its last target is that minimum.
+test("heldAbove: a window held larger than its target reports the size it held", () => {
+  const target = { x: 77, y: -240, w: 1080, h: 240 };
+  assert.equal(heldAbove(target, { x: 77, y: -240, w: 1080, h: 252 }, false, 5), 252);
+});
+
+test("heldAbove: a window at or under its target, or unread, reports nothing", () => {
+  const target = { x: 0, y: 38, w: 855, h: 1074 };
+  assert.equal(heldAbove(target, { ...target }, true, 5), null);
+  assert.equal(heldAbove(target, { ...target, w: 700 }, true, 5), null);
+  assert.equal(heldAbove(null, target, true, 5), null);
+  assert.equal(heldAbove(target, null, true, 5), null);
+});
+
+test("heldAbove: a window still animating toward its target reports nothing", () => {
+  // Finder mid-animation from 773 toward 497 reads its pre-animation frame
+  // (the daemon swallows reports while it animates) — not a minimum.
+  const target = { x: 77, y: -497, w: 1080, h: 497 };
+  assert.equal(heldAbove(target, { x: 77, y: -773, w: 1080, h: 773 }, false, 5, true), null);
+  assert.equal(heldAbove(target, { x: 77, y: -773, w: 1080, h: 773 }, false, 5, false), 773);
+});
+
+// On a portrait display the column's cross axis is width. System Settings
+// has a fixed width but grows to any height — it tiles in a column like it
+// does in a row. What marks a panel (Get Info) is refusing full height.
+test("isPanelRefusal: a fixed-width window in a portrait column is not a panel", () => {
+  const w = { canFullscreen: false };
+  const target = { x: 77, y: -844, w: 1080, h: 844 };
+  assert.equal(isPanelRefusal(w, target, { x: 77, y: -866, w: 865, h: 866 }, 20), false);
+});
+
+test("isPanelRefusal: a window short of full height is a panel in a column too", () => {
+  const w = { canFullscreen: false };
+  const target = { x: 77, y: -844, w: 1080, h: 844 };
+  assert.equal(isPanelRefusal(w, target, { x: 77, y: -844, w: 1080, h: 400 }, 20), true);
 });

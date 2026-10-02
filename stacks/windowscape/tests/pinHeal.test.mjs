@@ -134,3 +134,23 @@ test("regression: healed pins render at face value — fill scale returns to 1",
   });
   assert.equal(r.frame.h, healed[1] + 160, "gesture steps land exactly where requested");
 });
+
+test("a user pin never rescales below its app's minimum", () => {
+  // Finder sized by the user, clamped by Finder at 252: the heal takes the
+  // overshoot from Claude instead of squeezing Finder back under 252.
+  const out = renormalizedPins({
+    ids: [16786, 42], pins: { 16786: 252, 42: 2307 }, refusalSet: new Set(),
+    inner: 2530, minOf: (id) => (id === 16786 ? 252 : 0),
+  });
+  assert.equal(out[16786], 252);
+  assert.equal(out[42], 2278);
+});
+
+test("app minimums hold when the user pins all scale up", () => {
+  const out = renormalizedPins({
+    ids: [1, 2], pins: { 1: 400, 2: 1000 }, refusalSet: new Set(),
+    inner: 2530, minOf: (id) => (id === 1 ? 400 : 0),
+  });
+  assert.equal(out[1] + out[2], 2530);
+  assert.ok(out[1] >= 400);
+});

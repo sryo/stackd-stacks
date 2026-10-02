@@ -48,11 +48,13 @@ export function refusedGrowth(target, live, horizontal, px) {
   return d > px;
 }
 
-// A window that resizes but stays short of its tile on the cross axis, and
-// has no fullscreen button, is a panel (Finder's Get Info): System Settings
-// and Activity Monitor, also without the button, grow to full height.
-export function isPanelRefusal(w, target, live, horizontal, px) {
-  return w.canFullscreen === false && refusedGrowth(target, live, !horizontal, px);
+// A window that resizes but can't grow to its tile's full height, and has
+// no fullscreen button, is a panel (Finder's Get Info): System Settings and
+// Activity Monitor, also without the button, grow to full height. Height on
+// either orientation — in a portrait column the cross axis is width, where
+// System Settings' fixed width would otherwise read as a panel.
+export function isPanelRefusal(w, target, live, px) {
+  return w.canFullscreen === false && refusedGrowth(target, live, false, px);
 }
 
 // The pinned width for a window whose app was learned fixed-width
@@ -61,4 +63,31 @@ export function isPanelRefusal(w, target, live, horizontal, px) {
 export function fixedWidthPin(w, learnedPx) {
   if (w.canFullscreen !== false || !(learnedPx > 0)) return null;
   return learnedPx;
+}
+
+// A window whose app collapsed or expanded it (a Stickies note going to or
+// from the rail) since its last tile. Only the height changes, so a
+// major-axis drift check on a landscape display never sees it.
+export function collapsedChanged(target, live, collapsedH) {
+  return !!target && !!live && (target.h <= collapsedH) !== (live.h <= collapsedH);
+}
+
+// A moved/resized report for a collapsed widget that is the app arranging
+// its own rail (Stickies re-spaces collapsed notes) rather than a change the
+// tiler must answer: it was already collapsed at its target and stayed on
+// the rail's row.
+export function isRailShuffle(target, live, collapsedH) {
+  if (!live || live.h > collapsedH) return false;
+  if (!target) return true;
+  return target.h <= collapsedH && Math.abs(live.y - target.y) <= collapsedH;
+}
+
+// The size a window held above its target on the tiling axis, when it held
+// more than `px` above it (an app minimum the target went under); else null.
+// Never while it is still animating: its frame then is the one from before
+// the animation, not a size it held.
+export function heldAbove(target, live, horizontal, px, animating = false) {
+  if (animating || !target || !live) return null;
+  const held = horizontal ? live.w : live.h;
+  return held - (horizontal ? target.w : target.h) > px ? held : null;
 }

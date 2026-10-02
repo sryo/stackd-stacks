@@ -4,7 +4,7 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import { displayForFrame } from "./layouts.js";
-import { nextSpaceOrder } from "./order.js";
+import { nextSpaceOrder, staleSpacesFor } from "./order.js";
 import { fsTransitionBlock } from "./oobguard.js";
 import { floatReason } from "./tileable.js";
 
@@ -417,6 +417,10 @@ export function updateWindowOrder() {
     const space = activeSpaceOnDisplay(d.uuid);
     if (space == null) continue;
 
+    const otherActive = state.displays
+      .filter((o) => o.displayID !== d.displayID)
+      .map((o) => activeSpaceOnDisplay(o.uuid))
+      .filter((s) => s != null);
     const eligible = [];
     const isRecovery = state.tileReason === "stray-overlap-recovery";
     for (const id in state.windowsById) {
@@ -434,7 +438,12 @@ export function updateWindowOrder() {
       //                       include optimistically." Only EXCLUDE when
       //                       we have a definite non-empty list that lacks
       //                       this space.
-      const wspaces = state.windowSpacesCache[w.id];
+      let wspaces = state.windowSpacesCache[w.id];
+      if (staleSpacesFor(wspaces, space, otherActive)) {
+        evt(`SPACES-STALE id=${id} (${w.app}) spaces=${JSON.stringify(wspaces)} now on d${d.displayID}`);
+        delete state.windowSpacesCache[w.id];
+        wspaces = undefined;
+      }
       if (wspaces && wspaces.length > 0 && !wspaces.includes(space)) {
         if (isRecovery) evt(`UWO-DROP id=${id} (${w.app}) reason=other-space spaces=${JSON.stringify(wspaces)} active=${space}`);
         continue;

@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  motionOptions, framesNearlyIdentical, createInFlight, pickRefusals,
+  motionOptions, framesNearlyIdentical, createInFlight, pickRefusals, confirmRefusals, pinRefusals,
 } from "../modules/motion.js";
 
 test("animations off → no motion options (instant setFrame)", () => {
@@ -109,4 +109,58 @@ test("pickRefusals: every window 'refusing' is not a refusal — nothing pinned"
     { id: 2, target: tgt(400), live: tgt(600) },
   ];
   assert.deepEqual(pickRefusals(entries, true, 20, 2), []);
+});
+
+// A refusal read off an animation's settle is re-applied once before it is
+// believed: a window that takes its target on the second write never
+// refused it, and must not leave a minimum behind.
+test("confirmRefusals: a window that takes its target on re-apply is dropped", () => {
+  const target = { x: 77, y: -941, w: 1080, h: 941 };
+  const out = confirmRefusals(
+    [{ id: 7, target, actual: { ...target } }],
+    false, 20);
+  assert.deepEqual(out, []);
+});
+
+test("confirmRefusals: a window still off its target keeps the re-read size", () => {
+  const target = { x: 0, y: 38, w: 400, h: 1074 };
+  const actual = { x: 0, y: 38, w: 845, h: 1074 };
+  assert.deepEqual(confirmRefusals([{ id: 3, target, actual }], true, 20), [[3, actual]]);
+});
+
+test("confirmRefusals: an unreadable re-apply keeps the original reading", () => {
+  const target = { x: 0, y: 38, w: 400, h: 1074 };
+  const live = { x: 0, y: 38, w: 845, h: 1074 };
+  assert.deepEqual(confirmRefusals([{ id: 3, target, actual: null, live }], true, 20), [[3, live]]);
+});
+
+// A refusal turns a window's pin into a floor only when the user never sized
+// it. A window the user sized that its app then clamped keeps the clamped size
+// as the user's pin: as a flexible floor it reads as a cramped newcomer and
+// the next pass splits the row evenly.
+test("pinRefusals: an unpinned window's refusal becomes a floor", () => {
+  const pins = {}, refusals = new Set();
+  pinRefusals(pins, refusals, [[5, { w: 845, h: 1074 }]], true, 50);
+  assert.equal(pins[5], 845);
+  assert.ok(refusals.has(5));
+});
+
+test("pinRefusals: a user-sized window keeps the clamped size as its own pin", () => {
+  const pins = { 9: 216, 42: 2314 }, refusals = new Set();
+  pinRefusals(pins, refusals, [[9, { w: 1080, h: 252 }]], false, 50);
+  assert.equal(pins[9], 252);
+  assert.ok(!refusals.has(9));
+});
+
+test("pinRefusals: a window already on a floor stays on it", () => {
+  const pins = { 5: 845 }, refusals = new Set([5]);
+  pinRefusals(pins, refusals, [[5, { w: 900, h: 1074 }]], true, 50);
+  assert.equal(pins[5], 900);
+  assert.ok(refusals.has(5));
+});
+
+test("pinRefusals: the pin never drops below the floor", () => {
+  const pins = {}, refusals = new Set();
+  pinRefusals(pins, refusals, [[5, { w: 10, h: 1074 }]], true, 50);
+  assert.equal(pins[5], 50);
 });

@@ -11,7 +11,7 @@ import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal }
 import { dockNewFloats } from "./events.js";
 import { planFloatZone, zoneCapable } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { tileWeighted, specFromState, renormalizedPins, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, refusalFits, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals, confirmRefusals, pinRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -28,6 +28,15 @@ import { coalescingRunner } from "./sequencing.js";
 // above grid-snap noise (Terminal rounds width to character cells, ≤ ~7px)
 // and PASS-1's 5px skip tolerance.
 const REFUSAL_PX = 20;
+
+// A read-back size only counts as an app minimum when the row can still hold
+// its siblings at theirs; otherwise it is a transient oversized frame.
+function fitsRow(id, px, rowIds, inner, horizontal) {
+  return refusalFits({
+    actualPx: px, inner,
+    otherMins: rowIds.filter((o) => +o !== +id).map((o) => appMinFor(o, horizontal)),
+  });
+}
 
 export function getWindowWeight(winId) {
   if (state.windowWeights[winId] != null) return state.windowWeights[winId];
@@ -439,6 +448,7 @@ async function tileWindowsInternal(snap, reason) {
     // will respect it; flex siblings absorb the freed space naturally
     // via resolveFlex.
     const axis = horizontal ? "w" : "h";
+    const rowInner = innerSpanFor(screenFrame, horizontal, nonCollapsed.length, collapsed.length);
     const refused = nonCollapsed.filter((id) => {
       // Pinned windows can refuse their pin too (pairwise transfer can ask
       // for less than the app's minimum — TextEdit won't go below ~115px).
@@ -449,7 +459,8 @@ async function tileWindowsInternal(snap, reason) {
       const a = actuals[+id], t = targets.find(t => t.winId === id);
       if (!a || !t) return false;
       const dW = Math.abs(a.w - t.frame.w), dH = Math.abs(a.h - t.frame.h);
-      return horizontal ? dW > REFUSAL_PX : dH > REFUSAL_PX;
+      if (!(horizontal ? dW > REFUSAL_PX : dH > REFUSAL_PX)) return false;
+      return fitsRow(id, horizontal ? a.w : a.h, nonCollapsed, rowInner, horizontal);
     });
     if (learnPanels(nonCollapsed.map((id) => [id, targets.find((t) => t.winId === id)?.frame, actuals[+id]]))) {
       setTimeout(panelsLearned, 0);
@@ -509,7 +520,7 @@ async function tileWindowsInternal(snap, reason) {
       const a = probed && probed.actual;
       if (!a) continue;
       const dMajor2 = Math.abs(horizontal ? a.w - t.frame.w : a.h - t.frame.h);
-      if (dMajor2 > REFUSAL_PX) {
+      if (dMajor2 > REFUSAL_PX && fitsRow(t.winId, a[axis], nonCollapsed, rowInner, horizontal)) {
         learnFixedWidths([[t.winId, t.frame, a]], horizontal);
         pinRefusals(state.pinnedSizes, state.refusalPins, [[+t.winId, a]], horizontal, PIN_MIN_PX);
         learnAppMin(t.winId, horizontal, a[axis]);
@@ -691,7 +702,10 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
     reapplied.push({ id, target: targetOf[id], actual: probed?.actual || null, live });
   }
   if (!current() || state.dragInFlight) return;
-  const refused = confirmRefusals(reapplied, horizontal, REFUSAL_PX);
+  const dsp = state.displays.find((x) => x.displayID === displayID);
+  const rowInner = dsp ? (horizontal ? dsp.visibleFrame.w : dsp.visibleFrame.h) : Infinity;
+  const refused = confirmRefusals(reapplied, horizontal, REFUSAL_PX)
+    .filter(([id, live]) => fitsRow(id, horizontal ? live.w : live.h, ids, rowInner, horizontal));
   for (const { id } of reapplied) {
     if (!refused.some(([rid]) => rid === id)) evt(`ANIM-REFUSAL-CLEARED id=${id} — took its target on re-apply`);
   }

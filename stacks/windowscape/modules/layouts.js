@@ -166,6 +166,13 @@ export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN
   return out;
 }
 
+// Whether a refused window's actual major size can be a real app minimum: the
+// row must still hold every sibling at its own minimum (or the pin floor).
+export function refusalFits({ actualPx, inner, otherMins, floor = PIN_MIN_PX }) {
+  const others = otherMins.reduce((s, m) => s + Math.max(floor, m || 0), 0);
+  return actualPx <= inner - others;
+}
+
 // A pin is a size on one display's major axis; its home names that display
 // and axis. A pin whose window is now tiled under a different home (moved
 // display, or the display flipped orientation) no longer applies there.

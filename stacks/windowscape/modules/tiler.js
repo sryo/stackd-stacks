@@ -11,7 +11,7 @@ import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal }
 import { dockNewFloats } from "./events.js";
 import { planFloatZone, zoneCapable } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { tileWeighted, specFromState, renormalizedPins, refusalFits, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, refusalFits, heldAboveTarget, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals, confirmRefusals, pinRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -471,7 +471,8 @@ async function tileWindowsInternal(snap, reason) {
 
     pinRefusals(state.pinnedSizes, state.refusalPins, refused.map((id) => [id, actuals[+id]]), horizontal, PIN_MIN_PX);
     for (const id of refused) {
-      learnAppMin(id, horizontal, actuals[+id][axis]);
+      const tPx = targets.find((t) => t.winId === id).frame[axis];
+      if (heldAboveTarget({ actualPx: actuals[+id][axis], targetPx: tPx })) learnAppMin(id, horizontal, actuals[+id][axis]);
       // Update the recorded target to what the app actually accepted.
       // Leaving the PASS-1 target in place makes the out-of-bracket resize
       // path compare the live frame against a target the app already
@@ -523,7 +524,7 @@ async function tileWindowsInternal(snap, reason) {
       if (dMajor2 > REFUSAL_PX && fitsRow(t.winId, a[axis], nonCollapsed, rowInner, horizontal)) {
         learnFixedWidths([[t.winId, t.frame, a]], horizontal);
         pinRefusals(state.pinnedSizes, state.refusalPins, [[+t.winId, a]], horizontal, PIN_MIN_PX);
-        learnAppMin(t.winId, horizontal, a[axis]);
+        if (heldAboveTarget({ actualPx: a[axis], targetPx: t.frame[axis] })) learnAppMin(t.winId, horizontal, a[axis]);
         state.lastTileTarget[+t.winId] = { frame: { ...a } };
         log(`PASS2-FLEX-REFUSED id=${t.winId} pinned=${state.pinnedSizes[+t.winId]}px`);
       }
@@ -713,7 +714,9 @@ async function sweepRefusalsAfterSettle(displayID, gen, ids, population, horizon
   learnFixedWidths(refused.map(([id, live]) => [id, targetOf[id], live]), horizontal);
   pinRefusals(state.pinnedSizes, state.refusalPins, refused, horizontal, PIN_MIN_PX);
   for (const [id, live] of refused) {
-    learnAppMin(id, horizontal, horizontal ? live.w : live.h);
+    const livePx = horizontal ? live.w : live.h;
+    const targetPx = horizontal ? targetOf[id].w : targetOf[id].h;
+    if (heldAboveTarget({ actualPx: livePx, targetPx })) learnAppMin(id, horizontal, livePx);
     // Same containment trick as PASS-2: record what the app actually
     // accepted so the resize machinery sees a settled target, not a
     // permanently-refused one.

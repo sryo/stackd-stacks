@@ -35,3 +35,21 @@ test("field case: bogus 2529px min on Claude no longer forces Finder under 252",
   assert.equal(good[1], 252);
   assert.equal(good[2], 2278);
 });
+
+// An app minimum is a size the window was HELD ABOVE its target at. A window
+// sitting below its target (Stow at its natural 520px when asked for 853) has
+// a maximum or a not-yet-ready frame; learning that size as a floor overrides
+// every narrower user pin from then on.
+import { heldAboveTarget } from "../modules/layouts.js";
+
+test("held above the target is a floor candidate", () => {
+  assert.equal(heldAboveTarget({ actualPx: 845, targetPx: 400 }), true);
+});
+
+test("held below the target is not a floor (Stow 520 vs 853)", () => {
+  assert.equal(heldAboveTarget({ actualPx: 520, targetPx: 853 }), false);
+});
+
+test("within rounding of the target is not a floor", () => {
+  assert.equal(heldAboveTarget({ actualPx: 401, targetPx: 400 }), false);
+});

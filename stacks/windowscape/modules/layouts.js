@@ -166,6 +166,12 @@ export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN
   return out;
 }
 
+// A refusal teaches an app MINIMUM only when the window was held above its
+// target; held below it, the size is a maximum (or a window not ready yet).
+export function heldAboveTarget({ actualPx, targetPx, tolerance = 2 }) {
+  return actualPx > targetPx + tolerance;
+}
+
 // Whether a refused window's actual major size can be a real app minimum: the
 // row must still hold every sibling at its own minimum (or the pin floor).
 export function refusalFits({ actualPx, inner, otherMins, floor = PIN_MIN_PX }) {

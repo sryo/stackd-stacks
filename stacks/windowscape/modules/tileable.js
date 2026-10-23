@@ -59,9 +59,12 @@ export function isPanelRefusal(w, target, live, px) {
 
 // The pinned width for a window whose app was learned fixed-width
 // (learnedPx), or null. Only windows without a fullscreen button: the same
-// app's fullscreen-capable windows resize freely.
-export function fixedWidthPin(w, learnedPx) {
-  if (w.canFullscreen !== false || !(learnedPx > 0)) return null;
+// app's fullscreen-capable windows resize freely. The learned width seeds a
+// window that has no pin; once a window carries a pin the user set, it
+// stays: an app learned at its maximum width (not a fixed one) resizes, and
+// re-seeding every tile pass would undo each drag.
+export function fixedWidthPin(w, learnedPx, { userPinned = false } = {}) {
+  if (w.canFullscreen !== false || !(learnedPx > 0) || userPinned) return null;
   return learnedPx;
 }
 

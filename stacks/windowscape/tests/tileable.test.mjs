@@ -40,6 +40,14 @@ test("fixed-width windows tile, pinned at the width their app refused to grow pa
   assert.equal(fixedWidthPin(doc, 865), null, "a fullscreen-capable window of the same app is not fixed");
 });
 
+test("a user's own pin on a window outranks its app's learned fixed width", () => {
+  // Stow was learned at 1400 only because that is its maximum: it resizes
+  // freely, and re-seeding 1400 every tile pass undid each drag.
+  assert.equal(fixedWidthPin(settings, 1400, { userPinned: true }), null);
+  assert.equal(fixedWidthPin(settings, 1400, { userPinned: false }), 1400, "unpinned: seeded at the learned width");
+  assert.equal(fixedWidthPin(settings, 1400), 1400, "no pin info: seeded as before");
+});
+
 test("traits not read yet → not tiled yet", () => {
   assert.equal(isTileable(pending), false);
 });

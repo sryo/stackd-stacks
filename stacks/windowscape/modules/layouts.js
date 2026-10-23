@@ -166,6 +166,17 @@ export function renormalizedPins({ ids, pins, refusalSet, inner, floor = PIN_MIN
   return out;
 }
 
+// A pin is the size a window is asked for; the row may have healed or
+// clamped its tile below that. What a resize measures from is what the tile
+// actually got, so a pin counts only up to its tile's size. A pin below its
+// tile is the window's size (it was held above its pin by an app minimum).
+// Null when neither is known.
+export function realizedSize(pin, target) {
+  if (pin == null) return target ?? null;
+  if (target == null) return pin;
+  return Math.min(pin, target);
+}
+
 // A refusal teaches an app MINIMUM only when the window was held above its
 // target; held below it, the size is a maximum (or a window not ready yet).
 export function heldAboveTarget({ actualPx, targetPx, tolerance = 2 }) {

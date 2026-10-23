@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites,
 } from "../modules/liveresize.js";
-import { pairwisePins, tileWeighted, specFromState, PIN_MIN_PX } from "../modules/layouts.js";
+import { pairwisePins, tileWeighted, specFromState, realizedSize, PIN_MIN_PX } from "../modules/layouts.js";
 import { cfg } from "../modules/config.js";
 
 const SF = { x: 0, y: 0, w: 1000, h: 800 }; // horizontal row → major axis = width
@@ -201,6 +201,34 @@ test("dragBaselines priority: pin, then tile target, then mouse-down snapshot, t
     horizontal: true, activeId: 4, startFrame: { w: 440, h: 1 },
   });
   assert.deepEqual(b, { 1: 410, 2: 420, 3: 430, 4: 440 });
+});
+
+test("dragBaselines: a pin the row never realized is not the baseline (pinned 1400 in a 640 tile)", () => {
+  // Stow pinned wider than its tile: the row healed it down, so 640 is what
+  // the drag starts from. Measuring from the pin read a 264px drag as 1024px.
+  const b = dragBaselines({
+    ids: [1, 2], pins: { 1: 1400 }, targets: { 1: { w: 640, h: 1 }, 2: { w: 640, h: 1 } },
+    snapshot: {}, horizontal: true, activeId: 1, startFrame: { w: 640, h: 1 },
+  });
+  assert.deepEqual(b, { 1: 640, 2: 640 });
+});
+
+test("dragging a window pinned wider than its tile hands the neighbor only the real delta", () => {
+  const baselines = dragBaselines({
+    ids: [1, 2], pins: { 1: 1400 }, targets: { 1: { w: 500, h: 800 }, 2: { w: 500, h: 800 } },
+    snapshot: {}, horizontal: true, activeId: 1, startFrame: { w: 500, h: 800 },
+  });
+  const r = row({ activeId: 1, edge: "trailing", neighborId: 2, baselines, frame: { x: 0, y: 0, w: 300, h: 800 } });
+  assert.deepEqual(byId(r.frames)[2], { x: 300, y: 0, w: 700, h: 800 }, "B gains the 200px A gave up, no more");
+  assert.equal(r.aSize, 300);
+});
+
+test("realizedSize: a pin counts only up to the size its tile actually got", () => {
+  assert.equal(realizedSize(1400, 640), 640);
+  assert.equal(realizedSize(410, 999), 410, "a pin below its tile is its size");
+  assert.equal(realizedSize(null, 640), 640);
+  assert.equal(realizedSize(500, null), 500);
+  assert.equal(realizedSize(null, null), null);
 });
 
 test("changedWrites skips frames already written (or already in place)", () => {

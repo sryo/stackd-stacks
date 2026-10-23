@@ -11,7 +11,7 @@ import {
 import { isTileable, floatReason, collapsedChanged, isRailShuffle } from "./tileable.js";
 import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight, isDocked } from "./tiler.js";
 import { floatsToDock, zoneCapable } from "./floatzone.js";
-import { PIN_MIN_PX, displaySetChanged, pairwisePins } from "./layouts.js";
+import { PIN_MIN_PX, displaySetChanged, pairwisePins, realizedSize } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating, cancelAnimation } from "./animation.js";
 import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "./liveresize.js";
@@ -1210,9 +1210,9 @@ export function pinFromActualSize(movedId, opts) {
   const tgt = state.lastTileTarget?.[+movedId]?.frame;
   if (!tgt) return;
   const actualSize = opts?.actualSize ?? (horizontal ? w.frame.w : w.frame.h);
-  // A's baseline: its pin when already pinned (the pin IS its target),
-  // else its last tile target.
-  const aBase = opts?.aBase ?? state.pinnedSizes[+movedId] ?? (horizontal ? tgt.w : tgt.h);
+  // A's baseline: its pin when already pinned (the pin IS its target) up to
+  // the size its tile actually got, else its last tile target.
+  const aBase = opts?.aBase ?? realizedSize(state.pinnedSizes[+movedId], horizontal ? tgt.w : tgt.h);
   const delta = actualSize - aBase;
   if (Math.abs(delta) < (opts?.minDelta ?? 20)) return;
 
@@ -1242,8 +1242,7 @@ export function pinFromActualSize(movedId, opts) {
   const bTgt = state.lastTileTarget?.[+bId]?.frame;
   const bLive = state.windowsById[bId]?.frame;
   const bBase = opts?.bBase
-    ?? state.pinnedSizes[+bId]
-    ?? (bTgt ? (horizontal ? bTgt.w : bTgt.h) : null)
+    ?? realizedSize(state.pinnedSizes[+bId], bTgt ? (horizontal ? bTgt.w : bTgt.h) : null)
     ?? (bLive ? (horizontal ? bLive.w : bLive.h) : null);
   if (bBase == null) {
     log(`PIN-PAIR id=${movedId} neighbor ${bId} has no target/frame — pinned A only`);

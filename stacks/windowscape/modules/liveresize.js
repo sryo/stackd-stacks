@@ -6,7 +6,7 @@
 // No sd import, so node can test it.
 
 import { cfg } from "./config.js";
-import { predictResizeFrame, PIN_MIN_PX } from "./layouts.js";
+import { predictResizeFrame, realizedSize, PIN_MIN_PX } from "./layouts.js";
 
 // The moved edge on the tiling axis: "leading" (left on a row, top on a
 // stack), "trailing" (right / bottom), or null when the drag is cross-axis
@@ -31,9 +31,10 @@ export function neighborFor(nonCollapsed, activeId, edge) {
   return j >= 0 && j < nonCollapsed.length ? +nonCollapsed[j] : null;
 }
 
-// Each tile's major-axis size at drag start: its pin (the pin IS its size),
-// else its last tile target, else its frame at mouse-down, else — for the
-// dragged window only — the daemon's startFrame. The daemon's begin is
+// Each tile's major-axis size at drag start: its pin (the pin IS its size)
+// up to its last tile target (a pin the row couldn't give is not its size),
+// else its frame at mouse-down, else — for the dragged window only — the
+// daemon's startFrame. The daemon's begin is
 // echo-filtered, so it can arrive a few steps into the drag with a startFrame
 // that has already moved; that is the last resort, never the baseline when
 // the tiler knows better. Returns { id: px } for the ids it could size.
@@ -42,8 +43,7 @@ export function dragBaselines({ ids, pins, targets, snapshot, horizontal, active
   const out = Object.create(null);
   for (const raw of ids) {
     const id = +raw;
-    const v = pins?.[id]
-      ?? major(targets?.[id])
+    const v = realizedSize(pins?.[id], major(targets?.[id]))
       ?? major(snapshot?.[id])
       ?? (id === +activeId ? major(startFrame) : null);
     if (v != null) out[id] = v;

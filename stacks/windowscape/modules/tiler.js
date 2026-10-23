@@ -292,7 +292,8 @@ async function tileWindowsInternal(snap, reason) {
     if (horizontal) {
       for (const id of nonCollapsed) {
         const w = state.windowsById[id];
-        const px = w && fixedWidthPin(w, fixedWidthPxOf(w));
+        const userPinned = state.pinnedSizes[id] != null && !state.refusalPins.has(+id);
+        const px = w && fixedWidthPin(w, fixedWidthPxOf(w), { userPinned });
         if (px == null) continue;
         state.pinnedSizes[id] = px;
         state.refusalPins.delete(+id);

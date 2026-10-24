@@ -18,6 +18,7 @@ import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "
 import { oobPinBlockReason, fullscreenExits, idsCachedOnSpaces, FS_EXIT_GRACE_MS } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 import { returnedOnscreen } from "./onscreen.js";
+import { acceptsBang, titlebarPress, isUserResize } from "./dragtarget.js";
 
 // Fixed-size floats dock into the float zone (floatzone.js) as soon as the
 // window list confirms them, and the tiles reflow once, right then.
@@ -703,7 +704,8 @@ export function start() {
     // If a drag bracket is open (between leftMouseDown and leftMouseUp), record
     // the moved id as the candidate and bail. The decision runs at bracket
     // close — see endDragBracket below. The LATEST mid-bracket bang wins as
-    // the candidate (drag-train's final position is what matters).
+    // the candidate (drag-train's final position is what matters), among
+    // the pressed window's bangs once the hit test has named it.
     if (state.dragInFlight) {
       // During a live edge drag only the dragged window can be the
       // candidate: a neighbor's bang (an app refusing a live write) must not
@@ -711,6 +713,10 @@ export function start() {
       const lr = state.liveResize;
       if (lr && +detail.id !== lr.id) {
         log(`DRAG-MID id=${detail.id} (${app}) ignored — live resize of ${lr.id}`);
+        return;
+      }
+      if (!acceptsBang(state.dragTarget, +detail.id)) {
+        log(`DRAG-MID id=${detail.id} (${app}) ignored — press was on ${state.dragTarget.id}`);
         return;
       }
       state.dragCandidateId = +detail.id;
@@ -752,45 +758,34 @@ export function start() {
 // the window back to its tile slot once the animation settles.
 //
 // Detection: two mouse-downs within DOUBLE_CLICK_MS at (nearly) the same
-// point, landing in the top TITLEBAR_BAND_PX of a window we actually tile
-// (union of lastTiledByDisplay — non-tiled/excluded windows keep native
-// zoom). For ZOOM_SUSPECT_MS afterwards, any oversized resize for that id
+// point whose hit test (sd.windows.at) lands on the title bar of a window we
+// actually tile (union of lastTiledByDisplay — non-tiled/excluded windows
+// keep native zoom). Controls in the bar count: see dragtarget.titlebarPress.
+// For ZOOM_SUSPECT_MS afterwards, any oversized resize for that id
 // schedules a snap-back retile instead of a pairwise pin.
 const DOUBLE_CLICK_MS = 400;
 const CLICK_SLOP_PX = 5;
-const TITLEBAR_BAND_PX = 40;
 const ZOOM_SUSPECT_MS = 1500;
 let lastDown = null;    // { x, y, ts } of the previous leftMouseDown
 let zoomSuspect = null; // { id, ts, downPos: {x, y} }
 const zoomSnapTimers = new Map(); // id -> { timer, retries }
 
-// Tiled window whose titlebar band contains the point, or null. Tiled
-// windows don't overlap, so first hit wins.
-function titlebarHit(x, y) {
-  for (const displayID in state.lastTiledByDisplay) {
-    const arr = state.lastTiledByDisplay[displayID];
-    if (!Array.isArray(arr)) continue;
-    for (const id of arr) {
-      const f = state.windowsById[+id]?.frame;
-      if (!f) continue;
-      if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + TITLEBAR_BAND_PX) {
-        return +id;
-      }
-    }
-  }
-  return null;
+function isTiled(id) {
+  return Object.values(state.lastTiledByDisplay || {})
+    .some(arr => Array.isArray(arr) && arr.includes(+id));
 }
 
-function trackTitlebarDoubleClick(payload) {
+// `hit` is the mouse-down's sd.windows.at answer; `ts` the mouse-down's own
+// time, since the answer lands a few ms after it.
+function trackTitlebarDoubleClick(payload, hit, ts) {
   if (!payload || payload.x == null || payload.y == null) return;
-  const now = Date.now();
-  const p = { x: payload.x, y: payload.y, ts: now };
-  if (lastDown && now - lastDown.ts <= DOUBLE_CLICK_MS &&
+  const p = { x: payload.x, y: payload.y, ts };
+  if (lastDown && ts - lastDown.ts <= DOUBLE_CLICK_MS &&
       Math.abs(p.x - lastDown.x) <= CLICK_SLOP_PX &&
       Math.abs(p.y - lastDown.y) <= CLICK_SLOP_PX) {
-    const id = titlebarHit(p.x, p.y);
+    const id = titlebarPress(hit, isTiled);
     if (id != null) {
-      zoomSuspect = { id, ts: now, downPos: { x: p.x, y: p.y } };
+      zoomSuspect = { id, ts, downPos: { x: p.x, y: p.y } };
       evt(`ZOOM-SUSPECT id=${id}`);
     }
   } else if (zoomSuspect &&
@@ -858,6 +853,7 @@ export function startDragBracket(payload) {
   if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null; }
   state.dragInFlight = true;
   state.dragCandidateId = null;
+  state.dragTarget = null;
   dragDownFrames = Object.create(null);
   for (const displayID in state.lastTiledByDisplay) {
     for (const id of state.lastTiledByDisplay[displayID] || []) {
@@ -865,7 +861,14 @@ export function startDragBracket(payload) {
       if (f) dragDownFrames[+id] = { ...f };
     }
   }
-  trackTitlebarDoubleClick(payload);
+  if (payload && payload.x != null && payload.y != null) {
+    const seq = bracketSeq;
+    const downAt = Date.now();
+    sd.windows.at(payload.x, payload.y).then((hit) => {
+      trackTitlebarDoubleClick(payload, hit, downAt);
+      if (seq === bracketSeq && state.dragInFlight) state.dragTarget = hit || null;
+    }, () => trackTitlebarDoubleClick(payload, null, downAt));
+  }
   armDragSafety();
 }
 
@@ -901,6 +904,7 @@ export function clearDragBracket() {
   if (dragCloseTimer) { clearTimeout(dragCloseTimer); dragCloseTimer = null; }
   state.dragInFlight = false;
   state.dragCandidateId = null;
+  state.dragTarget = null;
 }
 
 export function endDragBracket(payload) {
@@ -928,7 +932,9 @@ export function endDragBracket(payload) {
     if (lr && isLive(lr)) { await finishLiveResize("bracket-close"); return; }
     state.liveResize = null;
     const movedId = state.dragCandidateId;
+    const target = state.dragTarget;
     state.dragCandidateId = null;
+    state.dragTarget = null;
     state.dragInFlight = false;
     if (movedId == null) {
       // No bang fired between mouseDown and mouseUp+100ms → just a click,
@@ -983,7 +989,7 @@ export function endDragBracket(payload) {
     if (tgt && liveFrame) {
       const dW = Math.abs(liveFrame.w - tgt.w);
       const dH = Math.abs(liveFrame.h - tgt.h);
-      if (dW > 20 || dH > 20) {
+      if (isUserResize(target, dW, dH)) {
         // A click that exits fullscreen (the green button) opens and closes a
         // bracket around a screen-sized frame; that is no user resize.
         const blocked = fsTransitionBlockFor(displayForWindow(state.windowsById[movedId]));
@@ -995,7 +1001,7 @@ export function endDragBracket(payload) {
         return;
       }
     }
-    log(`DRAG-CLOSE id=${movedId} position-only → reorder`);
+    log(`DRAG-CLOSE id=${movedId} ${target?.region === "titlebar" ? "title bar drag" : "position-only"} → reorder`);
     reorderOnDrop(movedId);
   }, 100);
 }

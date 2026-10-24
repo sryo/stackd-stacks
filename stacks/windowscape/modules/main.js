@@ -39,9 +39,14 @@ async function init() {
     // strip (real window drags), where it detects titlebar double-clicks
     // (macOS zoom) vs a user drag-resize.
     if (onLeftClickEvent(payload)) return;
+    // A click stackd itself posted (sd.events.click) drags nothing.
+    if (payload?.synthetic) return;
     startDragBracket(payload);
   });
-  sd.events.on("dragMouseUp", (payload) => { endDragBracket(payload); });
+  sd.events.on("dragMouseUp", (payload) => {
+    if (payload?.synthetic) return;
+    endDragBracket(payload);
+  });
   // No mouseMoved eventtap: firing at ~120Hz it starved every other stack's
   // sd.mouse / sd.windows.all push. Snapshot-tile hover rides the 30Hz
   // sd.mouse channel instead (snapshots.js init).

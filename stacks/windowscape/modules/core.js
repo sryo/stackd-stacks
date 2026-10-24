@@ -136,6 +136,11 @@ export const state = {
   // this with the latest id so the trailing bang wins; the bracket's close
   // handler reads it to decide resize-redistribute vs reorder.
   dragCandidateId:    null,
+  // What sd.windows.at reported under the bracket's mouse-down ({ id,
+  // region, edges, ... }), once it answers; null before that, when the press
+  // landed on no app window, and for brackets with no mouse-down (gestures).
+  // While set, only that window's bangs can become dragCandidateId.
+  dragTarget:         null,
   // The live edge drag in progress (events.js "Live edge drag"): the dragged
   // window, its row frozen at drag start, and the neighbor frames written so
   // far. Null when no drag is live.

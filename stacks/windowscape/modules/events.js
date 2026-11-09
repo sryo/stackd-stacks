@@ -11,7 +11,7 @@ import {
 import { isTileable, floatReason, collapsedChanged, isRailShuffle } from "./tileable.js";
 import { tileWindows, pruneStaleWeights, getCollapsedWindows, getWindowWeight, isDocked } from "./tiler.js";
 import { floatsToDock, zoneCapable } from "./floatzone.js";
-import { PIN_MIN_PX, displaySetChanged, pairwisePins, realizedSize } from "./layouts.js";
+import { PIN_MIN_PX, displaySetChanged, pairwisePins, realizedSize, isUntiledDisplay, displayGeoSig, untiledRemoved } from "./layouts.js";
 import { updateLayout as updateSnapshotLayout } from "./snapshots.js";
 import { isAnimating, cancelAnimation } from "./animation.js";
 import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "./liveresize.js";
@@ -308,6 +308,7 @@ function armOobResizeTimer(id, entry) {
     const tileArea = tileFrameForDisplay(d);
     const fsExit = state.fsExitAt[d.uuid];
     const blocked = oobPinBlockReason({
+      displayUntiled: isUntiledDisplay(d),
       spaceIsFullscreen: !!state.spacesByDisplay[d.uuid]?.isFullscreen,
       msSinceFsExit: fsExit != null ? Date.now() - fsExit : null,
       liveMajor: horizontal ? live.w : live.h,
@@ -480,14 +481,31 @@ export function start() {
   // slow under load.
   let lastDisplayGeoSig = "";
   let displayChangedAt = 0;
+  let untiledRefresh = null;
   sd.display.all && sd.display.all.subscribe && sd.display.all.subscribe((d) => {
     if (!Array.isArray(d)) return;
+    const gone = untiledRemoved(state.displays, d);
     state.displays = d;
-    const sig = d.map(s => {
-      const f = s.frame || {}, vf = s.visibleFrame || {};
-      return `${s.displayID}|${f.x},${f.y},${f.w},${f.h}|${vf.x},${vf.y},${vf.w},${vf.h}`;
-    }).join("/");
-    if (sig === lastDisplayGeoSig) return; // brightness-only push, ignore
+    // Untiled displays (cfg.untiledDisplays) are left out of the signature:
+    // one coming or going lays out nothing new on the tiled displays.
+    const sig = displayGeoSig(d);
+    if (sig === lastDisplayGeoSig) {
+      // An untiled display left: macOS moved its windows onto another
+      // display's space, so the cached window→space lists are stale. Refresh
+      // them without a settle or a retile; the moved windows' own bangs and
+      // the next pass pick them up.
+      if (gone.length) {
+        evt(`UNTILED-GONE ${gone.map((x) => `${x.displayID}(${x.name})`).join(",")} → refresh spaces, no retile`);
+        if (untiledRefresh) clearTimeout(untiledRefresh);
+        untiledRefresh = setTimeout(async () => {
+          untiledRefresh = null;
+          state.windowSpacesCache = Object.create(null);
+          await refreshSpacesCache(Object.keys(state.windowsById).map(Number));
+          updateWindowOrder();
+        }, 250);
+      }
+      return; // brightness-only or untiled-only push
+    }
     // Boot (first push) has no stale frames to guard against.
     if (lastDisplayGeoSig !== "") {
       state.displaySettling = true;
@@ -731,6 +749,10 @@ export function start() {
       return;
     }
     const wd = displayForWindow(w);
+    if (wd && isUntiledDisplay(wd)) {
+      log(`DRAG-SKIP untiled-display id=${detail.id} (${app}) display=${wd.displayID}(${wd.name})`);
+      return;
+    }
     if (!wd || !tgt || !tgt.frame || !detail.frame) return;
     const horizontal = wd.frame.w > wd.frame.h;
     const dMajor = Math.abs(horizontal

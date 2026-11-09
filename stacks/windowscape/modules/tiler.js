@@ -11,7 +11,7 @@ import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal }
 import { dockNewFloats } from "./events.js";
 import { planFloatZone, zoneCapable } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { tileWeighted, specFromState, renormalizedPins, refusalFits, heldAboveTarget, innerSpanFor, pinHomeKey, pinsFromElsewhere, PIN_MIN_PX } from "./layouts.js";
+import { tileWeighted, specFromState, renormalizedPins, refusalFits, heldAboveTarget, innerSpanFor, pinHomeKey, pinsFromElsewhere, tiledDisplays, PIN_MIN_PX } from "./layouts.js";
 import { animatedSetFrame, cancelAllAnimations } from "./animation.js";
 import { pickRefusals, confirmRefusals, pinRefusals } from "./motion.js";
 import { adjustedFrameForDisplay } from "./snapshots.js";
@@ -134,7 +134,9 @@ function scheduleGraceRepass(deadline) {
 async function tileWindowsInternal(snap, reason) {
   let graceDeadline = Infinity;
   updateWindowOrder();
-  for (const d of state.displays) {
+  // state.displays keeps untiled displays so windows on them still resolve
+  // to their display; only the tiled ones get a pass.
+  for (const d of tiledDisplays(state.displays)) {
     const space = activeSpaceOnDisplay(d.uuid);
     if (space == null) continue;
     // Bail on fullscreen. Touching frames inside a fullscreen space pops

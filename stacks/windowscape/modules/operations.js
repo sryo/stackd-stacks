@@ -10,7 +10,7 @@ import {
 import { tileWindows } from "./tiler.js";
 import { crossDisplayDrop } from "./events.js";
 import { captureAndMinimize } from "./snapshot_create.js";
-import { cursorFollow, PIN_MIN_PX } from "./layouts.js";
+import { cursorFollow, adjacentDisplay, PIN_MIN_PX } from "./layouts.js";
 import { sortBySlot } from "./order.js";
 
 function focusedWinId() {
@@ -254,14 +254,8 @@ export async function moveWindowToAdjacentScreen(direction) {
   if (!w) return warn("no focused window for moveScreen");
   const d = displayForWindow(w);
   if (!d) return warn("no display for focused window");
-  if (state.displays.length < 2) return warn("only one display, cannot move");
-
-  const idx = state.displays.findIndex((s) => s.displayID === d.displayID);
-  if (idx < 0) return;
-  const targetIdx = direction === "next"
-    ? (idx + 1) % state.displays.length
-    : (idx - 1 + state.displays.length) % state.displays.length;
-  const target = state.displays[targetIdx];
+  const target = adjacentDisplay(state.displays, d, direction);
+  if (!target) return warn("no other tiled display, cannot move");
 
   const relX = (w.frame.x - d.frame.x) / d.frame.w;
   const relY = (w.frame.y - d.frame.y) / d.frame.h;

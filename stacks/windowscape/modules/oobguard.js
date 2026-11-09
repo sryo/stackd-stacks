@@ -25,7 +25,10 @@ export const FS_SIZE_FRACTION = 0.95;
 ///   liveMajor         — live frame size on the display's major axis
 ///   areaMajor         — tile area size on the same axis (0 = unknown)
 ///   tiledCount        — windows currently tiled on that display
-export function oobPinBlockReason({ spaceIsFullscreen, msSinceFsExit, liveMajor, areaMajor, tiledCount }) {
+///   displayUntiled    — the display matches cfg.untiledDisplays: nothing
+///                       there is tiled, so no resize there is a pin
+export function oobPinBlockReason({ spaceIsFullscreen, msSinceFsExit, liveMajor, areaMajor, tiledCount, displayUntiled }) {
+  if (displayUntiled) return "display-untiled";
   const fs = fsTransitionBlock({ spaceIsFullscreen, msSinceFsExit });
   if (fs) return fs;
   if (tiledCount >= 2 && areaMajor > 0 && liveMajor >= areaMajor * FS_SIZE_FRACTION) {

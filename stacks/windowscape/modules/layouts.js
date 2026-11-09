@@ -301,6 +301,47 @@ export function displaySetChanged(spacesByDisplay, displays) {
   return seen.length !== known.size || seen.some((uuid) => !known.has(uuid));
 }
 
+// True when display `d` matches a cfg.untiledDisplays rule ({ name }, exact
+// match on the name stackd reports).
+export function isUntiledDisplay(d, rules = cfg.untiledDisplays) {
+  if (!d || !Array.isArray(rules)) return false;
+  return rules.some((r) => r && r.name != null && d.name === r.name);
+}
+
+export function tiledDisplays(displays, rules = cfg.untiledDisplays) {
+  return Array.isArray(displays) ? displays.filter((d) => !isUntiledDisplay(d, rules)) : [];
+}
+
+// The display moveScreen sends a window to from `current`: the next or
+// previous tiled display, wrapping. `current` itself may be untiled (a window
+// leaving it lands on a tiled display). Null when there is nowhere to go.
+export function adjacentDisplay(displays, current, direction, rules = cfg.untiledDisplays) {
+  if (!current || !Array.isArray(displays)) return null;
+  const pool = displays.filter((d) => d.displayID === current.displayID || !isUntiledDisplay(d, rules));
+  const idx = pool.findIndex((d) => d.displayID === current.displayID);
+  if (idx < 0 || pool.length < 2) return null;
+  const n = pool.length;
+  const t = direction === "next" || direction === "forward" ? (idx + 1) % n : (idx - 1 + n) % n;
+  return pool[t];
+}
+
+// Geometry signature of the tiled displays: a push whose signature matches
+// the last one changed nothing a tile pass lays out (brightness only, or an
+// untiled display coming or going).
+export function displayGeoSig(displays, rules = cfg.untiledDisplays) {
+  return tiledDisplays(displays, rules).map((s) => {
+    const f = s.frame || {}, vf = s.visibleFrame || {};
+    return `${s.displayID}|${f.x},${f.y},${f.w},${f.h}|${vf.x},${vf.y},${vf.w},${vf.h}`;
+  }).join("/");
+}
+
+// Untiled displays in `prev` that are gone from `next`.
+export function untiledRemoved(prev, next, rules = cfg.untiledDisplays) {
+  if (!Array.isArray(prev)) return [];
+  const still = new Set((Array.isArray(next) ? next : []).map((d) => d.displayID));
+  return prev.filter((d) => isUntiledDisplay(d, rules) && !still.has(d.displayID));
+}
+
 // True when `area` differs from `last`, the area a display's previous tile
 // pass laid out (or there was none).
 export function areaChanged(last, area) {

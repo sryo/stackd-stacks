@@ -71,3 +71,11 @@ test("fsTransitionBlock: fullscreen space and exit grace block, anything else pa
   assert.equal(fsTransitionBlock({ spaceIsFullscreen: false, msSinceFsExit: FS_EXIT_GRACE_MS }), null);
   assert.equal(fsTransitionBlock({ spaceIsFullscreen: false, msSinceFsExit: null }), null);
 });
+
+test("untiled display (the loft) → blocked before any other check", () => {
+  assert.equal(oobPinBlockReason({ ...base, displayUntiled: true }), "display-untiled");
+  assert.equal(
+    oobPinBlockReason({ ...base, displayUntiled: true, spaceIsFullscreen: true }),
+    "display-untiled");
+  assert.equal(oobPinBlockReason({ ...base, displayUntiled: false }), null);
+});

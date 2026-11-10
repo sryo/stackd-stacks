@@ -33,6 +33,10 @@ export const cfg = {
   // on them are left alone. uuid and displayID change on every reconnect of
   // a virtual display, so match by name.
   untiledDisplays:       [{ name: "loft" }],
+  // While an untiled display is up, a new window on a tiled one waits this
+  // long before it tiles, so a window an agent opens at the browser's default
+  // spot and moves to the loft never reshuffles the user's display.
+  arrivalGraceMs:        400,
   debugLogging:          true,
   widthDefault:          1.0
 };

@@ -54,6 +54,8 @@ export const state = {
   // restart tiles a phantom slot for 1.5s and the layout visibly snaps
   // twice.
   everOnscreen:       new Set(),
+  // winIds holdArrivals keeps out of tile passes for now (events.js).
+  arrivalHeld:        new Set(),
   focusHistory:       [],
   focusHistoryMax:    10,
   listedApps:         Object.create(null), // bundleId/name -> true

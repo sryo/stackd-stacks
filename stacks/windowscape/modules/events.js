@@ -18,6 +18,7 @@ import { liveEdgeOf, neighborFor, dragBaselines, liveRow, changedWrites } from "
 import { oobPinBlockReason, fullscreenExits, idsCachedOnSpaces, FS_EXIT_GRACE_MS } from "./oobguard.js";
 import { onWindowDestroyed as fullscreenOnDestroyed } from "./fullscreen.js";
 import { returnedOnscreen } from "./onscreen.js";
+import { countedOn, holdArrivals } from "./arrival.js";
 import { acceptsBang, titlebarPress, isUserResize } from "./dragtarget.js";
 
 // Fixed-size floats dock into the float zone (floatzone.js) as soon as the
@@ -79,6 +80,13 @@ function calculateDropPosition(dropFrame, screenWindows, horizontal) {
 let eventDebounceTimer = null;
 let lastKnownIds = new Set();
 let lastKnownFrames = Object.create(null); // id -> { app, frame }
+// id -> ms the window was first seen after boot (holdArrivals). Windows of
+// the first all-push get no entry: they were there before the stack.
+const firstSeenAt = Object.create(null);
+let arrivalTimer = null;
+function noteArrival(id) {
+  if (firstSeenAt[id] == null) firstSeenAt[id] = Date.now();
+}
 
 // CGS-lag suppression + recreation stash. The daemon fires
 // sd.window.destroyed off the AX observer, then immediately rebuilds
@@ -182,16 +190,34 @@ async function handleWindowEvent() {
     // arrive in a later push must show up here as new, or that push
     // retiles nothing.
     if (!isManaged(w) || !isTileable(w, tileOpts(w))) continue;
-    const d = displayForWindow(w);
-    if (!d) continue;
+    // A window on an untiled display (the loft) is in no tile set.
+    if (!countedOn(displayForWindow(w))) continue;
     currentIds.add(+id);
     currentData[id] = { app: w.app, frame: { ...w.frame } };
   }
 
-  const newIds = [...currentIds].filter((id) => !lastKnownIds.has(id));
+  let newIds = [...currentIds].filter((id) => !lastKnownIds.has(id));
   const removedIds = [...lastKnownIds].filter((id) => !currentIds.has(id));
 
   const pairs = matchRecreationPairs(newIds, removedIds, currentData);
+
+  // A fresh window on a tiled display while a loft is up may be an agent's,
+  // about to move there: it stays out of currentIds (so it is new again on
+  // the recheck) and out of tile passes until the grace ends.
+  const pairedIds = new Set(pairs.map((p) => p.nid));
+  const untiledUp = state.displays.some((d) => !countedOn(d));
+  const { held, recheckAt } = holdArrivals(newIds.filter((id) => !pairedIds.has(id)), {
+    firstSeenAt, now: Date.now(), graceMs: cfg.arrivalGraceMs, untiledUp,
+  });
+  for (const id of held) currentIds.delete(id);
+  newIds = newIds.filter((id) => !held.includes(id));
+  state.arrivalHeld = new Set(held);
+  if (arrivalTimer) { clearTimeout(arrivalTimer); arrivalTimer = null; }
+  if (recheckAt != null) {
+    evt(`ARRIVAL-HOLD ${held.join(",")} until +${recheckAt - Date.now()}ms`);
+    arrivalTimer = setTimeout(() => { arrivalTimer = null; debouncedHandleWindowEvent(); },
+      Math.max(0, recheckAt - Date.now()));
+  }
 
   lastKnownIds = currentIds;
   lastKnownFrames = currentData;
@@ -371,6 +397,7 @@ export function start() {
       // can keep reporting them for a beat after AX fires destroy.
       if (destroyedRecently.has(w.id)) continue;
       next[w.id] = w;
+      if (state.windowsPushAt && !state.windowsById[w.id]) noteArrival(w.id);
       // Feed the tiler's boot-phantom gate: only windows seen onscreen at
       // least once earn the offscreen-flicker grace.
       if (w.onscreen !== false) state.everOnscreen.add(+w.id);
@@ -403,6 +430,9 @@ export function start() {
     }
     for (const id of state.everOnscreen) {
       if (!next[id]) state.everOnscreen.delete(id);
+    }
+    for (const id in firstSeenAt) {
+      if (!next[id]) delete firstSeenAt[id];
     }
   });
 
@@ -604,6 +634,7 @@ export function start() {
     if (detail && detail.id != null && detail.frame) {
       const id = +detail.id;
       destroyedRecently.delete(id);
+      noteArrival(id);
       const w = state.windowsById[id] || (state.windowsById[id] = { id });
       w.pid   = detail.pid;
       w.app   = detail.app;

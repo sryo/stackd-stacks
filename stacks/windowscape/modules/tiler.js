@@ -159,6 +159,8 @@ async function tileWindowsInternal(snap, reason) {
       // must not start the offscreen grace below (that would schedule a
       // pointless grace-expiry pass after every minimize).
       if (state.minimizedIds.has(+id) || w.isMinimized === true) continue;
+      // Just appeared while a loft is up; may be on its way there.
+      if (state.arrivalHeld.has(+id)) continue;
       // Debounced onscreen check. kCGWindowIsOnscreen flickers false when
       // a window is momentarily OCCLUDED (e.g. a new sibling spawns on top
       // of it) — an instant check dropped freshly-tiled windows for one

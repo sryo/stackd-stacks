@@ -302,10 +302,12 @@ export function displaySetChanged(spacesByDisplay, displays) {
 }
 
 // True when display `d` matches a cfg.untiledDisplays rule ({ name }, exact
-// match on the name stackd reports).
+// match on the name stackd reports). macOS numbers displays that share a name
+// ("loft (1)", "loft (2)"), so that suffix is dropped before comparing.
 export function isUntiledDisplay(d, rules = cfg.untiledDisplays) {
-  if (!d || !Array.isArray(rules)) return false;
-  return rules.some((r) => r && r.name != null && d.name === r.name);
+  if (!d || !Array.isArray(rules) || typeof d.name !== "string") return false;
+  const base = d.name.replace(/ \(\d+\)$/, "");
+  return rules.some((r) => r && r.name != null && (d.name === r.name || base === r.name));
 }
 
 export function tiledDisplays(displays, rules = cfg.untiledDisplays) {

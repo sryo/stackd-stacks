@@ -27,7 +27,8 @@ export const cfg = {
   // Off: minimize goes to the Dock as usual and no strip space is reserved.
   minimizeRail:          false,
   // Displays windowscape never tiles, matched by the name stackd reports
-  // (NSScreen.localizedName): no tile passes, no moveScreen target, and
+  // (NSScreen.localizedName, ignoring the " (2)" macOS adds when several
+  // share a name): no tile passes, no moveScreen target, and
   // their arrival or departure doesn't retile the other displays. Windows
   // on them are left alone. uuid and displayID change on every reconnect of
   // a virtual display, so match by name.

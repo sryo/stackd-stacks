@@ -38,6 +38,15 @@ test("isUntiledDisplay matches the display name exactly", () => {
   assert.equal(isUntiledDisplay(builtin, rules), false);
 });
 
+test("isUntiledDisplay matches the numbered names macOS gives same-named displays", () => {
+  // Live: two lofts up at once show as "loft (1)" and "loft (2)".
+  assert.equal(isUntiledDisplay({ ...loft, name: "loft (1)" }, rules), true);
+  assert.equal(isUntiledDisplay({ ...loft, name: "loft (12)" }, rules), true);
+  assert.equal(isUntiledDisplay({ ...loft, name: "loft ()" }, rules), false);
+  assert.equal(isUntiledDisplay({ ...loft, name: "loft (x)" }, rules), false);
+  assert.equal(isUntiledDisplay({ ...loft, name: "Loft (1)" }, rules), false);
+});
+
 test("isUntiledDisplay tolerates missing rules, names and displays", () => {
   assert.equal(isUntiledDisplay(loft, []), false);
   assert.equal(isUntiledDisplay(loft, null), false);

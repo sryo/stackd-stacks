@@ -5,7 +5,8 @@
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
 import {
-  state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log, warn
+  state, displayForWindow, activeSpaceOnDisplay, getCurrentSpace, log, warn,
+  forgetFixedWidths
 } from "./core.js";
 import { tileWindows } from "./tiler.js";
 import { crossDisplayDrop } from "./events.js";
@@ -66,6 +67,7 @@ export function resetAllWeights() {
   state.pinnedSizes = Object.create(null);
   state.refusalPins = new Set();
   state.appMins = Object.create(null);   // escape hatch: forget learned app mins
+  forgetFixedWidths();                   // and learned fixed widths
   if (state.onLayoutChange) state.onLayoutChange();
   tileWindows();
 }

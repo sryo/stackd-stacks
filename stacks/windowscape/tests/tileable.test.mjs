@@ -6,7 +6,7 @@
 // button but tiles fine above its minimum width.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { floatReason, isTileable, nextOverride, refusedGrowth, fixedWidthPin, isPanelRefusal, collapsedChanged, isRailShuffle, heldAbove } from "../modules/tileable.js";
+import { floatReason, isTileable, nextOverride, refusedGrowth, fixedWidthPin, outgrewFixedWidth, isPanelRefusal, collapsedChanged, isRailShuffle, heldAbove } from "../modules/tileable.js";
 
 const doc        = { id: 1, isStandard: true, isResizable: true,  canFullscreen: true };
 const calculator = { id: 2, isStandard: true, isResizable: false, canFullscreen: false };
@@ -46,6 +46,18 @@ test("a user's own pin on a window outranks its app's learned fixed width", () =
   assert.equal(fixedWidthPin(settings, 1400, { userPinned: true }), null);
   assert.equal(fixedWidthPin(settings, 1400, { userPinned: false }), 1400, "unpinned: seeded at the learned width");
   assert.equal(fixedWidthPin(settings, 1400), 1400, "no pin info: seeded as before");
+});
+
+test("a window wider than its app's learned fixed width shows the app is not fixed-width", () => {
+  // Arc was learned at 376 from a small popup; its main window, also without
+  // a fullscreen button, holds 470 and wider.
+  assert.equal(outgrewFixedWidth(settings, 376, { w: 470 }, 20), true);
+  assert.equal(outgrewFixedWidth(settings, 865, { w: 865 }, 20), false, "at the learned width");
+  assert.equal(outgrewFixedWidth(settings, 865, { w: 880 }, 20), false, "within tolerance");
+  assert.equal(outgrewFixedWidth(settings, 1400, { w: 900 }, 20), false, "narrower: the learned width may be a maximum");
+  assert.equal(outgrewFixedWidth(doc, 376, { w: 1200 }, 20), false, "fullscreen-capable windows are never seeded");
+  assert.equal(outgrewFixedWidth(settings, undefined, { w: 900 }, 20), false, "app not learned");
+  assert.equal(outgrewFixedWidth(settings, 376, null, 20), false, "no frame yet");
 });
 
 test("traits not read yet → not tiled yet", () => {

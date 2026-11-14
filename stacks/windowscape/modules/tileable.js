@@ -68,6 +68,13 @@ export function fixedWidthPin(w, learnedPx, { userPinned = false } = {}) {
   return learnedPx;
 }
 
+// A window holding more than `px` above the width its app was learned fixed
+// at. Neither a fixed nor a maximum width can be exceeded, so the app was
+// learned from a different kind of window (a popup) and is not fixed-width.
+export function outgrewFixedWidth(w, learnedPx, live, px) {
+  return w.canFullscreen === false && learnedPx > 0 && !!live && live.w - learnedPx > px;
+}
+
 // A window whose app collapsed or expanded it (a Stickies note going to or
 // from the rail) since its last tile. Only the height changes, so a
 // major-axis drift check on a landscape display never sees it.

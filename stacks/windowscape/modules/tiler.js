@@ -6,8 +6,8 @@
 
 import { sd } from "sd://runtime/api.js";
 import { cfg } from "./config.js";
-import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor, tileOpts, learnFixedWidth, learnPanelApp, fixedWidthPxOf, isFloating } from "./core.js";
-import { isTileable, floatReason, refusedGrowth, fixedWidthPin, isPanelRefusal } from "./tileable.js";
+import { state, updateWindowOrder, activeSpaceOnDisplay, log, evt, displayForWindow, appMinFor, learnAppMin, fsTransitionBlockFor, tileOpts, learnFixedWidth, forgetFixedWidth, learnPanelApp, fixedWidthPxOf, isFloating } from "./core.js";
+import { isTileable, floatReason, refusedGrowth, fixedWidthPin, outgrewFixedWidth, isPanelRefusal } from "./tileable.js";
 import { dockNewFloats } from "./events.js";
 import { planFloatZone, zoneCapable } from "./floatzone.js";
 import { captureAndMinimize } from "./snapshot_create.js";
@@ -296,8 +296,15 @@ async function tileWindowsInternal(snap, reason) {
     if (horizontal) {
       for (const id of nonCollapsed) {
         const w = state.windowsById[id];
+        if (!w) continue;
+        const learned = fixedWidthPxOf(w);
+        if (outgrewFixedWidth(w, learned, w.frame, 20)) {
+          evt(`FIXED-WIDTH-FORGET ${id} (${(w.app || "?").slice(0, 18)}) learned=${learned} live=${w.frame.w}`);
+          forgetFixedWidth(w);
+          continue;
+        }
         const userPinned = state.pinnedSizes[id] != null && !state.refusalPins.has(+id);
-        const px = w && fixedWidthPin(w, fixedWidthPxOf(w), { userPinned });
+        const px = fixedWidthPin(w, learned, { userPinned });
         if (px == null) continue;
         state.pinnedSizes[id] = px;
         state.refusalPins.delete(+id);

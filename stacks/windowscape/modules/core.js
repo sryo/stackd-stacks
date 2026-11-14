@@ -323,6 +323,18 @@ export async function learnFixedWidth(w, px) {
   await sd.settings.set("fixedWidthApps", state.fixedWidthApps);
 }
 
+export async function forgetFixedWidth(w) {
+  const k = appKeyOfWindow(w);
+  if (state.fixedWidthApps[k] == null) return;
+  delete state.fixedWidthApps[k];
+  await sd.settings.set("fixedWidthApps", state.fixedWidthApps);
+}
+
+export async function forgetFixedWidths() {
+  state.fixedWidthApps = Object.create(null);
+  await sd.settings.set("fixedWidthApps", state.fixedWidthApps);
+}
+
 export function isAppIncluded(win) {
   if (!win) return false;
   // Snapshotted/minimized windows aren't tiled.

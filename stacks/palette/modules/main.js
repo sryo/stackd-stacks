@@ -8,7 +8,7 @@
 // stack.
 import { sd } from "sd://runtime/api.js";
 import { rank } from "./matcher.js";
-import { createGeneration, digitPicksRow, clampToScreen, stackItems } from "./logic.js";
+import { createGeneration, digitPicksRow, clampToScreen, displayAt, stackItems } from "./logic.js";
 import { recents } from "./recents.js";
 import {
   SELF, appsSource, menuItemsSource, installedSource, calcSource,
@@ -194,9 +194,14 @@ function moveClamped(x, y, sf) {
   const p = clampToScreen(x, y, window.innerWidth, window.innerHeight, sf, MARGIN);
   return sd.window.setFrame(p);
 }
+// The cursor and its display, read on demand: the palette is hidden most of
+// the time, so it asks once per open instead of following every move.
+async function cursorAndDisplay() {
+  const m = (await sd.cursor.position()) || { x: 0, y: 0 };
+  return { m, scr: displayAt(sd.display.all.peek(), m) };
+}
 async function placePanel() {
-  const m = await sd.mouse.first();
-  const scr = m.display || (sd.display.all.peek() || [])[0] || null;
+  const { m, scr } = await cursorAndDisplay();
   await moveClamped(m.x - LEFT_BOX_W / 2, m.y - Y_OFFSET, scr ? scr.frame : null);
 }
 
@@ -207,8 +212,7 @@ async function placePanel() {
 // breathing room than regular ones (~24px), and the panel never collides
 // with the bar regardless of display.
 async function placePanelUnderBar() {
-  const m = await sd.mouse.first();
-  const scr = m.display || (sd.display.all.peek() || [])[0] || null;
+  const { m, scr } = await cursorAndDisplay();
   const sf = scr ? scr.frame : null;
   const vf = scr ? scr.visibleFrame : null;
   const barH = (sf && vf) ? Math.max(0, vf.y - sf.y) : 24;

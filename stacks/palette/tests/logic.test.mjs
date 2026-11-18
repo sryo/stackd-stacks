@@ -2,7 +2,7 @@
 // no DOM, so they run under plain `node --test tests/`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { titleRuns, createGeneration, mapLimit, digitPicksRow, clampToScreen, stackItems } from "../modules/logic.js";
+import { titleRuns, createGeneration, mapLimit, digitPicksRow, clampToScreen, displayAt, stackItems } from "../modules/logic.js";
 
 test("titleRuns: merges adjacent matched chars into bold runs", () => {
   assert.deepEqual(titleRuns("Safari", [0, 1, 4]), [
@@ -116,6 +116,26 @@ test("clampToScreen: respects a non-origin display frame", () => {
 
 test("clampToScreen: no screen frame leaves the point untouched", () => {
   assert.deepEqual(clampToScreen(-5, -5, 800, 470, null, 8), { x: -5, y: -5 });
+});
+
+const DISPLAYS = [
+  { displayID: 1, frame: { x: 0, y: 0, w: 1440, h: 900 } },
+  { displayID: 2, frame: { x: 1440, y: -200, w: 1920, h: 1080 } },
+];
+
+test("displayAt: picks the display whose frame holds the point", () => {
+  assert.equal(displayAt(DISPLAYS, { x: 10, y: 10 }).displayID, 1);
+  assert.equal(displayAt(DISPLAYS, { x: 1440, y: -200 }).displayID, 2);
+  assert.equal(displayAt(DISPLAYS, { x: 1439, y: 899 }).displayID, 1);
+});
+
+test("displayAt: a point on no display falls back to the first one", () => {
+  assert.equal(displayAt(DISPLAYS, { x: -500, y: 5000 }).displayID, 1);
+});
+
+test("displayAt: no displays yields null", () => {
+  assert.equal(displayAt([], { x: 0, y: 0 }), null);
+  assert.equal(displayAt(null, { x: 0, y: 0 }), null);
 });
 
 test("stackItems: disable rows for loaded stacks, enable rows for parked ones", () => {

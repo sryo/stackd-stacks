@@ -71,6 +71,16 @@ export function clampToScreen(x, y, w, h, sf, margin) {
   return { x: Math.max(x, sf.x + margin), y: Math.max(y, sf.y + margin) };
 }
 
+// The display from sd.display.all whose frame holds point `p`, the first
+// one when none does (a cursor read mid-display-change), null with no
+// displays.
+export function displayAt(displays, p) {
+  const list = displays || [];
+  const hit = list.find(({ frame: f }) =>
+    f && p.x >= f.x && p.x < f.x + f.w && p.y >= f.y && p.y < f.y + f.h);
+  return hit || list[0] || null;
+}
+
 // Palette rows for stack management, from sd.stacks.list(): "Disable stack"
 // for every loaded stack except the palette itself (it would vanish
 // mid-command), "Enable stack" for every parked one. Hidden until the user
